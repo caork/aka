@@ -13,6 +13,9 @@ pub struct HitOut {
     pub id: String,
     pub name: String,
     pub label: String,
+    /// 切块类型（ast-function / char …），命中来自 chunk 时携带。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub file: String,
     pub line: u32,
     pub score: f32,
@@ -26,6 +29,7 @@ impl From<SearchHit> for HitOut {
             id: h.node_id,
             name: h.name,
             label: h.label,
+            kind: h.kind,
             file: h.file_path,
             line: h.start_line,
             score: (h.score * 1000.0).round() / 1000.0,

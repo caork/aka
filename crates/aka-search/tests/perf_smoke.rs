@@ -7,7 +7,7 @@
 use std::time::Instant;
 
 use aka_core::types::ChunkRec;
-use aka_search::SearchIndex;
+use aka_search::{SearchIndex, SearchIndexWriter};
 
 const VERBS: [&str; 12] = [
     "run", "build", "parse", "load", "fetch", "merge", "rank", "cache", "resolve", "emit",
@@ -53,9 +53,11 @@ fn run_perf(n_chunks: usize, n_queries: usize) {
     let dir = tempfile::tempdir().unwrap();
 
     let t0 = Instant::now();
-    let mut index = SearchIndex::create(dir.path()).unwrap();
-    index.add_chunks(synth_chunks(n_chunks)).unwrap();
-    index.commit().unwrap();
+    let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+    writer.add_chunks(synth_chunks(n_chunks)).unwrap();
+    writer.commit().unwrap();
+    drop(writer);
+    let index = SearchIndex::open(dir.path()).unwrap();
     let index_elapsed = t0.elapsed();
     println!(
         "indexed {n_chunks} chunks in {:.2?} ({:.0} docs/s)",

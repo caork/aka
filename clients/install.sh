@@ -15,7 +15,7 @@
 #   claude-code : 默认 `claude mcp add aka`(user scope); 加 --plugin 则走插件方式
 #                 (marketplace add 本仓库 + plugin install aka@aka, 含 skill)
 #   codex       : 追加 [mcp_servers.aka] 到 ~/.codex/config.toml
-#   opencode    : 合并 mcp.aka 进 ~/.config/opencode/opencode.json (需要 jq)
+#   opencode    : 合并 mcp.aka 进 ~/.config/opencode/opencode.json (需要 jq) + 装使用策略 skill
 
 set -euo pipefail
 
@@ -143,19 +143,45 @@ install_codex() {
 }
 
 # ---------- opencode ----------
+# 使用策略 skill: OpenCode 原生支持 SKILL.md(2026-06 核实, 也兼容 ~/.claude/skills/)。
+# 全局装到 ~/.config/opencode/skills/aka-code-graph/; 幂等, 已存在则跳过。
+install_opencode_skill() {
+  local src="${SCRIPT_DIR}/opencode/skills/aka-code-graph"
+  local dst="${HOME}/.config/opencode/skills/aka-code-graph"
+  [ -f "${src}/SKILL.md" ] || { warn "未找到 ${src}/SKILL.md，跳过 skill 安装。"; return; }
+  if [ -f "${dst}/SKILL.md" ]; then
+    info "skill 已存在: ${dst}，跳过。(也可改用 AGENTS-aka.md, 见 ${SCRIPT_DIR}/opencode/README.md)"
+    return
+  fi
+  if [ -f "${HOME}/.claude/skills/aka-code-graph/SKILL.md" ]; then
+    info "检测到 ~/.claude/skills/aka-code-graph(OpenCode 会自动识别), 跳过重复安装。"
+    return
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "[dry-run] 将拷贝 ${src} -> ${dst}"
+    return
+  fi
+  mkdir -p "$(dirname "$dst")"
+  cp -R "$src" "$dst"
+  info "已安装使用策略 skill: ${dst}"
+}
+
 install_opencode() {
   local cfg="${HOME}/.config/opencode/opencode.json"
   if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1 && [ "$(jq -r '.mcp.aka // empty | type' "$cfg" 2>/dev/null)" = "object" ]; then
     info "${cfg} 已有 mcp.aka，跳过。"
+    install_opencode_skill
     return
   fi
   if ! command -v jq >/dev/null 2>&1; then
     warn "未安装 jq，无法安全合并 JSON。请手动把下面片段合并进 ${cfg}:"
     printf '{\n  "mcp": {\n    "aka": { "type": "local", "command": ["%s", "mcp"], "enabled": true }\n  }\n}\n' "${BIN}"
+    install_opencode_skill
     return
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
     info "[dry-run] 将向 ${cfg} 合并 mcp.aka = {type:local, command:[${BIN}, mcp], enabled:true}"
+    install_opencode_skill
     return
   fi
   mkdir -p "$(dirname "$cfg")"
@@ -166,6 +192,7 @@ install_opencode() {
   jq --arg bin "$BIN" '.mcp.aka = {type: "local", command: [$bin, "mcp"], enabled: true}' "$cfg" > "$tmp"
   mv "$tmp" "$cfg"
   info "完成。验证: 启动 opencode，会话里让它调用 aka 的 list_repos。"
+  install_opencode_skill
 }
 
 case "$CLIENT" in

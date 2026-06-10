@@ -61,6 +61,7 @@ impl MockBackend {
             node_id: node.id.to_string(),
             name: node.name.to_string(),
             label: node.label.to_string(),
+            kind: None,
             file_path: node.file.to_string(),
             start_line: node.line,
             score,

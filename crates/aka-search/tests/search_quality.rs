@@ -1,7 +1,7 @@
 //! 检索质量测试：手造 ~20 个 chunk + 若干 node，验证召回与排序。
 
 use aka_core::types::{ChunkRec, NodeRec};
-use aka_search::SearchIndex;
+use aka_search::{SearchIndex, SearchIndexWriter};
 
 fn chunk(node_id: &str, file: &str, text: &str) -> ChunkRec {
     ChunkRec {
@@ -136,9 +136,9 @@ fn sample_chunks() -> Vec<ChunkRec> {
 }
 
 fn build_index(dir: &std::path::Path) -> SearchIndex {
-    let mut index = SearchIndex::create(dir).unwrap();
-    index.add_chunks(sample_chunks().into_iter()).unwrap();
-    index
+    let mut writer = SearchIndexWriter::create(dir).unwrap();
+    // 摄取顺序与真实管线一致：节点先于 chunk（chunk 文档要携带节点真实 label）。
+    writer
         .add_nodes(
             vec![
                 node(
@@ -158,8 +158,10 @@ fn build_index(dir: &std::path::Path) -> SearchIndex {
             .into_iter(),
         )
         .unwrap();
-    index.commit().unwrap();
-    index
+    writer.add_chunks(sample_chunks().into_iter()).unwrap();
+    writer.commit().unwrap();
+    drop(writer); // 释放写锁，模拟 analyze 结束
+    SearchIndex::open(dir).unwrap()
 }
 
 #[test]
@@ -178,6 +180,83 @@ fn pipeline_repo_recalls_and_ranks_first() {
     assert_eq!(hits[0].name, "runPipelineFromRepo");
     assert!(hits[0].snippet.is_some());
     assert_eq!(hits[0].file_path, "src/pipeline.rs");
+    // label 必须是节点真实 label（不被 chunk kind 污染）；kind 保留切块类型。
+    assert_eq!(hits[0].label, "Function");
+    assert_eq!(hits[0].kind.as_deref(), Some("function"));
+}
+
+#[test]
+fn chunk_label_carries_node_label_with_kind_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+    writer
+        .add_nodes(
+            vec![node(
+                "const:emitArtifacts",
+                "Const",
+                "emitArtifacts",
+                "src/emit.ts",
+            )]
+            .into_iter(),
+        )
+        .unwrap();
+    writer
+        .add_chunks(
+            vec![
+                // 有所属节点：label = 节点真实 label，kind = 切块类型。
+                ChunkRec {
+                    node_id: "const:emitArtifacts".to_owned(),
+                    kind: "char".to_owned(),
+                    file_path: "src/emit.ts".to_owned(),
+                    start_line: 1,
+                    end_line: 3,
+                    text: "const emitArtifacts = quixotic_marker_alpha".to_owned(),
+                },
+                // 孤儿 chunk（找不到所属节点）：label 回落 chunk kind。
+                ChunkRec {
+                    node_id: "ghost:orphanChunk".to_owned(),
+                    kind: "ast-declaration".to_owned(),
+                    file_path: "src/ghost.ts".to_owned(),
+                    start_line: 9,
+                    end_line: 12,
+                    text: "let orphan = quixotic_marker_beta".to_owned(),
+                },
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    drop(writer);
+
+    let index = SearchIndex::open(dir.path()).unwrap();
+    let hits = index.search("quixotic marker alpha", 5).unwrap();
+    let hit = hits.iter().find(|h| h.node_id == "const:emitArtifacts").unwrap();
+    assert_eq!(hit.label, "Const", "chunk 命中必须携带节点真实 label，而非 chunk kind");
+    assert_eq!(hit.kind.as_deref(), Some("char"), "切块类型保留在 kind 字段");
+
+    let hits = index.search("quixotic marker beta", 5).unwrap();
+    let hit = hits.iter().find(|h| h.node_id == "ghost:orphanChunk").unwrap();
+    assert_eq!(hit.label, "ast-declaration", "孤儿 chunk 的 label 回落 chunk kind");
+    assert_eq!(hit.kind.as_deref(), Some("ast-declaration"));
+}
+
+#[test]
+fn node_and_chunk_double_hit_merges_into_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = build_index(dir.path());
+    // "knowledge graph" 同时命中 class:KnowledgeGraph 的 node 文档与 chunk 文档。
+    let hits = index.search("knowledge graph", 10).unwrap();
+    let dup: Vec<&str> = hits
+        .iter()
+        .filter(|h| h.node_id == "class:KnowledgeGraph")
+        .map(|h| h.node_id.as_str())
+        .collect();
+    assert_eq!(dup.len(), 1, "同一符号 id 的 node/chunk 双命中必须合并成一条");
+    let merged = hits.iter().find(|h| h.node_id == "class:KnowledgeGraph").unwrap();
+    // 合并保留双方信息：node 侧 name/label + chunk 侧 snippet/kind。
+    assert_eq!(merged.name, "KnowledgeGraph");
+    assert_eq!(merged.label, "Class");
+    assert!(merged.snippet.is_some());
 }
 
 #[test]
@@ -231,12 +310,13 @@ fn reopen_then_search_and_append() {
         let index = build_index(dir.path());
         drop(index);
     }
-    let mut index = SearchIndex::open(dir.path()).unwrap();
+    let index = SearchIndex::open(dir.path()).unwrap();
     let hits = index.search("pipeline repo", 10).unwrap();
     assert_eq!(hits[0].node_id, "fn:runPipelineFromRepo");
 
-    // 增量追加后新文档可检索。
-    index
+    // 增量追加（writer 重开）后新文档对 reload 过的读句柄可检索。
+    let mut writer = SearchIndexWriter::open(dir.path()).unwrap();
+    writer
         .add_chunks(
             std::iter::once(chunk(
                 "fn:freshlyAddedSymbol",
@@ -245,9 +325,46 @@ fn reopen_then_search_and_append() {
             )),
         )
         .unwrap();
-    index.commit().unwrap();
+    writer.commit().unwrap();
+    drop(writer);
+    index.reload().unwrap();
     let hits = index.search("zanzibar quokka", 5).unwrap();
     assert_eq!(hits[0].node_id, "fn:freshlyAddedSymbol");
+}
+
+/// 缺陷回归：读路径不得持有 tantivy 写锁。
+/// 旧实现里 `SearchIndex::open` 无条件创建 `IndexWriter`，第二个读句柄
+/// （如 serve 运行时再起 mcp 进程）必报 `LockBusy`。
+#[test]
+fn concurrent_readers_do_not_hold_write_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let reader_a = build_index(dir.path());
+
+    // 两个只读句柄并存（模拟 serve + mcp 两个进程同时打开）。
+    let reader_b = SearchIndex::open(dir.path()).expect("第二个只读句柄不应撞写锁");
+    assert_eq!(reader_a.search("pipeline repo", 5).unwrap()[0].node_id, "fn:runPipelineFromRepo");
+    assert_eq!(reader_b.search("pipeline repo", 5).unwrap()[0].node_id, "fn:runPipelineFromRepo");
+
+    // 读句柄开着的同时，写句柄仍可取锁写入（serve 后台导入/更新场景）。
+    let mut writer = SearchIndexWriter::open(dir.path()).expect("读句柄不应阻塞写锁");
+    writer
+        .add_chunks(std::iter::once(chunk(
+            "fn:hotAppended",
+            "src/hot.rs",
+            "fn hotAppended() { xylophone_wombat() }",
+        )))
+        .unwrap();
+    writer.commit().unwrap();
+    drop(writer); // 写锁释放后……
+
+    // ……新写句柄可立刻再取锁（无常驻持锁者）。
+    drop(SearchIndexWriter::open(dir.path()).expect("写锁应已释放"));
+
+    // 旧读句柄 reload 后能看到写入。
+    reader_a.reload().unwrap();
+    reader_b.reload().unwrap();
+    assert_eq!(reader_a.search("xylophone wombat", 5).unwrap()[0].node_id, "fn:hotAppended");
+    assert_eq!(reader_b.search("xylophone wombat", 5).unwrap()[0].node_id, "fn:hotAppended");
 }
 
 #[test]

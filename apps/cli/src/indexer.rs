@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use aka_core::{ArtifactDir, RepoPaths};
 use aka_graph::{compute_layout, Adjacency, GraphStore};
-use aka_search::SearchIndex;
+use aka_search::SearchIndexWriter;
 
 pub struct IndexSummary {
     pub nodes: u64,
@@ -56,13 +56,19 @@ pub fn index_artifact(artifact: &ArtifactDir, paths: &RepoPaths) -> Result<Index
         std::fs::remove_dir_all(&search_dir)?;
     }
     std::fs::create_dir_all(&search_dir)?;
-    let mut search = SearchIndex::create(&search_dir)?;
-    search.add_nodes(artifact.nodes()?.filter_map(|r| r.ok()))?;
-    let mut chunk_count = 0u64;
-    if let Some(chunks) = artifact.chunks()? {
-        search.add_chunks(chunks.filter_map(|r| r.ok()).inspect(|_| chunk_count += 1))?;
-    }
-    search.commit()?;
+    // 写句柄持 tantivy 目录写锁，限定作用域：commit 后立即 drop 释放，
+    // 不阻塞其他进程（serve / mcp）的只读查询打开。
+    let chunk_count = {
+        let mut search = SearchIndexWriter::create(&search_dir)?;
+        // 节点先于 chunk 摄取：chunk 文档要携带所属节点的真实 label。
+        search.add_nodes(artifact.nodes()?.filter_map(|r| r.ok()))?;
+        let mut chunk_count = 0u64;
+        if let Some(chunks) = artifact.chunks()? {
+            search.add_chunks(chunks.filter_map(|r| r.ok()).inspect(|_| chunk_count += 1))?;
+        }
+        search.commit()?;
+        chunk_count
+    };
 
     Ok(IndexSummary {
         nodes: stats_nodes.nodes,

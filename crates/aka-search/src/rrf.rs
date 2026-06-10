@@ -80,6 +80,7 @@ mod tests {
             name: node_id.to_owned(),
             file_path: format!("src/{node_id}.rs"),
             label: "Function".to_owned(),
+            kind: None,
             snippet: None,
             start_line: 1,
         }

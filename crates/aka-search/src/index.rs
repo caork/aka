@@ -1,4 +1,8 @@
-//! BM25 全文索引 — tantivy 实现，schema 与查询策略见 [`SearchIndex`]。
+//! BM25 全文索引 — tantivy 实现。
+//!
+//! 读写分离：[`SearchIndex`] 是**只读**查询句柄（只持 `Index` + reader，不取
+//! tantivy 写锁，多进程可并发打开）；[`SearchIndexWriter`] 才持有 `IndexWriter`
+//! （目录级独占锁），仅在 analyze / ingest 期间短暂存活，drop 即释放锁。
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -46,8 +50,12 @@ pub struct Hit {
     pub name: String,
     /// 文件路径。
     pub file_path: String,
-    /// 节点 label（nodes 文档）或 chunk kind（chunks 文档）。
+    /// 节点真实 label（Function / Class / Const …）。chunk 文档入索引时携带
+    /// 所属节点的 label，仅当 ingest 会话查不到所属节点时回落 chunk kind。
     pub label: String,
+    /// 切块类型（ast-function / ast-declaration / char …）；纯 node 命中为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// 命中片段（HTML，命中词用 `<b>` 包裹）；text 为空或无命中词时为 `None`。
     pub snippet: Option<String>,
     /// 起始行号（未知时为 0）。
@@ -62,23 +70,40 @@ struct Fields {
     text: Field,
     file_path: Field,
     label: Field,
+    /// 切块类型字段；旧版索引（schema 无 `kind`）打开时为 `None`。
+    kind: Option<Field>,
     start_line: Field,
     end_line: Field,
 }
 
-/// BM25 全文索引。
+/// BM25 全文索引的**只读**查询句柄。
 ///
 /// schema：`node_id`(STRING stored) / `name`(TEXT code-tokenizer，查询权重 x3) /
 /// `text`(TEXT code-tokenizer，存储截断 2KB 供 snippet) / `file_path`(TEXT 按
-/// `/` `.` 等拆分) / `label`(STRING stored) / `start_line` `end_line`(u64 stored)。
+/// `/` `.` 等拆分) / `label`(STRING stored) / `kind`(STRING stored，chunk 切块类型) /
+/// `start_line` `end_line`(u64 stored)。
+///
+/// 只持 `Index` + `IndexReader`，**不取 tantivy 写锁**——任意多个进程可同时打开
+/// 同一目录做查询（serve 与 mcp 并存）。写入走 [`SearchIndexWriter`]。
+pub struct SearchIndex {
+    index: Index,
+    reader: IndexReader,
+    fields: Fields,
+}
+
+/// BM25 全文索引的写入句柄（持目录级独占写锁，ingest 用完即 drop 释放）。
 ///
 /// 写入端基于 tantivy 原生段合并，增量友好：多次 `add_*` + [`commit`](Self::commit)
 /// 即可追加；重新 [`open`](Self::open) 后继续写入。
-pub struct SearchIndex {
-    index: Index,
+///
+/// [`add_nodes`](Self::add_nodes) 会在会话内记录 node_id → label 映射，供随后的
+/// [`add_chunks`](Self::add_chunks) 给 chunk 文档盖上所属节点的真实 label——
+/// 因此 ingest 必须**先 add_nodes 再 add_chunks**（工件管线本就如此）。
+pub struct SearchIndexWriter {
     writer: IndexWriter<TantivyDocument>,
-    reader: IndexReader,
     fields: Fields,
+    /// ingest 会话内的 node_id → label 映射（节点先于 chunk 摄取）。
+    node_labels: HashMap<String, String>,
 }
 
 fn build_schema() -> Schema {
@@ -110,9 +135,25 @@ fn build_schema() -> Schema {
             .set_stored(),
     );
     builder.add_text_field("label", STRING | STORED);
+    builder.add_text_field("kind", STRING | STORED);
     builder.add_u64_field("start_line", STORED);
     builder.add_u64_field("end_line", STORED);
     builder.build()
+}
+
+/// 从（可能是旧版本的）schema 解析字段句柄；`kind` 字段缺失时容忍为 `None`。
+fn resolve_fields(schema: &Schema) -> Fields {
+    let field = |name: &str| schema.get_field(name).expect("schema field exists");
+    Fields {
+        node_id: field("node_id"),
+        name: field("name"),
+        text: field("text"),
+        file_path: field("file_path"),
+        label: field("label"),
+        kind: schema.get_field("kind").ok(),
+        start_line: field("start_line"),
+        end_line: field("end_line"),
+    }
 }
 
 fn register_tokenizers(index: &Index) {
@@ -128,7 +169,7 @@ fn register_tokenizers(index: &Index) {
     );
 }
 
-impl SearchIndex {
+impl SearchIndexWriter {
     /// 在 `dir` 下新建索引（目录不存在会创建；已有索引则报错）。
     pub fn create(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
@@ -136,7 +177,10 @@ impl SearchIndex {
         Self::finish_open(index)
     }
 
-    /// 打开 `dir` 下既有索引。
+    /// 打开 `dir` 下既有索引继续追加写入。
+    ///
+    /// 注意：node_id → label 映射只在会话内有效，追加 chunk 时若其节点是
+    /// 此前会话写入的，label 回落 chunk kind。
     pub fn open(dir: &Path) -> Result<Self> {
         let index = Index::open_in_dir(dir)?;
         Self::finish_open(index)
@@ -144,31 +188,17 @@ impl SearchIndex {
 
     fn finish_open(index: Index) -> Result<Self> {
         register_tokenizers(&index);
-        let schema = index.schema();
-        let field = |name: &str| schema.get_field(name).expect("schema field exists");
-        let fields = Fields {
-            node_id: field("node_id"),
-            name: field("name"),
-            text: field("text"),
-            file_path: field("file_path"),
-            label: field("label"),
-            start_line: field("start_line"),
-            end_line: field("end_line"),
-        };
+        let fields = resolve_fields(&index.schema());
         let writer = index.writer_with_num_threads(WRITER_THREADS, WRITER_MEM_BUDGET)?;
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()?;
         Ok(Self {
-            index,
             writer,
-            reader,
             fields,
+            node_labels: HashMap::new(),
         })
     }
 
-    /// 索引图谱节点：用 `name` / `filePath` / `label` 建文档（`text` 留空）。
+    /// 索引图谱节点：用 `name` / `filePath` / `label` 建文档（`text` 留空），
+    /// 并记录 node_id → label 供 [`add_chunks`](Self::add_chunks) 查询。
     ///
     /// 写入后需调用 [`commit`](Self::commit) 才对检索可见。
     pub fn add_nodes(&mut self, nodes: impl Iterator<Item = NodeRec>) -> Result<()> {
@@ -189,12 +219,16 @@ impl SearchIndex {
             if let Some(line) = node.end_line_1based() {
                 doc.add_u64(self.fields.end_line, u64::from(line));
             }
+            self.node_labels
+                .insert(node.id.clone(), node.label.clone());
             self.writer.add_document(doc)?;
         }
         Ok(())
     }
 
-    /// 索引代码切块：`text` = chunk 正文（截断到 2KB），`label` = chunk kind。
+    /// 索引代码切块：`text` = chunk 正文（截断到 2KB），`label` = 所属节点的
+    /// 真实 label（本会话 [`add_nodes`](Self::add_nodes) 记录的映射；查不到时
+    /// 回落 chunk kind），`kind` = chunk kind（切块策略：ast-function / char …）。
     ///
     /// 写入后需调用 [`commit`](Self::commit) 才对检索可见。
     pub fn add_chunks(&mut self, chunks: impl Iterator<Item = ChunkRec>) -> Result<()> {
@@ -203,7 +237,15 @@ impl SearchIndex {
             doc.add_text(self.fields.node_id, &chunk.node_id);
             doc.add_text(self.fields.text, truncate_utf8(&chunk.text, TEXT_STORE_LIMIT));
             doc.add_text(self.fields.file_path, &chunk.file_path);
-            doc.add_text(self.fields.label, &chunk.kind);
+            let label = self
+                .node_labels
+                .get(&chunk.node_id)
+                .map(String::as_str)
+                .unwrap_or(&chunk.kind);
+            doc.add_text(self.fields.label, label);
+            if let Some(kind) = self.fields.kind {
+                doc.add_text(kind, &chunk.kind);
+            }
             doc.add_u64(self.fields.start_line, u64::from(chunk.start_line_1based()));
             doc.add_u64(self.fields.end_line, u64::from(chunk.end_line_1based()));
             self.writer.add_document(doc)?;
@@ -211,9 +253,32 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// 提交写入并刷新 reader（tantivy 后台自动做段合并）。
+    /// 提交写入（tantivy 后台自动做段合并）。写锁在 `self` drop 时释放。
     pub fn commit(&mut self) -> Result<()> {
         self.writer.commit()?;
+        Ok(())
+    }
+}
+
+impl SearchIndex {
+    /// 以只读方式打开 `dir` 下既有索引（不取写锁，可与写入端/其他读取端并存）。
+    pub fn open(dir: &Path) -> Result<Self> {
+        let index = Index::open_in_dir(dir)?;
+        register_tokenizers(&index);
+        let fields = resolve_fields(&index.schema());
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()?;
+        Ok(Self {
+            index,
+            reader,
+            fields,
+        })
+    }
+
+    /// 重新加载 reader，使打开之后其他句柄提交的写入对检索可见。
+    pub fn reload(&self) -> Result<()> {
         self.reader.reload()?;
         Ok(())
     }
@@ -325,6 +390,7 @@ impl SearchIndex {
             name: str_field(doc, self.fields.name).unwrap_or_default(),
             file_path: str_field(doc, self.fields.file_path).unwrap_or_default(),
             label: str_field(doc, self.fields.label).unwrap_or_default(),
+            kind: self.fields.kind.and_then(|f| str_field(doc, f)),
             snippet: make_snippet(doc, snippets),
             start_line: u64_field(doc, self.fields.start_line).unwrap_or(0) as u32,
         }
@@ -346,6 +412,9 @@ impl SearchIndex {
             if let Some(label) = str_field(doc, self.fields.label) {
                 hit.label = label;
             }
+        }
+        if hit.kind.is_none() {
+            hit.kind = self.fields.kind.and_then(|f| str_field(doc, f));
         }
         if hit.snippet.is_none() {
             hit.snippet = make_snippet(doc, snippets);

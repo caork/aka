@@ -17,6 +17,9 @@ pub struct SearchHit {
     pub name: String,
     /// 节点类型（Function / Class / Method / File …），对应图谱 label。
     pub label: String,
+    /// 切块类型（ast-function / char …）；命中来自 chunk 文档时携带（合同只增不改）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub file_path: String,
     pub start_line: u32,
     pub score: f32,

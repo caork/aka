@@ -27,7 +27,7 @@ clients/install.sh --client opencode             # 需要 jq
 
 - [claude-code/](./claude-code/) — 完整插件（MCP server + `aka-code-graph` skill），可 `claude plugin marketplace add` 本仓库后 `claude plugin install aka@aka`
 - [codex/](./codex/) — TOML 片段 + `codex mcp add` 用法
-- [opencode/](./opencode/) — JSON 片段 + 合并说明
+- [opencode/](./opencode/) — JSON 片段 + 使用策略（原生 skill 推荐，AGENTS-aka.md 备选），发布包 `aka-opencode-<ver>.zip` 即此目录
 
 ## 通用前置
 

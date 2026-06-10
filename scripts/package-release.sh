@@ -7,6 +7,7 @@
 #
 # 产物（主流程）:
 #   dist/aka-claude-code-plugin-<ver>.zip   clients/claude-code/ 插件包
+#   dist/aka-opencode-<ver>.zip             clients/opencode/ 客户端包（MCP 片段 + skill + AGENTS 版指令）
 #   dist/aka-clients-<ver>.tar.gz           整个 clients/ 目录
 #   dist/aka-<ver>-<host-triple>.tar.gz     strip 后的 release 二进制（tar 内单文件 aka）
 #
@@ -24,7 +25,7 @@ SKIP_BUILD=0
 CHECKSUMS_ONLY=0
 
 usage() {
-  sed -n '2,16p' "${BASH_SOURCE[0]}"
+  sed -n '2,17p' "${BASH_SOURCE[0]}"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -84,7 +85,24 @@ for entry in ".claude-plugin/plugin.json" ".mcp.json" "skills/aka-code-graph/SKI
   fi
 done
 
-# ---------- 2. 整个 clients/ tar.gz ----------
+# ---------- 2. opencode 客户端 zip ----------
+OPENCODE_ZIP="${DIST_DIR}/aka-opencode-${VERSION}.zip"
+rm -f "${OPENCODE_ZIP}"
+(
+  cd "${REPO_ROOT}/clients/opencode"
+  zip -r -X -q "${OPENCODE_ZIP}" . -x "*.DS_Store" -x "*/.DS_Store" -x "._*" -x "*/._*"
+)
+echo "==> ${OPENCODE_ZIP}"
+
+# 自检: opencode 包关键文件必须在包里
+opencode_listing="$(unzip -l "${OPENCODE_ZIP}")"
+for entry in "README.md" "opencode.json.snippet" "AGENTS-aka.md" "skills/aka-code-graph/SKILL.md"; do
+  if ! grep -qF " ${entry}" <<< "${opencode_listing}"; then
+    echo "error: opencode 包缺少 ${entry}" >&2; exit 1
+  fi
+done
+
+# ---------- 3. 整个 clients/ tar.gz ----------
 CLIENTS_TAR="${DIST_DIR}/aka-clients-${VERSION}.tar.gz"
 rm -f "${CLIENTS_TAR}"
 COPYFILE_DISABLE=1 tar -czf "${CLIENTS_TAR}" \
@@ -92,7 +110,7 @@ COPYFILE_DISABLE=1 tar -czf "${CLIENTS_TAR}" \
   -C "${REPO_ROOT}" clients
 echo "==> ${CLIENTS_TAR}"
 
-# ---------- 3. 本机 release 二进制 tar.gz ----------
+# ---------- 4. 本机 release 二进制 tar.gz ----------
 case "$(uname -m)" in
   arm64|aarch64) ARCH="aarch64" ;;
   x86_64)        ARCH="x86_64" ;;
@@ -123,4 +141,4 @@ echo "==> ${BIN_TAR}"
 
 echo
 echo "==> 完成。校验和请最后单独跑: scripts/package-release.sh --checksums-only"
-ls -lh "${PLUGIN_ZIP}" "${CLIENTS_TAR}" "${BIN_TAR}"
+ls -lh "${PLUGIN_ZIP}" "${OPENCODE_ZIP}" "${CLIENTS_TAR}" "${BIN_TAR}"
