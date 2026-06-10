@@ -1,0 +1,19 @@
+[package]
+name = "aka-desktop"
+version = "0.1.0"
+description = "aka — code omniscience engine, desktop shell"
+authors = ["aka"]
+edition = "2021"
+publish = false
+
+[lib]
+name = "aka_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
