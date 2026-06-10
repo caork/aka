@@ -10,6 +10,21 @@ use serde::{Deserialize, Serialize};
 use crate::paths::aka_home;
 use crate::types::ArtifactStats;
 
+/// 渲染节点数的架构硬上限 — WebGL 渲染器实测 50 万节点 60fps，这是设计红线。
+/// 所有入口（HTTP lod 参数、per-repo 设置写入）都必须 clamp 到这个上限。
+pub const MAX_RENDER_NODES: u32 = 500_000;
+
+/// 渲染节点预算下限（防把预览图清空的无意义小值）。
+pub const MIN_RENDER_NODES: u32 = 1_000;
+
+/// 未做 per-repo 设置时的默认渲染节点预算。
+pub const DEFAULT_RENDER_MAX_NODES: u32 = 50_000;
+
+/// 把渲染节点预算 clamp 到 `MIN_RENDER_NODES..=MAX_RENDER_NODES`。
+pub fn clamp_render_nodes(n: u32) -> u32 {
+    n.clamp(MIN_RENDER_NODES, MAX_RENDER_NODES)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoEntry {
@@ -32,6 +47,10 @@ pub struct RepoEntry {
     /// git 来源的 clone URL（local / zip 为 None）。
     #[serde(default)]
     pub source_url: Option<String>,
+    /// 预览渲染节点预算；None = 用默认 [`DEFAULT_RENDER_MAX_NODES`]。
+    /// 写入时必须 clamp 到 `MIN_RENDER_NODES..=MAX_RENDER_NODES`。
+    #[serde(default)]
+    pub render_max_nodes: Option<u32>,
 }
 
 fn default_source_kind() -> String {
@@ -165,6 +184,7 @@ mod tests {
             embeddings_enabled: false,
             source_kind: "git".into(),
             source_url: Some("https://example.com/demo.git".into()),
+            render_max_nodes: Some(120_000),
         });
         reg.save_to(&path).unwrap();
 
@@ -172,6 +192,7 @@ mod tests {
         assert_eq!(reg2.repos.len(), 1);
         assert!(!reg2.repos[0].embeddings_enabled, "embedding 默认必须是关");
         assert_eq!(reg2.repos[0].source_kind, "git");
+        assert_eq!(reg2.repos[0].render_max_nodes, Some(120_000));
 
         reg2.upsert(RepoEntry {
             name: "demo2".into(),
@@ -183,6 +204,7 @@ mod tests {
             embeddings_enabled: false,
             source_kind: "local".into(),
             source_url: None,
+            render_max_nodes: None,
         });
         assert_eq!(reg2.repos.len(), 1, "同路径 upsert 不新增");
         assert_eq!(reg2.repos[0].name, "demo2");
@@ -202,5 +224,20 @@ mod tests {
         assert_eq!(reg.repos.len(), 1);
         assert_eq!(reg.repos[0].source_kind, "local");
         assert_eq!(reg.repos[0].source_url, None);
+        assert_eq!(
+            reg.repos[0].render_max_nodes, None,
+            "旧 registry.json 无 renderMaxNodes 字段必须回落 None"
+        );
+    }
+
+    #[test]
+    fn clamp_render_nodes_bounds() {
+        assert_eq!(clamp_render_nodes(0), MIN_RENDER_NODES);
+        assert_eq!(clamp_render_nodes(999), MIN_RENDER_NODES);
+        assert_eq!(clamp_render_nodes(1_000), 1_000);
+        assert_eq!(clamp_render_nodes(50_000), 50_000);
+        assert_eq!(clamp_render_nodes(MAX_RENDER_NODES), MAX_RENDER_NODES);
+        assert_eq!(clamp_render_nodes(MAX_RENDER_NODES + 1), MAX_RENDER_NODES);
+        assert_eq!(clamp_render_nodes(u32::MAX), MAX_RENDER_NODES);
     }
 }

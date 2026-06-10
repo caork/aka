@@ -18,10 +18,15 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use aka_core::{aka_home, Registry, RepoEntry, RepoPaths};
+use aka_core::{
+    aka_home, clamp_render_nodes, Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
+};
 use aka_graph::{Adjacency, GraphStore, NodeRow};
-use aka_mcp::{Backend, RepoInfo, SearchHit, SymbolRef};
+use aka_mcp::{Backend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef};
 use aka_search::SearchIndex;
+
+/// `/api/source` 单次最多返回的行数。
+const MAX_SOURCE_LINES: usize = 2000;
 
 const DEFINITION_LABELS: &[&str] = &[
     "Function",
@@ -231,6 +236,99 @@ fn flatten_single_top_dir(dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 读取 `repo_root` 内 `rel` 文件的 1-based 含端行切片（`/api/source` 合同）。
+///
+/// - 安全：拒绝绝对路径；canonicalize 后必须仍位于 repo_root 内
+///   （`..` 穿越与软链接逃逸都挡）。错误文案带 "invalid" → HTTP 400。
+/// - 二进制（含 `\0`）/ 非 UTF-8 文件 → "invalid file" → 400。
+/// - 文件不存在 → "file not found" → 404。
+/// - start/end 缺省 = 整个文件；越界自动 clamp；单次最多
+///   [`MAX_SOURCE_LINES`] 行，超出置 `truncated = true`。
+fn read_source_slice(
+    repo_root: &Path,
+    rel: &str,
+    start: Option<u32>,
+    end: Option<u32>,
+) -> Result<serde_json::Value> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        bail!("invalid path (must be repo-relative): {rel}");
+    }
+    let root = repo_root
+        .canonicalize()
+        .with_context(|| format!("repo path not found: {}", repo_root.display()))?;
+    let abs = match root.join(rel_path).canonicalize() {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!("file not found in repo: {rel}")
+        }
+        Err(e) => return Err(anyhow!("resolve {rel}: {e}")),
+    };
+    // canonicalize 已解析软链接：仍须落在 repo 根目录内。
+    if !abs.starts_with(&root) {
+        bail!("invalid path (escapes repo root): {rel}");
+    }
+    if !abs.is_file() {
+        bail!("file not found (not a regular file): {rel}");
+    }
+    let bytes =
+        std::fs::read(&abs).with_context(|| format!("read source file {}", abs.display()))?;
+    if bytes.contains(&0) {
+        bail!("invalid file (binary content, contains NUL byte): {rel}");
+    }
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        bail!("invalid file (not valid UTF-8 text): {rel}");
+    };
+
+    let all: Vec<&str> = text.lines().collect();
+    let total = all.len();
+    // 1-based 含端切片；越界自动 clamp。空文件返回 start=1/end=0/lines=[]。
+    let (s, mut e) = if total == 0 {
+        (1usize, 0usize)
+    } else {
+        let s = (start.unwrap_or(1).max(1) as usize).min(total);
+        let e = (end.map(|v| v as usize).unwrap_or(total)).clamp(s, total);
+        (s, e)
+    };
+    let mut truncated = false;
+    if e >= s && e - s + 1 > MAX_SOURCE_LINES {
+        e = s + MAX_SOURCE_LINES - 1;
+        truncated = true;
+    }
+    let lines: Vec<&str> = if total == 0 { Vec::new() } else { all[s - 1..e].to_vec() };
+
+    Ok(serde_json::json!({
+        "path": rel,
+        "abs_path": abs.to_string_lossy(),
+        "total_lines": total,
+        "start": s,
+        "end": e,
+        "lines": lines,
+        "truncated": truncated,
+    }))
+}
+
+/// `/api/file/symbols` 合同：`rows`（已按 start_line 升序）滤掉无行号节点
+/// （File / Folder / Community 等聚合节点，源码里没有可点位置），映射成
+/// `{path, symbols: [{id, name, label, file, line, end_line}]}`。
+fn file_symbols_json(path: &str, rows: &[NodeRow]) -> serde_json::Value {
+    let symbols: Vec<serde_json::Value> = rows
+        .iter()
+        .filter(|r| r.start_line.is_some())
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "name": r.name.clone().unwrap_or_default(),
+                "label": r.label,
+                "file": r.file_path.clone().unwrap_or_else(|| path.to_string()),
+                "line": r.start_line.unwrap_or(0),
+                "end_line": r.end_line.or(r.start_line).unwrap_or(0),
+            })
+        })
+        .collect();
+    serde_json::json!({ "path": path, "symbols": symbols })
+}
+
 /// analyze 落注册表后补 name / source 字段（register() 只继承已有条目，
 /// 新导入的 git/zip 仓库要在这里盖上来源）。
 fn finalize_entry(repo_path: &Path, name: &str, kind: &str, url: Option<String>) -> Result<()> {
@@ -408,6 +506,7 @@ impl Backend for AkaBackend {
                     source_kind: r.source_kind.clone(),
                     source_url: r.source_url.clone(),
                     detail,
+                    render_max_nodes: r.render_max_nodes,
                 }
             })
             .collect();
@@ -429,6 +528,7 @@ impl Backend for AkaBackend {
                 source_kind: job.kind.clone(),
                 source_url: job.url.clone(),
                 detail: job.detail.clone(),
+                render_max_nodes: None,
             });
         }
         Ok(out)
@@ -533,11 +633,22 @@ impl Backend for AkaBackend {
         })
     }
 
-    fn graph_lod(&self, repo: &str, max_nodes: usize) -> Result<serde_json::Value> {
+    fn graph_lod(&self, repo: &str, max_nodes: Option<usize>) -> Result<serde_json::Value> {
+        // 缺省 → per-repo render_max_nodes 设置 → 默认 50_000；一律 clamp 到硬上限。
+        let requested = match max_nodes {
+            Some(n) => u32::try_from(n).unwrap_or(u32::MAX),
+            None => Registry::load()?
+                .repos
+                .iter()
+                .find(|r| r.name == repo || r.repo_path.to_string_lossy() == repo)
+                .and_then(|r| r.render_max_nodes)
+                .unwrap_or(DEFAULT_RENDER_MAX_NODES),
+        };
+        let budget = clamp_render_nodes(requested) as usize;
         let handles = self.targets(Some(repo))?;
         let handle = handles.first().context("repo handle")?;
         let store = handle.store.lock().expect("store lock");
-        let lod = store.lod_snapshot(max_nodes)?;
+        let lod = store.lod_snapshot(budget)?;
         Ok(serde_json::to_value(lod)?)
     }
 
@@ -773,14 +884,34 @@ impl Backend for AkaBackend {
         Ok(())
     }
 
-    fn set_repo_settings(&self, name: &str, embeddings_enabled: bool) -> Result<()> {
+    fn set_repo_settings(&self, name: &str, settings: RepoSettingsUpdate) -> Result<()> {
         let mut registry = Registry::load()?;
         let Some(entry) = registry.find_by_name_mut(name) else {
             bail!("repo not registered: {name}");
         };
-        entry.embeddings_enabled = embeddings_enabled;
+        entry.embeddings_enabled = settings.embeddings_enabled;
+        // None = 恢复默认；Some 一律 clamp 到硬上限（HTTP 面已 clamp，这里兜底）。
+        entry.render_max_nodes = settings.render_max_nodes.map(clamp_render_nodes);
         registry.save()?;
         Ok(())
+    }
+
+    fn read_source(
+        &self,
+        repo: &str,
+        path: &str,
+        start: Option<u32>,
+        end: Option<u32>,
+    ) -> Result<serde_json::Value> {
+        let registry = Registry::load()?;
+        let Some(entry) = registry
+            .repos
+            .iter()
+            .find(|r| r.name == repo || r.repo_path.to_string_lossy() == repo)
+        else {
+            bail!("repo not registered: {repo}");
+        };
+        read_source_slice(&entry.repo_path, path, start, end)
     }
 
     fn node_detail(&self, repo: &str, id: &str) -> Result<serde_json::Value> {
@@ -829,6 +960,16 @@ impl Backend for AkaBackend {
         }))
     }
 
+    fn file_symbols(&self, repo: &str, path: &str) -> Result<serde_json::Value> {
+        let handles = self.targets(Some(repo))?;
+        let handle = handles.first().context("repo handle")?;
+        let rows = {
+            let store = handle.store.lock().expect("store lock");
+            store.nodes_in_file(path)?
+        };
+        Ok(file_symbols_json(path, &rows))
+    }
+
     fn ego_graph(
         &self,
         repo: &str,
@@ -850,5 +991,169 @@ impl Backend for AkaBackend {
             .iter()
             .map(|(name, job)| (name.clone(), (job.status.clone(), job.detail.clone())))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每个测试用独立临时仓库目录，互不串扰。
+    fn temp_repo(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aka-source-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn node_row(id: &str, label: &str, name: &str, line: Option<u32>, end: Option<u32>) -> NodeRow {
+        NodeRow {
+            rowid: 0,
+            id: id.to_string(),
+            label: label.to_string(),
+            name: Some(name.to_string()),
+            file_path: Some("src/x.ts".to_string()),
+            start_line: line,
+            end_line: end,
+            props: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn file_symbols_contract_shape_and_filtering() {
+        // nodes_in_file 已按 start_line 升序返回（NULL 排最前）。
+        let rows = vec![
+            node_row("File:src/x.ts", "File", "x.ts", None, None), // 无行号 → 滤掉
+            node_row("Fn:src/x.ts:alpha", "Function", "alpha", Some(3), Some(9)),
+            node_row("Class:src/x.ts:Beta", "Class", "Beta", Some(12), None), // end 缺省 → 回退 line
+            node_row("Fn:src/x.ts:gamma", "Function", "gamma", Some(50), Some(54)),
+        ];
+        let v = file_symbols_json("src/x.ts", &rows);
+        assert_eq!(v["path"], "src/x.ts");
+        let symbols = v["symbols"].as_array().unwrap();
+        assert_eq!(symbols.len(), 3, "File 节点（无行号）必须被滤掉");
+        // line 升序 + 合同字段一字不差。
+        let lines: Vec<u64> = symbols.iter().map(|s| s["line"].as_u64().unwrap()).collect();
+        assert_eq!(lines, [3, 12, 50]);
+        assert_eq!(symbols[0]["id"], "Fn:src/x.ts:alpha");
+        assert_eq!(symbols[0]["name"], "alpha");
+        assert_eq!(symbols[0]["label"], "Function");
+        assert_eq!(symbols[0]["file"], "src/x.ts");
+        assert_eq!(symbols[0]["end_line"], 9);
+        assert_eq!(symbols[1]["end_line"], 12, "end_line 缺失时回退 start_line");
+
+        // 文件没有符号（或只剩无行号节点）→ 空数组而非缺字段。
+        let v = file_symbols_json("src/empty.ts", &[]);
+        assert_eq!(v["path"], "src/empty.ts");
+        assert!(v["symbols"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn source_slice_basic_and_clamp() {
+        let repo = temp_repo("basic");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let body: String = (1..=10).map(|i| format!("line{i}\n")).collect();
+        std::fs::write(repo.join("src/a.ts"), body).unwrap();
+
+        // 整文件（缺省 start/end）。
+        let v = read_source_slice(&repo, "src/a.ts", None, None).unwrap();
+        assert_eq!(v["path"], "src/a.ts");
+        assert_eq!(v["total_lines"], 10);
+        assert_eq!(v["start"], 1);
+        assert_eq!(v["end"], 10);
+        assert_eq!(v["lines"].as_array().unwrap().len(), 10);
+        assert_eq!(v["lines"][0], "line1");
+        assert_eq!(v["truncated"], false);
+        assert!(v["abs_path"].as_str().unwrap().ends_with("src/a.ts"));
+
+        // 1-based 含端切片。
+        let v = read_source_slice(&repo, "src/a.ts", Some(3), Some(5)).unwrap();
+        assert_eq!(v["start"], 3);
+        assert_eq!(v["end"], 5);
+        let lines: Vec<&str> = v["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect();
+        assert_eq!(lines, ["line3", "line4", "line5"]);
+
+        // 越界自动 clamp：start=0 → 1；end=999 → 10；start>total → 最后一行。
+        let v = read_source_slice(&repo, "src/a.ts", Some(0), Some(999)).unwrap();
+        assert_eq!(v["start"], 1);
+        assert_eq!(v["end"], 10);
+        let v = read_source_slice(&repo, "src/a.ts", Some(42), None).unwrap();
+        assert_eq!(v["start"], 10);
+        assert_eq!(v["end"], 10);
+        assert_eq!(v["lines"][0], "line10");
+    }
+
+    #[test]
+    fn source_slice_truncates_at_2000_lines() {
+        let repo = temp_repo("trunc");
+        let body: String = (1..=2300).map(|i| format!("l{i}\n")).collect();
+        std::fs::write(repo.join("big.txt"), body).unwrap();
+
+        let v = read_source_slice(&repo, "big.txt", None, None).unwrap();
+        assert_eq!(v["total_lines"], 2300);
+        assert_eq!(v["start"], 1);
+        assert_eq!(v["end"], 2000);
+        assert_eq!(v["lines"].as_array().unwrap().len(), 2000);
+        assert_eq!(v["truncated"], true);
+
+        // 显式范围 ≤ 2000 行不截断。
+        let v = read_source_slice(&repo, "big.txt", Some(100), Some(2099)).unwrap();
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["lines"].as_array().unwrap().len(), 2000);
+    }
+
+    #[test]
+    fn source_slice_rejects_traversal_and_absolute() {
+        let repo = temp_repo("traverse");
+        std::fs::write(repo.join("ok.txt"), "hi\n").unwrap();
+        // 仓库外目标文件（../ 穿越能拿到的位置）。
+        std::fs::write(repo.parent().unwrap().join("aka-source-test-outside.txt"), "secret").unwrap();
+
+        let err = read_source_slice(&repo, "../aka-source-test-outside.txt", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid path"), "应拒绝 ../ 穿越: {err}");
+
+        let err = read_source_slice(&repo, "/etc/hosts", None, None).unwrap_err().to_string();
+        assert!(err.contains("invalid path"), "应拒绝绝对路径: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_slice_rejects_symlink_escape() {
+        let repo = temp_repo("symlink");
+        let outside = std::env::temp_dir().join(format!(
+            "aka-source-test-symlink-target-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&outside, "secret\n").unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join("sneaky.txt")).unwrap();
+
+        let err = read_source_slice(&repo, "sneaky.txt", None, None).unwrap_err().to_string();
+        assert!(err.contains("invalid path"), "软链接逃逸必须被挡: {err}");
+    }
+
+    #[test]
+    fn source_slice_missing_file_and_binary() {
+        let repo = temp_repo("misc");
+        let err = read_source_slice(&repo, "nope.rs", None, None).unwrap_err().to_string();
+        assert!(err.contains("file not found"), "缺文件要 not found 语义: {err}");
+
+        std::fs::write(repo.join("bin.dat"), b"abc\0def").unwrap();
+        let err = read_source_slice(&repo, "bin.dat", None, None).unwrap_err().to_string();
+        assert!(err.contains("invalid file"), "二进制要 invalid 语义: {err}");
+
+        std::fs::write(repo.join("bad.txt"), [0xFFu8, 0xFE, 0x41]).unwrap();
+        let err = read_source_slice(&repo, "bad.txt", None, None).unwrap_err().to_string();
+        assert!(err.contains("invalid file"), "非 UTF-8 要 invalid 语义: {err}");
+
+        // 空文件：total 0 / start 1 / end 0 / lines []。
+        std::fs::write(repo.join("empty.txt"), "").unwrap();
+        let v = read_source_slice(&repo, "empty.txt", None, None).unwrap();
+        assert_eq!(v["total_lines"], 0);
+        assert_eq!(v["start"], 1);
+        assert_eq!(v["end"], 0);
+        assert!(v["lines"].as_array().unwrap().is_empty());
+        assert_eq!(v["truncated"], false);
     }
 }

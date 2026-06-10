@@ -162,8 +162,9 @@ fn basic_queries() {
     assert_eq!(main.label, "Function");
     assert_eq!(main.name.as_deref(), Some("main"));
     assert_eq!(main.file_path.as_deref(), Some("src/main.rs"));
-    assert_eq!(main.start_line, Some(1));
-    assert_eq!(main.end_line, Some(5));
+    /* 工件 startLine=1（0-based）→ 存储为 1-based 的 2 */
+    assert_eq!(main.start_line, Some(2));
+    assert_eq!(main.end_line, Some(6));
     assert_eq!(main.props["name"], "main");
     assert!(store.node_by_id("nope").unwrap().is_none());
 

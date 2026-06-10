@@ -182,10 +182,11 @@ impl SearchIndex {
                 doc.add_text(self.fields.file_path, fp);
             }
             doc.add_text(self.fields.label, &node.label);
-            if let Some(line) = node.start_line() {
+            /* 行号统一存 1-based（工件是 tree-sitter 0-based row） */
+            if let Some(line) = node.start_line_1based() {
                 doc.add_u64(self.fields.start_line, u64::from(line));
             }
-            if let Some(line) = node.end_line() {
+            if let Some(line) = node.end_line_1based() {
                 doc.add_u64(self.fields.end_line, u64::from(line));
             }
             self.writer.add_document(doc)?;
@@ -203,8 +204,8 @@ impl SearchIndex {
             doc.add_text(self.fields.text, truncate_utf8(&chunk.text, TEXT_STORE_LIMIT));
             doc.add_text(self.fields.file_path, &chunk.file_path);
             doc.add_text(self.fields.label, &chunk.kind);
-            doc.add_u64(self.fields.start_line, u64::from(chunk.start_line));
-            doc.add_u64(self.fields.end_line, u64::from(chunk.end_line));
+            doc.add_u64(self.fields.start_line, u64::from(chunk.start_line_1based()));
+            doc.add_u64(self.fields.end_line, u64::from(chunk.end_line_1based()));
             self.writer.add_document(doc)?;
         }
         Ok(())

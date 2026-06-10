@@ -128,6 +128,7 @@ impl Backend for MockBackend {
                 source_kind: "local".into(),
                 source_url: None,
                 detail: None,
+                render_max_nodes: None,
             },
             RepoInfo {
                 name: "beta".into(),
@@ -140,6 +141,7 @@ impl Backend for MockBackend {
                 source_kind: "git".into(),
                 source_url: Some("https://example.com/beta.git".into()),
                 detail: None,
+                render_max_nodes: None,
             },
         ])
     }

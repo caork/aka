@@ -178,8 +178,9 @@ impl GraphStore {
                     n.label,
                     n.name(),
                     n.file_path(),
-                    n.start_line(),
-                    n.end_line(),
+                    /* 行号统一存 1-based（工件是 tree-sitter 0-based row） */
+                    n.start_line_1based(),
+                    n.end_line_1based(),
                     props
                 ])?;
                 if changed == 1 {

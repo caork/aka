@@ -4,6 +4,12 @@
  * All interaction writes to *target* values;每帧 `update(dt)` 用临界阻尼
  * 指数插值把当前值收敛到目标，保证 zoom / fit 丝滑。拖拽期间 pan 直写
  * current + target（1:1 跟手），松手后用速度做惯性滑动。
+ *
+ * Zoom 动画的锚点稳定性：k 在 log 空间插值（zoom 手感均匀），tx/ty 则按
+ * k 的线性比例 `(newK - k) / (targetK - k)` 跟进——锚点不动要求
+ * `tx(k) = px - w*k`（w 为光标下的世界坐标），即 tx 随 k 线性变化；
+ * zoomAt 在 target 空间维护该约束，update 的线性比例插值保证中间帧
+ * 始终留在这条锚点直线上，缩放过程中光标处画面严格不漂移。
  */
 
 import type { Bounds } from "./format";
@@ -143,12 +149,14 @@ export class Camera {
     const dLog = logT - logK;
     let moving = false;
     if (Math.abs(dLog) > 1e-4) {
-      /* keep the screen-center world point consistent while k animates:
-         interpolate translate alongside scale */
-      const newLog = logK + dLog * a;
-      const newK = Math.exp(newLog);
-      const ratio =
-        Math.abs(logT - logK) < 1e-9 ? 0 : (newLog - logK) / (logT - logK);
+      /* k 在 log 空间插值（手感均匀），但 tx/ty 必须按 k 的**线性**比例
+         跟进：锚点不动的约束是 tx(k) = px - w*k —— tx 随 k 线性变化。
+         current 与 target 都落在同一条锚点直线上（zoomAt 在 target 空间
+         维护该约束），线性比例插值让中间帧严格留在这条直线上，锚点
+         世界点全程不漂移。之前用 log 比例插 tx/ty 会偏离直线 → 跳动。 */
+      const newK = Math.exp(logK + dLog * a);
+      const dK = this.targetK - this.k;
+      const ratio = Math.abs(dK) < 1e-12 ? 1 : (newK - this.k) / dK;
       this.tx = this.tx + (this.targetTx - this.tx) * ratio;
       this.ty = this.ty + (this.targetTy - this.ty) * ratio;
       this.k = newK;

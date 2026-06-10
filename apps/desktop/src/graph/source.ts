@@ -3,20 +3,33 @@
    running / the repo has no data, so the caller can fall back to the
    synthetic demo graph (or surface a graceful error for ego mode). */
 
+import {
+  RENDER_MAX_DEFAULT,
+  RENDER_MAX_LIMIT,
+  RENDER_MAX_MIN,
+} from "../store";
 import { parseGraphJSON, type GraphData, type GraphJSON } from "./format";
 
 const SERVER = "http://127.0.0.1:4111";
-const MAX_NODES = 300_000;
 const EGO_MAX_NODES = 2_000;
 
-/** 指定 repo 的完整 LOD 快照；失败/离线返回 null（调用方回退 demo）。 */
+/**
+ * 指定 repo 的完整 LOD 快照；失败/离线返回 null（调用方回退 demo）。
+ * `maxNodes` 来自 per-repo 的 render_max_nodes 设置（null/缺省 = 50_000），
+ * 始终 clamp 到合同范围 [1_000, 500_000]。
+ */
 export async function loadRealGraph(
   repo: string,
+  maxNodes?: number | null,
   signal?: AbortSignal,
 ): Promise<GraphData | null> {
+  const budget = Math.min(
+    RENDER_MAX_LIMIT,
+    Math.max(RENDER_MAX_MIN, maxNodes ?? RENDER_MAX_DEFAULT),
+  );
   try {
     const lr = await fetch(
-      `${SERVER}/api/graph/lod?repo=${encodeURIComponent(repo)}&max_nodes=${MAX_NODES}`,
+      `${SERVER}/api/graph/lod?repo=${encodeURIComponent(repo)}&max_nodes=${budget}`,
       { signal: signal ?? AbortSignal.timeout(20_000) },
     );
     if (!lr.ok) return null;

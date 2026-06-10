@@ -55,6 +55,18 @@ pub struct RepoInfo {
     pub source_url: Option<String>,
     /// 失败原因等补充信息（status = failed 时携带）。
     pub detail: Option<String>,
+    /// per-repo 预览渲染节点预算；None = 默认 50_000。
+    pub render_max_nodes: Option<u32>,
+}
+
+/// per-repo 设置更新（settings 端点与 Backend 接缝共用一个形状）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoSettingsUpdate {
+    pub embeddings_enabled: bool,
+    /// None = 恢复默认渲染预算（50_000）；Some(v) 写入前必须 clamp 到
+    /// `aka_core::MIN_RENDER_NODES..=aka_core::MAX_RENDER_NODES`。
+    #[serde(default)]
+    pub render_max_nodes: Option<u32>,
 }
 
 /// 数据层抽象。所有工具（MCP 八件套 + HTTP API）只依赖这个 trait。
@@ -89,8 +101,10 @@ pub trait Backend: Send + Sync + 'static {
     fn analyze(&self, repo_path: &str) -> anyhow::Result<String>;
 
     /// 图 LOD 快照（aka-graph `LodGraph` 的 JSON 形状），给可视化用。
+    /// `max_nodes = None` 时由实现解析 per-repo 的 render_max_nodes 设置
+    /// （没有则默认 50_000）；无论来源，最终预算必须 clamp 到硬上限。
     /// 默认不支持——只有接了图存储的 Backend 才覆写。
-    fn graph_lod(&self, repo: &str, max_nodes: usize) -> anyhow::Result<serde_json::Value> {
+    fn graph_lod(&self, repo: &str, max_nodes: Option<usize>) -> anyhow::Result<serde_json::Value> {
         let _ = (repo, max_nodes);
         anyhow::bail!("graph_lod not supported by this backend")
     }
@@ -131,9 +145,9 @@ pub trait Backend: Send + Sync + 'static {
         anyhow::bail!("remove_repo not supported by this backend")
     }
 
-    /// 每仓库设置（当前只有 embedding 开关；向量回填是后续版本）。
-    fn set_repo_settings(&self, name: &str, embeddings_enabled: bool) -> anyhow::Result<()> {
-        let _ = (name, embeddings_enabled);
+    /// 每仓库设置（embedding 开关 + 渲染节点预算；向量回填是后续版本）。
+    fn set_repo_settings(&self, name: &str, settings: RepoSettingsUpdate) -> anyhow::Result<()> {
+        let _ = (name, settings);
         anyhow::bail!("set_repo_settings not supported by this backend")
     }
 
@@ -153,6 +167,32 @@ pub trait Backend: Send + Sync + 'static {
     ) -> anyhow::Result<serde_json::Value> {
         let _ = (repo, id, depth, max_nodes);
         anyhow::bail!("ego_graph not supported by this backend")
+    }
+
+    /// 读取仓库内某文件的源码切片（详情面板用）。`start`/`end` 为 1-based 含端
+    /// 行号，缺省 = 整个文件（单次最多 2000 行）。返回 JSON 合同：
+    /// `{path, abs_path, total_lines, start, end, lines: [..], truncated}`。
+    /// 实现必须防路径穿越（canonicalize 后仍须位于 repo 根目录内）。
+    /// 默认不支持——只有拿得到 repo checkout 的 Backend 才覆写。
+    fn read_source(
+        &self,
+        repo: &str,
+        path: &str,
+        start: Option<u32>,
+        end: Option<u32>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let _ = (repo, path, start, end);
+        anyhow::bail!("read_source not supported by this backend")
+    }
+
+    /// 文件内符号列表（源码预览高亮用）：`path` 与 nodes 表 file_path 精确匹配，
+    /// 返回 JSON 合同 `{path, symbols: [{id, name, label, file, line, end_line}]}`，
+    /// symbols 按 line 升序；无行号的节点（File / Folder / Community 等）滤掉。
+    /// 文件存在但没有符号 → 空数组；repo 未注册 → Err（HTTP 面 404）。
+    /// 默认不支持——只有接了图存储的 Backend 才覆写。
+    fn file_symbols(&self, repo: &str, path: &str) -> anyhow::Result<serde_json::Value> {
+        let _ = (repo, path);
+        anyhow::bail!("file_symbols not supported by this backend")
     }
 
     /// 后台任务运行时状态：仓库名 → (status, detail)。

@@ -93,12 +93,19 @@ export async function updateZip(name: string, file: File): Promise<void> {
   await postForm(`/api/repos/${encodeURIComponent(name)}/update-zip`, form);
 }
 
+export interface RepoSettingsInput {
+  embeddingsEnabled: boolean;
+  /** 图渲染节点上限；null = 使用默认（50_000） */
+  renderMaxNodes: number | null;
+}
+
 export async function setRepoSettings(
   name: string,
-  embeddingsEnabled: boolean,
+  settings: RepoSettingsInput,
 ): Promise<void> {
   await postJson(`/api/repos/${encodeURIComponent(name)}/settings`, {
-    embeddings_enabled: embeddingsEnabled,
+    embeddings_enabled: settings.embeddingsEnabled,
+    render_max_nodes: settings.renderMaxNodes,
   });
 }
 
@@ -147,6 +154,88 @@ export async function fetchNodeDetail(
     if (!r.ok) return { state: "offline" };
     const detail = (await r.json()) as NodeDetail;
     return { state: "ok", detail };
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    return { state: "offline" };
+  }
+}
+
+/* ---- 源码片段（GET /api/source，合同：start/end 1-based 含端） ---- */
+
+export interface SourceSlice {
+  path: string;
+  abs_path: string;
+  total_lines: number;
+  start: number;
+  end: number;
+  lines: string[];
+  truncated: boolean;
+}
+
+export type SourceResult =
+  | { state: "ok"; source: SourceSlice }
+  /** 404/501 —— 后端版本不支持该端点 */
+  | { state: "unsupported" }
+  /** 400 —— 非文本文件 */
+  | { state: "binary" }
+  | { state: "offline" };
+
+export async function fetchSource(
+  repo: string,
+  path: string,
+  start?: number,
+  end?: number,
+  signal?: AbortSignal,
+): Promise<SourceResult> {
+  const params = new URLSearchParams({ repo, path });
+  if (start !== undefined) params.set("start", String(start));
+  if (end !== undefined) params.set("end", String(end));
+  try {
+    const r = await fetch(`${SERVER}/api/source?${params.toString()}`, {
+      signal: signal ?? AbortSignal.timeout(6000),
+    });
+    if (r.status === 404 || r.status === 501) return { state: "unsupported" };
+    if (r.status === 400) return { state: "binary" };
+    if (!r.ok) return { state: "offline" };
+    const source = (await r.json()) as SourceSlice;
+    return { state: "ok", source };
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    return { state: "offline" };
+  }
+}
+
+/* ---- 文件内符号（GET /api/file/symbols，合同：按 line 升序） ---- */
+
+export interface FileSymbol {
+  id: string;
+  name: string;
+  label: string;
+  file: string;
+  line: number;
+  end_line: number;
+}
+
+export type FileSymbolsResult =
+  | { state: "ok"; symbols: FileSymbol[] }
+  /** 404/501 —— 后端版本不支持该端点 */
+  | { state: "unsupported" }
+  | { state: "offline" };
+
+export async function fetchFileSymbols(
+  repo: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<FileSymbolsResult> {
+  const params = new URLSearchParams({ repo, path });
+  try {
+    const r = await fetch(`${SERVER}/api/file/symbols?${params.toString()}`, {
+      signal: signal ?? AbortSignal.timeout(6000),
+    });
+    if (r.status === 404 || r.status === 501) return { state: "unsupported" };
+    if (!r.ok) return { state: "offline" };
+    const body = (await r.json()) as { symbols?: FileSymbol[] };
+    return { state: "ok", symbols: body.symbols ?? [] };
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") throw e;
     return { state: "offline" };

@@ -27,6 +27,7 @@ impl NodeRec {
         self.prop_str("filePath").or_else(|| self.prop_str("path"))
     }
 
+    /// 工件原始值 —— engine（tree-sitter）的 0-based row。
     pub fn start_line(&self) -> Option<u32> {
         self.properties
             .get("startLine")
@@ -34,11 +35,22 @@ impl NodeRec {
             .map(|v| v as u32)
     }
 
+    /// 工件原始值 —— engine（tree-sitter）的 0-based row。
     pub fn end_line(&self) -> Option<u32> {
         self.properties
             .get("endLine")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32)
+    }
+
+    /// 1-based 人类行号 —— Rust 侧索引统一存这个，与编辑器/`/api/source` 对齐。
+    pub fn start_line_1based(&self) -> Option<u32> {
+        self.start_line().map(|v| v + 1)
+    }
+
+    /// 1-based 人类行号（见 [`Self::start_line_1based`]）。
+    pub fn end_line_1based(&self) -> Option<u32> {
+        self.end_line().map(|v| v + 1)
     }
 }
 
@@ -68,11 +80,23 @@ pub struct ChunkRec {
     pub node_id: String,
     pub kind: String,
     pub file_path: String,
+    /// 工件原始值 —— engine（tree-sitter）的 0-based row。
     #[serde(default)]
     pub start_line: u32,
     #[serde(default)]
     pub end_line: u32,
     pub text: String,
+}
+
+impl ChunkRec {
+    /// 1-based 人类行号（索引统一存这个，与 [`NodeRec::start_line_1based`] 同语义）。
+    pub fn start_line_1based(&self) -> u32 {
+        self.start_line + 1
+    }
+
+    pub fn end_line_1based(&self) -> u32 {
+        self.end_line + 1
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -173,7 +173,7 @@ fn register(repo: &std::path::Path, paths: &RepoPaths, artifact: &ArtifactDir) -
 
     let mut registry = Registry::load()?;
     // 同路径重新分析（后台 update 任务也走这里）：继承旧条目的
-    // name / source_kind / source_url / embeddings_enabled，
+    // name / source_kind / source_url / embeddings_enabled / render_max_nodes，
     // 不能把 git/zip 来源覆写回 local、也不能丢用户设置。
     let prev = registry.find(repo).cloned();
     registry.upsert(RepoEntry {
@@ -196,6 +196,7 @@ fn register(repo: &std::path::Path, paths: &RepoPaths, artifact: &ArtifactDir) -
             .map(|e| e.source_kind.clone())
             .unwrap_or_else(|| "local".into()),
         source_url: prev.as_ref().and_then(|e| e.source_url.clone()),
+        render_max_nodes: prev.as_ref().and_then(|e| e.render_max_nodes),
     });
     registry.save()?;
     Ok(())

@@ -6,10 +6,22 @@ import {
   updateRepo,
   updateZip,
 } from "../repo-api";
-import { refreshRepos, useAppStore, type Repo } from "../store";
+import {
+  refreshRepos,
+  RENDER_MAX_DEFAULT,
+  RENDER_MAX_LIMIT,
+  RENDER_MAX_MIN,
+  useAppStore,
+  type Repo,
+} from "../store";
 import Modal, { ErrorBar } from "./Modal";
 
-/** 每仓库设置：embeddings 开关 / 更新重建 / 移除。 */
+function clampRender(n: number): number {
+  if (!Number.isFinite(n)) return RENDER_MAX_DEFAULT;
+  return Math.min(RENDER_MAX_LIMIT, Math.max(RENDER_MAX_MIN, Math.round(n)));
+}
+
+/** 每仓库设置：embeddings 开关 / 图渲染节点上限 / 更新重建 / 移除。 */
 export default function RepoSettingsModal({
   repo,
   onClose,
@@ -18,20 +30,24 @@ export default function RepoSettingsModal({
   onClose(): void;
 }) {
   const [embeddings, setEmbeddings] = useState(false);
+  const [renderDraft, setRenderDraft] = useState(RENDER_MAX_DEFAULT);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"" | "toggle" | "update" | "zip" | "delete">("");
+  const [busy, setBusy] = useState<
+    "" | "toggle" | "render" | "update" | "zip" | "delete"
+  >("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const zipRef = useRef<HTMLInputElement>(null);
 
   /* 弹窗目标变化时同步初始状态 */
   useEffect(() => {
     setEmbeddings(repo?.embeddings ?? false);
+    setRenderDraft(repo?.renderMaxNodes ?? RENDER_MAX_DEFAULT);
     setError(null);
     setNotice(null);
     setBusy("");
     setConfirmDelete(false);
-  }, [repo?.id, repo?.embeddings]);
+  }, [repo?.id, repo?.embeddings, repo?.renderMaxNodes]);
 
   if (!repo) return <Modal open={false} onClose={onClose} title="" children={null} />;
 
@@ -47,10 +63,37 @@ export default function RepoSettingsModal({
     setError(null);
     setNotice(null);
     try {
-      await setRepoSettings(repo.name, next);
+      /* 合同 body 同时带两个字段；这里带的是已保存的渲染上限（非草稿） */
+      await setRepoSettings(repo.name, {
+        embeddingsEnabled: next,
+        renderMaxNodes: repo.renderMaxNodes,
+      });
       void refreshRepos();
     } catch (e) {
       setEmbeddings(!next); /* 回滚 */
+      fail(e, "设置失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const savedRender = repo.renderMaxNodes ?? RENDER_MAX_DEFAULT;
+  const renderDirty = clampRender(renderDraft) !== savedRender;
+
+  const saveRenderMax = async (value: number | null) => {
+    if (busy) return;
+    setBusy("render");
+    setError(null);
+    setNotice(null);
+    try {
+      await setRepoSettings(repo.name, {
+        embeddingsEnabled: embeddings,
+        renderMaxNodes: value === null ? null : clampRender(value),
+      });
+      if (value === null) setRenderDraft(RENDER_MAX_DEFAULT);
+      setNotice("渲染上限已保存——重新进入 Graph 视图生效");
+      void refreshRepos();
+    } catch (e) {
       fail(e, "设置失败");
     } finally {
       setBusy("");
@@ -170,6 +213,72 @@ export default function RepoSettingsModal({
           disabled={busy === "toggle"}
           onToggle={() => void toggleEmbeddings()}
         />
+      </div>
+
+      {/* render budget */}
+      <div className="mb-4 border-t border-[rgba(15,23,42,0.06)] pt-4">
+        <div className="text-[13px] font-medium text-ink">图渲染节点上限</div>
+        <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
+          默认 {RENDER_MAX_DEFAULT.toLocaleString()} · 架构上限{" "}
+          {RENDER_MAX_LIMIT.toLocaleString()}（数据层不设限，仅控制单视口渲染量）
+        </div>
+        <input
+          type="range"
+          min={RENDER_MAX_MIN}
+          max={RENDER_MAX_LIMIT}
+          step={1000}
+          value={clampRender(renderDraft)}
+          onChange={(e) => setRenderDraft(Number(e.target.value))}
+          disabled={busy === "render"}
+          className="mt-3 w-full"
+          style={{ accentColor: "#2e7cf6" }}
+          aria-label="图渲染节点上限"
+          data-testid="render-max-slider"
+        />
+        <div className="mt-2 flex items-center gap-2">
+          <span className="cmd-input flex h-8 w-[110px] items-center px-2.5">
+            <input
+              type="number"
+              min={RENDER_MAX_MIN}
+              max={RENDER_MAX_LIMIT}
+              step={1000}
+              value={renderDraft}
+              onChange={(e) => setRenderDraft(Number(e.target.value))}
+              onBlur={() => setRenderDraft(clampRender(renderDraft))}
+              disabled={busy === "render"}
+              className="tabular h-full w-full text-[12.5px]"
+              data-testid="render-max-input"
+            />
+          </span>
+          <span className="text-[11.5px] text-ink-3">节点</span>
+          {repo.renderMaxNodes !== null && (
+            <button
+              onClick={() => void saveRenderMax(null)}
+              disabled={busy !== ""}
+              className="focus-ring rounded-[8px] px-2 py-1 text-[11.5px] text-ink-3 transition-colors duration-150 ease-out hover:text-[#2e7cf6]"
+              data-testid="render-max-reset"
+            >
+              恢复默认
+            </button>
+          )}
+          <button
+            onClick={() => void saveRenderMax(renderDraft)}
+            disabled={busy !== "" || !renderDirty}
+            className={`focus-ring ml-auto rounded-[9px] px-3 py-1.5 text-[12px] font-semibold transition-all duration-150 ease-out ${
+              renderDirty
+                ? "btn-primary"
+                : "text-ink-3 opacity-60"
+            }`}
+            style={
+              renderDirty
+                ? undefined
+                : { boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.1)" }
+            }
+            data-testid="render-max-save"
+          >
+            {busy === "render" ? "保存中…" : "保存"}
+          </button>
+        </div>
       </div>
 
       {/* actions */}

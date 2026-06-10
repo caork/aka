@@ -14,7 +14,6 @@ import {
   hexToRgb,
   type OverlayItem,
 } from "../graph/renderer";
-import { fetchNodeDetail, type NodeDetail } from "../repo-api";
 import { useAppStore } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
@@ -40,22 +39,11 @@ interface HoverInfo {
   file: string;
 }
 
-/** 选中节点 — 来自图数据本身的基础信息（详情另拉 /api/node）。 */
-interface PanelInfo {
-  index: number;
-  id: string;
-  name: string;
-  label: string;
-  file: string;
-}
-
 interface EgoState {
   repoId: string;
   id: string;
   name: string;
 }
-
-type DetailState = "idle" | "loading" | "ok" | "degraded";
 
 interface Rig {
   renderer: GraphRenderer;
@@ -84,19 +72,28 @@ export default function GraphView() {
   const onSelectRef = useRef<(i: number) => void>(() => {});
 
   const repoId = useAppStore((s) => s.selectedRepoId);
-  const setView = useAppStore((s) => s.setView);
-  const setQuery = useAppStore((s) => s.setQuery);
+  const repo = useAppStore(
+    (s) => s.repos.find((r) => r.id === s.selectedRepoId) ?? null,
+  );
+  const detailTarget = useAppStore((s) => s.detailTarget);
+  const openDetail = useAppStore((s) => s.openDetail);
+  const closeDetail = useAppStore((s) => s.closeDetail);
+  const egoRequest = useAppStore((s) => s.egoRequest);
+  const clearEgoRequest = useAppStore((s) => s.clearEgoRequest);
+  const focusRequest = useAppStore((s) => s.focusRequest);
+  const clearFocusRequest = useAppStore((s) => s.clearFocusRequest);
 
   const [stats, setStats] = useState<Stats>({ fps: 0, lod: 0, nodes: 0, edges: 0 });
   const [hover, setHover] = useState<HoverInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [live, setLive] = useState(false);
-  const [panel, setPanel] = useState<PanelInfo | null>(null);
-  const [detail, setDetail] = useState<NodeDetail | null>(null);
-  const [detailState, setDetailState] = useState<DetailState>("idle");
-  const [degradeNote, setDegradeNote] = useState("");
   const [ego, setEgo] = useState<EgoState | null>(null);
   const [egoError, setEgoError] = useState<string | null>(null);
+
+  /** per-repo 渲染节点预算（null = 默认 50_000，loadRealGraph 内部 clamp） */
+  const renderBudget = repo?.renderMaxNodes ?? null;
+  /** 仓库总节点数（来自 /api/repos stats），用于徽章 "已渲染 N / 总数" */
+  const totalNodes = repo?.symbols ?? 0;
 
   /* ---- rig：渲染器 / 相机 / 交互，仅挂载一次 ---- */
   useEffect(() => {
@@ -392,7 +389,6 @@ export default function GraphView() {
     let cancelled = false;
     const ctrl = new AbortController();
     setLoading(true);
-    setPanel(null);
     rig.selectedIndex = -1;
 
     const run = async () => {
@@ -416,7 +412,9 @@ export default function GraphView() {
           setEgo(null);
         }
       } else {
-        const data = await loadRealGraph(repoId, ctrl.signal).catch(() => null);
+        const data = await loadRealGraph(repoId, renderBudget, ctrl.signal).catch(
+          () => null,
+        );
         if (cancelled) return;
         rig.centerIndex = -1;
         if (data) {
@@ -434,77 +432,88 @@ export default function GraphView() {
       cancelled = true;
       ctrl.abort();
     };
-  }, [repoId, ego]);
+  }, [repoId, ego, renderBudget]);
 
-  /* ---- 节点点击 → 面板基础信息 ---- */
+  /* ---- DetailPanel「Ego 视图」发来的下钻请求 ---- */
+  useEffect(() => {
+    if (!egoRequest) return;
+    setEgoError(null);
+    setEgo({ repoId, id: egoRequest.id, name: egoRequest.name });
+    clearEgoRequest();
+  }, [egoRequest, repoId, clearEgoRequest]);
+
+  /* ---- CodeView「在 Graph 中定位」发来的请求 ----
+     等当前数据加载完成后消费：
+     · 在已加载图中找到节点 → 相机平滑动画到该节点（只写 target，不动
+       fitK/LOD 基准），选中（发光蓝）并打开 DetailPanel；
+     · 没找到（被 LOD 截断 / 不在当前 ego 子图）→ 回退走与 requestEgo
+       相同的 ego 加载路径，以该节点为中心。 */
+  useEffect(() => {
+    if (!focusRequest || loading) return;
+    const rig = rigRef.current;
+    if (!rig?.data) return;
+    const d = rig.data;
+    let found = -1;
+    for (let i = 0; i < d.count; i++) {
+      if (d.id(i) === focusRequest.id) {
+        found = i;
+        break;
+      }
+    }
+    clearFocusRequest();
+    if (found >= 0) {
+      rig.selectedIndex = found;
+      focusCameraOn(
+        rig.camera,
+        d.positions[found * 2],
+        d.positions[found * 2 + 1],
+      );
+      openDetail({
+        id: d.id(found),
+        name: d.name(found),
+        label: d.classNames[d.classes[found]] ?? "Node",
+        file: d.file(found),
+        line: 0 /* LOD 快照不带行号——DetailPanel 经 /api/node 补全 */,
+      });
+    } else {
+      setEgoError(null);
+      setEgo({ repoId, id: focusRequest.id, name: focusRequest.name });
+    }
+  }, [focusRequest, loading, repoId, clearFocusRequest, openDetail]);
+
+  /* ---- 节点点击 → 打开共用 DetailPanel（点空白处关闭） ---- */
   onSelectRef.current = (i: number) => {
     const rig = rigRef.current;
     if (!rig?.data || i < 0) {
-      setPanel(null);
+      closeDetail();
       return;
     }
     const d = rig.data;
-    setPanel({
-      index: i,
+    openDetail({
       id: d.id(i),
       name: d.name(i),
       label: d.classNames[d.classes[i]] ?? "Node",
       file: d.file(i),
+      line: 0 /* LOD 快照不带行号——DetailPanel 经 /api/node 补全 */,
     });
   };
 
-  /* ---- 面板详情：GET /api/node，404/离线优雅降级 ---- */
+  /* ---- 面板关闭 / 目标变化（面板内点关系条目）时同步选中高亮 ---- */
   useEffect(() => {
-    if (!panel) {
-      setDetail(null);
-      setDetailState("idle");
-      return;
-    }
-    if (!live) {
-      setDetail(null);
-      setDetailState("degraded");
-      setDegradeNote("离线演示数据——启动 aka serve 后可查看节点详情");
-      return;
-    }
-    let stale = false;
-    setDetail(null);
-    setDetailState("loading");
-    void fetchNodeDetail(repoId, panel.id).then((res) => {
-      if (stale) return;
-      if (res.state === "ok") {
-        setDetail(res.detail);
-        setDetailState("ok");
-      } else {
-        setDetailState("degraded");
-        setDegradeNote(
-          res.state === "unsupported"
-            ? "详情需更新后端（/api/node 未实现）"
-            : "节点详情获取失败——后端连接异常",
-        );
-      }
-    });
-    return () => {
-      stale = true;
-    };
-  }, [panel, live, repoId]);
-
-  const closePanel = () => {
     const rig = rigRef.current;
-    if (rig) rig.selectedIndex = -1;
-    setPanel(null);
-  };
-
-  const centerOnPanelNode = () => {
-    if (!panel) return;
-    setEgoError(null);
-    setEgo({ repoId, id: panel.id, name: panel.name });
-  };
-
-  const openInSymbolView = () => {
-    if (!panel) return;
-    setQuery(panel.name);
-    setView("symbol");
-  };
+    if (!rig) return;
+    if (!detailTarget) {
+      rig.selectedIndex = -1;
+      return;
+    }
+    if (
+      rig.selectedIndex >= 0 &&
+      rig.data &&
+      rig.data.id(rig.selectedIndex) !== detailTarget.id
+    ) {
+      rig.selectedIndex = -1;
+    }
+  }, [detailTarget]);
 
   const zoom = (factor: number) => {
     const rig = rigRef.current;
@@ -517,14 +526,12 @@ export default function GraphView() {
     rig.camera.fitBounds(rig.data.bounds);
   };
 
-  const file = detail?.file || panel?.file || "";
-  const line = detail?.line ?? 0;
-
   return (
     <div
       ref={containerRef}
       className="relative h-full w-full cursor-grab touch-none overflow-hidden active:cursor-grabbing"
       data-testid="graph-view"
+      data-detail-manage /* 画布自己管理 DetailPanel 的开/关，拖拽不误关面板 */
     >
       <canvas ref={glRef} className="absolute inset-0 h-full w-full" />
       <canvas
@@ -645,7 +652,7 @@ export default function GraphView() {
 
       {/* hover tooltip */}
       <AnimatePresence>
-        {hover && !panel && (
+        {hover && !detailTarget && (
           <motion.div
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
@@ -669,128 +676,6 @@ export default function GraphView() {
             </div>
             <div className="mono mt-1 truncate text-[10.5px] text-ink-3">
               {hover.file}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* node detail panel — right side */}
-      <AnimatePresence>
-        {panel && (
-          <motion.div
-            key={`${repoId}:${panel.id}`}
-            initial={{ opacity: 0, x: 24 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 24 }}
-            transition={spring}
-            className="glass-panel absolute right-4 top-4 z-30 flex w-[320px] max-w-[calc(100%-2rem)] flex-col overflow-hidden"
-            style={{ maxHeight: "calc(100% - 7rem)" }}
-            data-graph-ui
-            data-testid="node-detail-panel"
-          >
-            {/* header */}
-            <div className="flex items-start gap-2 px-4 pb-2 pt-3.5">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="mono truncate text-[13.5px] font-semibold text-ink">
-                    {panel.name}
-                  </span>
-                  <span className={`badge ${detail?.label ?? panel.label}`}>
-                    {detail?.label ?? panel.label}
-                  </span>
-                </div>
-                {(file || line > 0) && (
-                  <div className="mono mt-1 truncate text-[11px] text-ink-3">
-                    {file}
-                    {line > 0 ? `:${line}` : ""}
-                    {detail && detail.end_line > detail.line
-                      ? `–${detail.end_line}`
-                      : ""}
-                  </div>
-                )}
-              </div>
-              <button
-                onClick={closePanel}
-                aria-label="Close detail panel"
-                className="focus-ring -mr-1 flex h-6 w-6 flex-none items-center justify-center rounded-[7px] text-[15px] leading-none text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink"
-              >
-                ×
-              </button>
-            </div>
-
-            {/* body */}
-            <div className="scroll-area min-h-0 flex-1 px-4 pb-3">
-              {detailState === "loading" && (
-                <div className="flex items-center gap-2 py-3 text-[12px] text-ink-3">
-                  <span
-                    className="h-3 w-3 animate-spin rounded-full border-2 border-[rgba(46,124,246,0.25)]"
-                    style={{ borderTopColor: "#2e7cf6" }}
-                  />
-                  加载详情…
-                </div>
-              )}
-
-              {detailState === "degraded" && (
-                <div
-                  className="my-2 rounded-[10px] px-3 py-2 text-[11.5px]"
-                  style={{
-                    background: "rgba(246,166,35,0.1)",
-                    color: "#8a5a10",
-                  }}
-                  data-testid="detail-degraded"
-                >
-                  {degradeNote}
-                </div>
-              )}
-
-              {detail && (
-                <>
-                  {/* degree */}
-                  <div className="mb-3 mt-1 grid grid-cols-3 gap-1.5">
-                    <DegreeStat label="callers" value={detail.degree.callers} />
-                    <DegreeStat label="callees" value={detail.degree.callees} />
-                    <DegreeStat label="refs" value={detail.degree.refs} />
-                  </div>
-
-                  {/* properties */}
-                  {Object.keys(detail.properties ?? {}).length > 0 && (
-                    <div className="mb-1">
-                      <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
-                        Properties
-                      </div>
-                      <div
-                        className="overflow-hidden rounded-[10px]"
-                        style={{
-                          boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.07)",
-                        }}
-                      >
-                        {Object.entries(detail.properties).map(([k, v], i) => (
-                          <PropRow key={k} k={k} v={v} alt={i % 2 === 1} />
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-
-            {/* actions */}
-            <div className="flex flex-col gap-1.5 border-t border-[rgba(15,23,42,0.06)] px-4 py-3">
-              <button
-                onClick={centerOnPanelNode}
-                className="btn-primary focus-ring px-3 py-2 text-[12.5px] font-semibold"
-                data-testid="center-on-node"
-              >
-                以此为中心
-              </button>
-              <button
-                onClick={openInSymbolView}
-                className="focus-ring rounded-[10px] px-3 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink"
-                style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.1)" }}
-                data-testid="open-in-symbol"
-              >
-                在 Symbol 视图打开
-              </button>
             </div>
           </motion.div>
         )}
@@ -836,10 +721,20 @@ export default function GraphView() {
           </span>
           <span className="text-ink-3">fps</span>
         </span>
-        <span className="text-ink-3">
+        <span
+          className="text-ink-3"
+          title={
+            live && totalNodes > 0
+              ? `已渲染 ${stats.nodes.toLocaleString()} / 仓库共 ${totalNodes.toLocaleString()} 节点`
+              : `已渲染 ${stats.nodes.toLocaleString()} 节点`
+          }
+        >
           <span className="font-medium text-ink-2" data-testid="node-count">
             {formatCount(stats.nodes)}
-          </span>{" "}
+          </span>
+          {live && totalNodes > 0 && (
+            <span data-testid="node-total"> / {formatCount(totalNodes)}</span>
+          )}{" "}
           nodes
         </span>
         <span className="text-ink-3">
@@ -860,46 +755,19 @@ export default function GraphView() {
   );
 }
 
-function DegreeStat({ label, value }: { label: string; value: number }) {
-  return (
-    <div
-      className="tabular flex flex-col items-center rounded-[10px] px-2 py-1.5"
-      style={{ background: "rgba(15,23,42,0.04)" }}
-    >
-      <span className="text-[14px] font-semibold text-ink">
-        {formatCount(value)}
-      </span>
-      <span className="text-[10px] text-ink-3">{label}</span>
-    </div>
-  );
-}
-
-const PROP_TRUNCATE = 64;
-
-function PropRow({ k, v, alt }: { k: string; v: unknown; alt: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  const text = typeof v === "string" ? v : JSON.stringify(v);
-  const long = text.length > PROP_TRUNCATE;
-  const shown = expanded || !long ? text : `${text.slice(0, PROP_TRUNCATE)}…`;
-  return (
-    <div
-      className="flex items-start gap-2 px-2.5 py-1.5"
-      style={{ background: alt ? "rgba(15,23,42,0.025)" : "transparent" }}
-    >
-      <span className="mono w-[88px] flex-none truncate pt-px text-[10.5px] text-ink-3">
-        {k}
-      </span>
-      <span
-        className={`mono min-w-0 flex-1 text-[11px] text-ink-2 ${
-          long ? "cursor-pointer" : ""
-        } ${expanded ? "break-all" : "truncate"}`}
-        title={long && !expanded ? "点击展开" : undefined}
-        onClick={long ? () => setExpanded((x) => !x) : undefined}
-      >
-        {shown}
-      </span>
-    </div>
-  );
+/**
+ * 相机平滑动画到世界坐标 (x, y)，缩放到能看清单节点的层级。
+ * 只写 target（update 的临界阻尼插值负责动画），刻意不走 fitBounds——
+ * 那会用局部 bounds 重置 fitK，破坏 LOD 的全图缩放基准。
+ */
+function focusCameraOn(camera: Camera, x: number, y: number): void {
+  /* zoomLevel = k / fitK ≥ 12 即 LOD "near"；16 留些余量。已更近则保持。 */
+  const k = Math.min(camera.maxK, Math.max(camera.targetK, camera.fitK * 16));
+  camera.targetK = k;
+  camera.targetTx = camera.width / 2 - x * k;
+  camera.targetTy = camera.height / 2 - y * k;
+  camera.vx = 0;
+  camera.vy = 0;
 }
 
 function pickAt(rig: Rig, x: number, y: number): number {

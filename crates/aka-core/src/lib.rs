@@ -9,5 +9,8 @@ pub mod types;
 pub use artifact::{ArtifactDir, ArtifactError, NdjsonIter};
 pub use engine::{EngineError, EngineRunner};
 pub use paths::{aka_home, RepoPaths};
-pub use registry::{Registry, RegistryError, RepoEntry};
+pub use registry::{
+    clamp_render_nodes, Registry, RegistryError, RepoEntry, DEFAULT_RENDER_MAX_NODES,
+    MAX_RENDER_NODES, MIN_RENDER_NODES,
+};
 pub use types::*;

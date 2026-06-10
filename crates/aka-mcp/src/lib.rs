@@ -15,7 +15,10 @@ use std::sync::Arc;
 
 use rmcp::ServiceExt;
 
-pub use backend::{Backend, RepoInfo, SearchHit, SymbolRef};
+pub use aka_core::{
+    clamp_render_nodes, DEFAULT_RENDER_MAX_NODES, MAX_RENDER_NODES, MIN_RENDER_NODES,
+};
+pub use backend::{Backend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef};
 pub use mock::MockBackend;
 pub use service::AkaMcpServer;
 

@@ -43,6 +43,8 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 
 `label` 取值即上游 `NodeLabel`（File/Folder/Function/Class/Interface/Method/CodeElement/Community/Process/Struct/Enum/Trait/…）。`properties` 为开放对象，aka 侧只索引已知字段（name/filePath/startLine/endLine/…），其余落到 JSON 列存底。
 
+**行号语义**：工件中的 `startLine`/`endLine`（节点与 chunk 同）是 engine（tree-sitter）的 **0-based row**——这是工件原样透传的语义，不改。Rust 摄取层（aka-graph/aka-search）写索引时统一 **+1 转为 1-based 人类行号**（`NodeRec::start_line_1based`），因此 SQLite/tantivy 及一切下游（HTTP/MCP/桌面端）的行号都与编辑器、`/api/source` 对齐。`properties` JSON 列存底里保留的是工件原始 0-based 值。
+
 ### edges.ndjson — gitnexus-shared `GraphRelationship` 原样透传
 
 ```json

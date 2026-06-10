@@ -1,5 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
+import CodeView from "./components/CodeView";
 import CommandBar from "./components/CommandBar";
+import DetailPanel from "./components/DetailPanel";
 import GraphView from "./components/GraphView";
 import SearchView from "./components/SearchView";
 import Sidebar from "./components/Sidebar";
@@ -28,8 +30,11 @@ export default function App() {
               {view === "search" && <SearchView />}
               {view === "graph" && <GraphView />}
               {view === "symbol" && <SymbolView />}
+              {view === "code" && <CodeView />}
             </motion.div>
           </AnimatePresence>
+          {/* 三视图共用的右侧详情面板（在 main 内，不遮 toolbar/侧栏） */}
+          <DetailPanel />
         </main>
       </div>
     </div>

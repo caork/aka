@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# aka 客户端接入安装脚本
+#
+# 用法:
+#   clients/install.sh --client claude-code [--plugin] [--bin /path/to/aka] [--dry-run]
+#   clients/install.sh --client codex       [--bin /path/to/aka] [--dry-run]
+#   clients/install.sh --client opencode    [--bin /path/to/aka] [--dry-run]
+#
+# 行为:
+#   - 自动探测 aka 二进制: --bin 参数 > PATH 上的 aka > 仓库 target/release > target/debug
+#   - 幂等: 目标配置里已有 aka 条目时跳过并提示, 不会重复写入
+#   - --dry-run: 只打印将要执行的动作, 不写任何文件
+#
+# 各客户端写入目标:
+#   claude-code : 默认 `claude mcp add aka`(user scope); 加 --plugin 则走插件方式
+#                 (marketplace add 本仓库 + plugin install aka@aka, 含 skill)
+#   codex       : 追加 [mcp_servers.aka] 到 ~/.codex/config.toml
+#   opencode    : 合并 mcp.aka 进 ~/.config/opencode/opencode.json (需要 jq)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+CLIENT=""
+BIN=""
+DRY_RUN=0
+USE_PLUGIN=0
+
+info()  { printf '\033[1;34m[aka]\033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33m[aka]\033[0m %s\n' "$*" >&2; }
+die()   { printf '\033[1;31m[aka]\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+# ---------- 参数解析 ----------
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --client)  CLIENT="${2:-}"; shift 2 ;;
+    --bin)     BIN="${2:-}"; shift 2 ;;
+    --plugin)  USE_PLUGIN=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage 0 ;;
+    *) die "未知参数: $1（--help 查看用法）" ;;
+  esac
+done
+
+case "$CLIENT" in
+  claude-code|codex|opencode) ;;
+  "") usage 1 ;;
+  *) die "不支持的 --client: ${CLIENT}（可选 claude-code|codex|opencode）" ;;
+esac
+
+# ---------- 探测 aka 二进制 ----------
+detect_bin() {
+  if [ -n "$BIN" ]; then
+    [ -x "$BIN" ] || die "--bin 指定的文件不可执行: $BIN"
+    return
+  fi
+  if command -v aka >/dev/null 2>&1; then
+    BIN="$(command -v aka)"
+    return
+  fi
+  for cand in "${REPO_ROOT}/target/release/aka" "${REPO_ROOT}/target/debug/aka"; do
+    if [ -x "$cand" ]; then
+      BIN="$cand"
+      return
+    fi
+  done
+  die "找不到 aka 二进制。先 cargo build -p aka-cli（或 --release），或用 --bin 指定路径。"
+}
+
+detect_bin
+info "aka 二进制: ${BIN}"
+
+run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "[dry-run] $*"
+  else
+    "$@"
+  fi
+}
+
+# ---------- claude-code ----------
+install_claude_code() {
+  command -v claude >/dev/null 2>&1 || die "未找到 claude CLI，请先安装 Claude Code。"
+
+  if [ "$USE_PLUGIN" -eq 1 ]; then
+    # 插件方式: marketplace add 本仓库 + 安装插件(捆绑 MCP server + skill)。
+    # 注意: 插件内 .mcp.json 的 command 是 "aka"(按 PATH 解析)。
+    if ! command -v aka >/dev/null 2>&1; then
+      warn "aka 不在 PATH 上。插件清单无法动态指定路径，两个选择:"
+      warn "  1) 把它加入 PATH: ln -s ${BIN} ~/.local/bin/aka"
+      warn "  2) 编辑 ${SCRIPT_DIR}/claude-code/.mcp.json，把 \"aka\" 换成绝对路径 ${BIN} 后重跑"
+      die  "处理后重新运行本脚本。"
+    fi
+    if claude plugin list 2>/dev/null | grep -q '^aka@aka\|aka@aka'; then
+      info "插件 aka@aka 已安装，跳过。(更新: claude plugin update aka@aka)"
+      return
+    fi
+    run claude plugin marketplace add "${REPO_ROOT}"
+    run claude plugin install aka@aka
+    info "完成。验证: claude plugin list && claude mcp list"
+  else
+    # 直连 MCP 方式(无 skill, 最简单), user scope 全项目可用。
+    if claude mcp list 2>/dev/null | grep -q '^aka[: ]\|^aka$'; then
+      info "MCP server 'aka' 已存在，跳过。(查看: claude mcp list; 移除: claude mcp remove aka)"
+      return
+    fi
+    run claude mcp add --scope user aka -- "${BIN}" mcp
+    info "完成。验证: claude mcp list（应显示 aka ✓ connected）"
+    info "提示: 想要捆绑 skill 的插件方式，用 --plugin 重跑。"
+  fi
+}
+
+# ---------- codex ----------
+install_codex() {
+  local cfg="${HOME}/.codex/config.toml"
+  if [ -f "$cfg" ] && grep -q '^\[mcp_servers\.aka\]' "$cfg"; then
+    info "${cfg} 已有 [mcp_servers.aka]，跳过。"
+    return
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    # 官方 CLI 写入，最稳
+    run codex mcp add aka -- "${BIN}" mcp
+  else
+    info "未找到 codex CLI，直接追加 TOML 到 ${cfg}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "[dry-run] 将追加: [mcp_servers.aka] command=\"${BIN}\" args=[\"mcp\"]"
+    else
+      mkdir -p "${HOME}/.codex"
+      {
+        printf '\n[mcp_servers.aka]\n'
+        printf 'command = "%s"\n' "${BIN}"
+        printf 'args = ["mcp"]\n'
+      } >> "$cfg"
+    fi
+  fi
+  info "完成。验证: codex mcp list（或 codex TUI 里 /mcp）"
+}
+
+# ---------- opencode ----------
+install_opencode() {
+  local cfg="${HOME}/.config/opencode/opencode.json"
+  if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1 && [ "$(jq -r '.mcp.aka // empty | type' "$cfg" 2>/dev/null)" = "object" ]; then
+    info "${cfg} 已有 mcp.aka，跳过。"
+    return
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    warn "未安装 jq，无法安全合并 JSON。请手动把下面片段合并进 ${cfg}:"
+    printf '{\n  "mcp": {\n    "aka": { "type": "local", "command": ["%s", "mcp"], "enabled": true }\n  }\n}\n' "${BIN}"
+    return
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "[dry-run] 将向 ${cfg} 合并 mcp.aka = {type:local, command:[${BIN}, mcp], enabled:true}"
+    return
+  fi
+  mkdir -p "$(dirname "$cfg")"
+  # shellcheck disable=SC2016  # $schema 是字面量, 不是 shell 变量
+  [ -f "$cfg" ] || printf '{ "$schema": "https://opencode.ai/config.json" }\n' > "$cfg"
+  local tmp
+  tmp="$(mktemp)"
+  jq --arg bin "$BIN" '.mcp.aka = {type: "local", command: [$bin, "mcp"], enabled: true}' "$cfg" > "$tmp"
+  mv "$tmp" "$cfg"
+  info "完成。验证: 启动 opencode，会话里让它调用 aka 的 list_repos。"
+}
+
+case "$CLIENT" in
+  claude-code) install_claude_code ;;
+  codex)       install_codex ;;
+  opencode)    install_opencode ;;
+esac

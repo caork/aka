@@ -8,15 +8,18 @@
 //! - `GET    /api/repos`               — 已索引仓库列表（含 status/source/detail）
 //! - `POST   /api/query`               — 混合检索 `{ repo?, query, limit? }`
 //! - `POST   /api/symbol/context`      — 符号 360° 上下文 `{ repo?, symbol }`
-//! - `GET    /api/graph/lod`           — 图 LOD 数据 `?repo=&max_nodes=`（Backend 不支持时 501）
+//! - `GET    /api/graph/lod`           — 图 LOD 数据 `?repo=&max_nodes=`（缺省用 per-repo
+//!   render_max_nodes 设置，没有则 50_000；一律 clamp 到硬上限；Backend 不支持时 501）
 //! - `POST   /api/repos/import`        — 导入 `{kind:"git",url,name?}` 或 `{kind:"local",path}` → 202
 //! - `POST   /api/repos/import-zip`    — multipart（name + file）→ 202
 //! - `POST   /api/repos/{name}/update` — git pull+analyze / local 重 analyze → 202（zip 来源 400）
 //! - `POST   /api/repos/{name}/update-zip` — multipart（file）→ 202
-//! - `POST   /api/repos/{name}/settings` — `{embeddings_enabled}` → 200
+//! - `POST   /api/repos/{name}/settings` — `{embeddings_enabled, render_max_nodes}` → 200
 //! - `DELETE /api/repos/{name}`        — 移除注册 + 数据目录 → 200
 //! - `GET    /api/node`                — 节点详情 `?repo=&id=`
 //! - `GET    /api/graph/ego`           — ego 子图 `?repo=&id=&depth=&max_nodes=`
+//! - `GET    /api/source`              — 源码切片 `?repo=&path=&start=&end=`（1-based 含端）
+//! - `GET    /api/file/symbols`        — 文件内符号列表 `?repo=&path=`（line 升序）
 //!
 //! 导入 / 更新都是 202 语义：handler 不等 analyze，任务在 Backend 内部线程执行，
 //! 进度经 `GET /api/repos` 的 `status` 字段（ready/indexing/failed）轮询。
@@ -38,7 +41,10 @@ use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use aka_mcp::ops;
-pub use aka_mcp::{Backend, MockBackend, RepoInfo, SearchHit, SymbolRef};
+pub use aka_mcp::{
+    clamp_render_nodes, Backend, MockBackend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef,
+    MAX_RENDER_NODES, MIN_RENDER_NODES,
+};
 
 type AppState = Arc<dyn Backend>;
 
@@ -68,6 +74,8 @@ pub fn router(backend: Arc<dyn Backend>) -> Router {
         .route("/api/node", get(node_detail))
         .route("/api/graph/lod", get(graph_lod))
         .route("/api/graph/ego", get(graph_ego))
+        .route("/api/source", get(source_slice))
+        .route("/api/file/symbols", get(file_symbols))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(cors_localhost())
         .with_state(backend)
@@ -223,17 +231,22 @@ async fn symbol_context(
 #[derive(Deserialize)]
 struct LodParams {
     repo: String,
-    #[serde(default = "default_max_nodes")]
-    max_nodes: usize,
+    /// 缺省 = 用 per-repo render_max_nodes 设置（Backend 内解析，没有则 50_000）。
+    #[serde(default)]
+    max_nodes: Option<usize>,
 }
 
-fn default_max_nodes() -> usize {
-    50_000
+/// 把显式传入的渲染预算 clamp 到 `MIN_RENDER_NODES..=MAX_RENDER_NODES`（架构红线）。
+fn clamp_render_budget(n: usize) -> usize {
+    let n32 = u32::try_from(n).unwrap_or(u32::MAX);
+    clamp_render_nodes(n32) as usize
 }
 
 /// 图 LOD 数据 — Backend 未接图存储（如 Mock）时保持 501 语义。
+/// 显式传 max_nodes → clamp 到硬上限后透传；缺省 → None，由 Backend 解析 per-repo 设置。
 async fn graph_lod(State(b): State<AppState>, Query(p): Query<LodParams>) -> Response {
-    run_managed(b, StatusCode::OK, move |b| b.graph_lod(&p.repo, p.max_nodes)).await
+    let max_nodes = p.max_nodes.map(clamp_render_budget);
+    run_managed(b, StatusCode::OK, move |b| b.graph_lod(&p.repo, max_nodes)).await
 }
 
 // ---- 仓库管理 + 节点详情 / ego 子图 ----
@@ -374,16 +387,24 @@ async fn repo_update(State(b): State<AppState>, AxumPath(name): AxumPath<String>
 #[derive(Debug, Deserialize)]
 pub struct SettingsRequest {
     pub embeddings_enabled: bool,
+    /// 缺省 / null = 恢复默认渲染预算（50_000）。
+    #[serde(default)]
+    pub render_max_nodes: Option<u32>,
 }
 
 /// `POST /api/repos/{name}/settings` → 200 `{"ok":true}`。
+/// render_max_nodes 写入前 clamp 到 `MIN_RENDER_NODES..=MAX_RENDER_NODES`。
 async fn repo_settings(
     State(b): State<AppState>,
     AxumPath(name): AxumPath<String>,
     Json(req): Json<SettingsRequest>,
 ) -> Response {
+    let settings = RepoSettingsUpdate {
+        embeddings_enabled: req.embeddings_enabled,
+        render_max_nodes: req.render_max_nodes.map(clamp_render_nodes),
+    };
     run_managed(b, StatusCode::OK, move |b| {
-        b.set_repo_settings(&name, req.embeddings_enabled)?;
+        b.set_repo_settings(&name, settings)?;
         Ok(json!({ "ok": true }))
     })
     .await
@@ -430,11 +451,46 @@ fn default_ego_max_nodes() -> usize {
 /// `GET /api/graph/ego?repo=&id=&depth=&max_nodes=` — 与 /api/graph/lod 同形的 ego 子图。
 async fn graph_ego(State(b): State<AppState>, Query(p): Query<EgoParams>) -> Response {
     let depth = p.depth.min(8);
-    let max_nodes = p.max_nodes.clamp(1, 50_000);
+    let max_nodes = p.max_nodes.clamp(1, MAX_RENDER_NODES as usize);
     run_managed(b, StatusCode::OK, move |b| {
         b.ego_graph(&p.repo, &p.id, depth, max_nodes)
     })
     .await
+}
+
+#[derive(Debug, Deserialize)]
+struct SourceParams {
+    repo: String,
+    /// repo 内相对路径。
+    path: String,
+    /// 1-based 起始行（含）；缺省 = 1。
+    #[serde(default)]
+    start: Option<u32>,
+    /// 1-based 结束行（含）；缺省 = 文件末行（单次最多 2000 行）。
+    #[serde(default)]
+    end: Option<u32>,
+}
+
+/// `GET /api/source?repo=&path=&start=&end=` — 源码切片（详情面板用）。
+/// repo / 文件不存在 → 404；路径穿越 / 二进制文件 → 400；Mock 不支持 → 501。
+async fn source_slice(State(b): State<AppState>, Query(p): Query<SourceParams>) -> Response {
+    run_managed(b, StatusCode::OK, move |b| {
+        b.read_source(&p.repo, &p.path, p.start, p.end)
+    })
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+struct FileSymbolsParams {
+    repo: String,
+    /// repo 内相对路径（与 nodes 表 file_path 精确匹配）。
+    path: String,
+}
+
+/// `GET /api/file/symbols?repo=&path=` — 文件内符号列表（源码预览高亮用）。
+/// repo 未注册 → 404；文件没有符号 → 200 空数组；Mock 不支持 → 501。
+async fn file_symbols(State(b): State<AppState>, Query(p): Query<FileSymbolsParams>) -> Response {
+    run_managed(b, StatusCode::OK, move |b| b.file_symbols(&p.repo, &p.path)).await
 }
 
 #[cfg(test)]

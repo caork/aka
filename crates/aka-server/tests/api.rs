@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use aka_server::{Backend, MockBackend, RepoInfo, SearchHit, SymbolRef, router};
+use aka_server::{Backend, MockBackend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
@@ -50,11 +50,14 @@ async fn repos_lists_mock_data() {
     assert_eq!(repos.len(), 2);
     assert_eq!(repos[0]["name"], "demo");
     assert_eq!(repos[0]["nodes"], 5);
-    // 合同字段：status / source{kind,url} / detail。
+    // 合同字段：status / source{kind,url} / detail / render_max_nodes。
     assert_eq!(repos[0]["status"], "ready");
     assert_eq!(repos[0]["source"]["kind"], "local");
     assert!(repos[0]["source"]["url"].is_null());
     assert!(repos[0]["detail"].is_null());
+    // render_max_nodes 必须显式出现且为 null（未设置 = 默认）。
+    assert!(repos[0].as_object().unwrap().contains_key("render_max_nodes"));
+    assert!(repos[0]["render_max_nodes"].is_null());
     assert_eq!(repos[1]["source"]["kind"], "git");
     assert_eq!(repos[1]["source"]["url"], "https://example.com/beta.git");
 }
@@ -222,6 +225,8 @@ async fn management_endpoints_are_501_on_mock() {
         Request::delete("/api/repos/demo").body(Body::empty()).unwrap(),
         Request::get("/api/node?repo=demo&id=demo:fn:main").body(Body::empty()).unwrap(),
         Request::get("/api/graph/ego?repo=demo&id=demo:fn:main").body(Body::empty()).unwrap(),
+        Request::get("/api/source?repo=demo&path=src/main.rs").body(Body::empty()).unwrap(),
+        Request::get("/api/file/symbols?repo=demo&path=src/main.rs").body(Body::empty()).unwrap(),
         multipart_req(
             "/api/repos/import-zip",
             "XB",
@@ -328,10 +333,59 @@ impl Backend for ManagedBackend {
     fn remove_repo(&self, _: &str) -> anyhow::Result<()> {
         Ok(())
     }
-    fn set_repo_settings(&self, name: &str, enabled: bool) -> anyhow::Result<()> {
+    fn set_repo_settings(&self, name: &str, settings: RepoSettingsUpdate) -> anyhow::Result<()> {
         assert_eq!(name, "demo");
-        assert!(enabled);
+        assert!(settings.embeddings_enabled);
+        // server 必须先 clamp 再传给 backend（1_000..=500_000）。
+        if let Some(v) = settings.render_max_nodes {
+            assert!(
+                (1_000..=500_000).contains(&v),
+                "render_max_nodes 应已被 server clamp，收到 {v}"
+            );
+        }
         Ok(())
+    }
+    fn graph_lod(&self, repo: &str, max_nodes: Option<usize>) -> anyhow::Result<Value> {
+        // 回显收到的预算，便于断言 server 侧 clamp / 透传语义。
+        Ok(json!({ "repo": repo, "max_nodes": max_nodes, "total_nodes": 42, "returned_nodes": 1 }))
+    }
+    fn read_source(
+        &self,
+        repo: &str,
+        path: &str,
+        start: Option<u32>,
+        end: Option<u32>,
+    ) -> anyhow::Result<Value> {
+        assert_eq!(repo, "demo");
+        if path.contains("..") {
+            anyhow::bail!("invalid path (escapes repo root): {path}");
+        }
+        if path == "gone.rs" {
+            anyhow::bail!("file not found in repo: {path}");
+        }
+        Ok(json!({
+            "path": path,
+            "abs_path": format!("/tmp/demo/{path}"),
+            "total_lines": 240,
+            "start": start.unwrap_or(1),
+            "end": end.unwrap_or(240),
+            "lines": ["fn main() {", "}"],
+            "truncated": false,
+        }))
+    }
+    fn file_symbols(&self, repo: &str, path: &str) -> anyhow::Result<Value> {
+        if repo != "demo" {
+            anyhow::bail!("未注册的仓库: {repo}");
+        }
+        let symbols = if path == "src/empty.ts" {
+            json!([])
+        } else {
+            json!([
+                {"id": "demo:fn:alpha", "name": "alpha", "label": "Function", "file": path, "line": 3, "end_line": 9},
+                {"id": "demo:cls:Beta", "name": "Beta", "label": "Class", "file": path, "line": 50, "end_line": 54},
+            ])
+        };
+        Ok(json!({ "path": path, "symbols": symbols }))
     }
     fn node_detail(&self, repo: &str, id: &str) -> anyhow::Result<Value> {
         Ok(json!({
@@ -407,7 +461,7 @@ async fn update_is_202_and_zip_source_is_400() {
 
 #[tokio::test]
 async fn settings_delete_node_ego_shapes() {
-    // settings → 200 {"ok":true}
+    // settings → 200 {"ok":true}（render_max_nodes 缺省 = 恢复默认）
     let res = managed()
         .oneshot(post_json(
             "/api/repos/demo/settings",
@@ -417,6 +471,29 @@ async fn settings_delete_node_ego_shapes() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(body_json(res).await["ok"], true);
+
+    // 显式 null 与缺省等价。
+    let res = managed()
+        .oneshot(post_json(
+            "/api/repos/demo/settings",
+            json!({ "embeddings_enabled": true, "render_max_nodes": null }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 超出硬上限 / 低于下限的值被 server clamp（ManagedBackend 内有范围断言）。
+    for v in [1u32, 999, 50_000, 600_000, u32::MAX] {
+        let res = managed()
+            .oneshot(post_json(
+                "/api/repos/demo/settings",
+                json!({ "embeddings_enabled": true, "render_max_nodes": v }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "render_max_nodes={v} 应 clamp 后成功");
+        assert_eq!(body_json(res).await["ok"], true);
+    }
 
     // delete → 200 {"ok":true}
     let res = managed()
@@ -457,6 +534,158 @@ async fn settings_delete_node_ego_shapes() {
     assert_eq!(v["nodes"][0]["i"], 0);
     assert!(v["classes"].is_array());
     assert!(v["edges"].is_array());
+}
+
+#[tokio::test]
+async fn lod_max_nodes_clamped_and_default_is_none() {
+    // 未显式传 max_nodes → backend 收到 None（由其解析 per-repo 设置）。
+    let res = managed()
+        .oneshot(Request::get("/api/graph/lod?repo=demo").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert!(v["max_nodes"].is_null(), "缺省必须透传 None 给 backend");
+
+    // 显式传值 → clamp 到 1_000..=500_000 后透传。
+    for (q, expect) in [(1usize, 1_000u64), (999, 1_000), (50_000, 50_000), (9_999_999, 500_000)] {
+        let res = managed()
+            .oneshot(
+                Request::get(format!("/api/graph/lod?repo=demo&max_nodes={q}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        assert_eq!(v["max_nodes"], expect, "max_nodes={q} 应 clamp 成 {expect}");
+    }
+}
+
+#[tokio::test]
+async fn ego_max_nodes_clamped_to_hard_limit() {
+    // ego 的上限统一用 MAX_RENDER_NODES（500_000）。
+    let res = managed()
+        .oneshot(
+            Request::get("/api/graph/ego?repo=demo&id=demo:fn:main&max_nodes=600000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["max_nodes"], 500_000);
+}
+
+#[tokio::test]
+async fn source_endpoint_contract_and_errors() {
+    // 正常切片 → 200 + 合同形状。
+    let res = managed()
+        .oneshot(
+            Request::get("/api/source?repo=demo&path=src/x.ts&start=10&end=80")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["path"], "src/x.ts");
+    assert_eq!(v["abs_path"], "/tmp/demo/src/x.ts");
+    assert_eq!(v["total_lines"], 240);
+    assert_eq!(v["start"], 10);
+    assert_eq!(v["end"], 80);
+    assert!(v["lines"].is_array());
+    assert_eq!(v["truncated"], false);
+
+    // 路径穿越 → 400。
+    let res = managed()
+        .oneshot(
+            Request::get("/api/source?repo=demo&path=..%2Fsecret.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let v = body_json(res).await;
+    assert!(v["error"].as_str().unwrap().contains("invalid path"));
+
+    // 文件不存在 → 404。
+    let res = managed()
+        .oneshot(
+            Request::get("/api/source?repo=demo&path=gone.rs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // 缺必填参数 → 400。
+    let res = managed()
+        .oneshot(Request::get("/api/source?repo=demo").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn file_symbols_contract_and_errors() {
+    // 正常 → 200 + 合同形状（path 回显 + symbols 按 line 升序）。
+    let res = managed()
+        .oneshot(
+            Request::get("/api/file/symbols?repo=demo&path=src/x.ts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["path"], "src/x.ts");
+    let symbols = v["symbols"].as_array().unwrap();
+    assert_eq!(symbols.len(), 2);
+    assert_eq!(symbols[0]["id"], "demo:fn:alpha");
+    assert_eq!(symbols[0]["name"], "alpha");
+    assert_eq!(symbols[0]["label"], "Function");
+    assert_eq!(symbols[0]["file"], "src/x.ts");
+    assert_eq!(symbols[0]["line"], 3);
+    assert_eq!(symbols[0]["end_line"], 9);
+    assert_eq!(symbols[1]["line"], 50);
+
+    // 文件存在但没有符号 → 200 + 空数组。
+    let res = managed()
+        .oneshot(
+            Request::get("/api/file/symbols?repo=demo&path=src/empty.ts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert!(v["symbols"].as_array().unwrap().is_empty());
+
+    // repo 不在 registry → 404。
+    let res = managed()
+        .oneshot(
+            Request::get("/api/file/symbols?repo=nope&path=src/x.ts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // 缺必填参数 → 400。
+    let res = managed()
+        .oneshot(Request::get("/api/file/symbols?repo=demo").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
 // ---- 错误路径：Backend 故障 → 500 + {"error": ...} ----

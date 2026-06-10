@@ -71,3 +71,51 @@ export async function runSearch(
     };
   }
 }
+
+/* ---- Symbol 360° 上下文（POST /api/symbol/context）——
+   SymbolView 与 DetailPanel 共用。 ---- */
+
+export interface ContextHit {
+  id: string;
+  name: string;
+  label: string;
+  file: string;
+  line: number;
+}
+
+export interface ContextRef extends ContextHit {
+  edge: string;
+  depth: number;
+}
+
+export interface SymbolContext {
+  symbol: string;
+  defs: ContextHit[];
+  callers: ContextRef[];
+  callees: ContextRef[];
+  refs: ContextRef[];
+}
+
+/** null = HTTP 非 2xx（符号未找到/后端不支持）；"offline" = 服务不可达。 */
+export type SymbolContextResult = SymbolContext | "offline" | null;
+
+/** 拉取符号 360° 上下文，按离线/未找到优雅降级（绝不抛错，Abort 除外）。 */
+export async function fetchSymbolContext(
+  symbol: string,
+  repo: string | null,
+  signal?: AbortSignal,
+): Promise<SymbolContextResult> {
+  try {
+    const r = await fetch(`${SERVER}/api/symbol/context`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ symbol, repo: repo ?? undefined }),
+      signal: signal ?? AbortSignal.timeout(4000),
+    });
+    if (!r.ok) return null;
+    return (await r.json()) as SymbolContext;
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    return "offline";
+  }
+}

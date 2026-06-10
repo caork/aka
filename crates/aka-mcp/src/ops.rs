@@ -82,6 +82,8 @@ pub struct RepoOut {
     pub source: SourceOut,
     /// 失败原因等补充信息；合同要求显式 null。
     pub detail: Option<String>,
+    /// 渲染节点预算；合同要求显式 null（null = 默认 50_000）。
+    pub render_max_nodes: Option<u32>,
 }
 
 impl From<RepoInfo> for RepoOut {
@@ -99,6 +101,7 @@ impl From<RepoInfo> for RepoOut {
                 url: r.source_url,
             },
             detail: r.detail,
+            render_max_nodes: r.render_max_nodes,
         }
     }
 }

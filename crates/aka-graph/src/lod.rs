@@ -37,6 +37,10 @@ pub struct LodGraph {
     pub nodes: Vec<LodNode>,
     /// 扁平 (s, t) 对，引用 nodes 的 `i`。
     pub edges: Vec<u32>,
+    /// 图中总节点数（截断前），UI 据此显示「已渲染 X / 共 Y」。
+    pub total_nodes: u64,
+    /// 实际返回的节点数（= `nodes.len()`，方便前端不数数组）。
+    pub returned_nodes: u64,
 }
 
 /// 二进制传输形态：meta JSON + xy 交错坐标 + 扁平边。
@@ -157,10 +161,13 @@ impl GraphStore {
             }
         }
 
+        let returned_nodes = nodes.len() as u64;
         Ok(LodGraph {
             classes,
             nodes,
             edges,
+            total_nodes: self.node_count()?,
+            returned_nodes,
         })
     }
 

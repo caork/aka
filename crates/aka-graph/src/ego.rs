@@ -143,10 +143,13 @@ impl GraphStore {
             }
         }
 
+        let returned_nodes = nodes.len() as u64;
         Ok(LodGraph {
             classes,
             nodes,
             edges,
+            total_nodes: u64::from(adj.len()),
+            returned_nodes,
         })
     }
 }

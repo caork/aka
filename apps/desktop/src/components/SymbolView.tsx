@@ -1,37 +1,22 @@
 import { motion } from "framer-motion";
 import { useEffect, useState } from "react";
+import {
+  fetchSymbolContext,
+  type ContextHit,
+  type ContextRef,
+  type SymbolContext,
+} from "../search-api";
 import { useAppStore } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
-const SERVER = "http://127.0.0.1:4111";
-
-interface Hit {
-  id: string;
-  name: string;
-  label: string;
-  file: string;
-  line: number;
-}
-
-interface Ref extends Hit {
-  edge: string;
-  depth: number;
-}
-
-interface ContextOut {
-  symbol: string;
-  defs: Hit[];
-  callers: Ref[];
-  callees: Ref[];
-  refs: Ref[];
-}
 
 /** Symbol 360° — definition + callers / callees / references via `aka serve`. */
 export default function SymbolView() {
   const query = useAppStore((s) => s.query);
   const repoId = useAppStore((s) => s.selectedRepoId);
+  const openDetail = useAppStore((s) => s.openDetail);
   const symbol = query.trim().split(/\s+/)[0] || "";
-  const [ctx, setCtx] = useState<ContextOut | null>(null);
+  const [ctx, setCtx] = useState<SymbolContext | null>(null);
   const [state, setState] = useState<"idle" | "loading" | "offline">("idle");
 
   useEffect(() => {
@@ -43,17 +28,16 @@ export default function SymbolView() {
     let stale = false;
     setState("loading");
     const t = window.setTimeout(() => {
-      fetch(`${SERVER}/api/symbol/context`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ symbol, repo: repoId || undefined }),
-        signal: AbortSignal.timeout(4000),
-      })
-        .then((r) => (r.ok ? (r.json() as Promise<ContextOut>) : null))
+      fetchSymbolContext(symbol, repoId || null)
         .then((out) => {
           if (stale) return;
-          setCtx(out);
-          setState("idle");
+          if (out === "offline") {
+            setCtx(null);
+            setState("offline");
+          } else {
+            setCtx(out);
+            setState("idle");
+          }
         })
         .catch(() => {
           if (stale) return;
@@ -68,6 +52,17 @@ export default function SymbolView() {
   }, [symbol, repoId]);
 
   const def = ctx?.defs?.[0];
+
+  /* 点击条目 → 右侧 DetailPanel 预览 */
+  const pick = (r: ContextHit) => {
+    openDetail({
+      id: r.id,
+      name: r.name,
+      label: r.label,
+      file: r.file,
+      line: r.line,
+    });
+  };
 
   return (
     <div className="scroll-area h-full px-6 py-5" data-testid="symbol-view">
@@ -124,13 +119,15 @@ export default function SymbolView() {
               {rows.length === 0 && (
                 <div className="px-2 py-3 text-[12px] text-ink-3">—</div>
               )}
-              {rows.slice(0, 30).map((r, i) => (
-                <motion.div
+              {rows.slice(0, 30).map((r: ContextRef, i) => (
+                <motion.button
                   key={`${r.id}-${i}`}
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ ...spring, delay: i * 0.02 }}
-                  className="mb-1 flex items-center gap-3 rounded-[10px] px-2 py-2 transition-colors duration-150 hover:bg-[rgba(15,23,42,0.035)]"
+                  onClick={() => pick(r)}
+                  className="focus-ring mb-1 flex w-full items-center gap-3 rounded-[10px] px-2 py-2 text-left transition-colors duration-150 hover:bg-[rgba(15,23,42,0.035)]"
+                  data-testid="symbol-relation-row"
                 >
                   <span
                     className="h-[8px] w-[8px] flex-none rounded-full"
@@ -145,7 +142,7 @@ export default function SymbolView() {
                   <span className="mono tabular ml-auto flex-none text-[11px] text-ink-3">
                     {r.file.split("/").pop()}:{r.line}
                   </span>
-                </motion.div>
+                </motion.button>
               ))}
             </motion.section>
           ))}
@@ -162,10 +159,12 @@ export default function SymbolView() {
               References
             </h3>
             <div className="grid grid-cols-2 gap-x-6">
-              {ctx.refs.slice(0, 20).map((r, i) => (
-                <div
+              {ctx.refs.slice(0, 20).map((r: ContextRef, i) => (
+                <button
                   key={`${r.id}-${i}`}
-                  className="flex items-center gap-2.5 rounded-[10px] px-2 py-1.5"
+                  onClick={() => pick(r)}
+                  className="focus-ring flex w-full items-center gap-2.5 rounded-[10px] px-2 py-1.5 text-left transition-colors duration-150 hover:bg-[rgba(15,23,42,0.035)]"
+                  data-testid="symbol-ref-row"
                 >
                   <span className="badge Function flex-none text-[10px]">
                     {r.edge}
@@ -176,7 +175,7 @@ export default function SymbolView() {
                   <span className="mono tabular ml-auto flex-none text-[11px] text-ink-3">
                     {r.file.split("/").pop()}:{r.line}
                   </span>
-                </div>
+                </button>
               ))}
             </div>
           </motion.section>

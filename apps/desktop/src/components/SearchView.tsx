@@ -9,6 +9,7 @@ const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 export default function SearchView() {
   const query = useAppStore((s) => s.query);
   const repoId = useAppStore((s) => s.selectedRepoId);
+  const openDetail = useAppStore((s) => s.openDetail);
   const [results, setResults] = useState(() => mockSearch(""));
   const [tookMs, setTookMs] = useState(0);
 
@@ -62,7 +63,18 @@ export default function SearchView() {
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ ...spring, delay: idx * 0.02 }}
+            onClick={() =>
+              /* 点击结果 → 右侧详情面板（360° 视图入口在面板内保留） */
+              openDetail({
+                id: r.id,
+                name: r.name,
+                label: r.label,
+                file: r.file,
+                line: r.line,
+              })
+            }
             className="focus-ring glass group mb-2.5 block w-full px-4 py-3 text-left transition-shadow duration-150 ease-out hover:shadow-[inset_0_0_0_0.5px_rgba(15,23,42,0.06),0_0_0_1px_rgba(255,255,255,0.65),0_2px_6px_rgba(16,24,40,.05),0_16px_40px_-12px_rgba(16,24,40,.14)]"
+            data-testid="search-result"
           >
             <div className="flex items-center gap-2.5">
               <span className="text-[13.5px] font-semibold text-ink">
