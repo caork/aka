@@ -1,0 +1,24 @@
+# —— 控制 build context 体积（engine node_modules ~1GB、target 数 GB）——
+.git
+.claude
+.github
+target
+dist
+docs/assets
+clients
+# CI 里 checkout 的 engine 上游源码（同步进 engine/ 后即冗余）
+engine-src
+
+# 桌面端不进镜像
+apps/desktop/node_modules
+apps/desktop/dist
+apps/desktop/src-tauri/target
+
+# engine：源码进 context，依赖与构建产物在镜像内重装/重建（host 是 macOS 原生二进制）
+engine/gitnexus/node_modules
+engine/gitnexus-shared/node_modules
+engine/gitnexus/dist
+engine/gitnexus-shared/dist
+engine/gitnexus-shared/tsconfig.tsbuildinfo
+
+**/.DS_Store

@@ -1,0 +1,17 @@
+# aka HTTP 服务（非商用：上游 GitNexus 为 PolyForm Noncommercial 1.0）
+# 用法：docker compose up -d  →  http://127.0.0.1:4111/api/health
+# 详见 docs/deploy.md
+services:
+  aka:
+    image: aka:0.1.0
+    build: .
+    container_name: aka
+    # 默认只绑本机回环——CORS 也仅放行 localhost，远程模式是后续 M4 项。
+    ports:
+      - "127.0.0.1:4111:4111"
+    volumes:
+      - aka-data:/data
+    restart: unless-stopped
+
+volumes:
+  aka-data:
