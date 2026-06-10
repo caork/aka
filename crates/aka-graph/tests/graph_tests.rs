@@ -393,6 +393,90 @@ fn lod_snapshot_shape_and_truncation() {
     ));
 }
 
+// ── ego 子图 ─────────────────────────────────────────────────────
+
+#[test]
+fn ego_graph_center_rings_and_edges() {
+    let store = mini_store();
+    let adj = Adjacency::build(&store).unwrap();
+
+    let ego = store.ego_graph(&adj, "a", 2, 2000).unwrap();
+
+    // 中心 i=0 且固定在原点。
+    assert_eq!(ego.nodes[0].id, "a");
+    assert_eq!(ego.nodes[0].i, 0);
+    assert_eq!(ego.nodes[0].x, 0.0);
+    assert_eq!(ego.nodes[0].y, 0.0);
+    assert_eq!(ego.nodes[0].c, 0);
+
+    // BFS 无向分环：ring1 = {main,b,com1}（同度数按稠密下标），ring2 = {c,f1}（度数降序）。
+    let ids: Vec<_> = ego.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, vec!["a", "main", "b", "com1", "c", "f1"]);
+    let i: Vec<_> = ego.nodes.iter().map(|n| n.i).collect();
+    assert_eq!(i, vec![0, 1, 2, 3, 4, 5], "i 必须从 0 紧凑重编号");
+
+    // 环半径 = 深度 × 固定步长；c 字段 = 环号。
+    for n in &ego.nodes {
+        let r = (n.x * n.x + n.y * n.y).sqrt();
+        let expect = n.c as f32 * aka_graph::EGO_RING_STEP;
+        assert!(
+            (r - expect).abs() < 1e-3,
+            "node {} ring {} radius {} != {}",
+            n.id,
+            n.c,
+            r,
+            expect
+        );
+    }
+    let rings: Vec<_> = ego.nodes.iter().map(|n| n.c).collect();
+    assert_eq!(rings, vec![0, 1, 1, 1, 2, 2]);
+
+    // 子图边 = 两端都入选（按 i 序扫描出边）。
+    assert_eq!(ego.edges, vec![0, 2, 0, 3, 1, 0, 1, 3, 2, 4, 2, 3, 5, 1]);
+
+    // 与 LodGraph JSON 完全同形。
+    let v = serde_json::to_value(&ego).unwrap();
+    for key in ["i", "id", "x", "y", "s", "c", "l", "name"] {
+        assert!(!v["nodes"][0][key].is_null(), "missing key {key} in ego node json");
+    }
+}
+
+#[test]
+fn ego_graph_budget_truncates_by_degree() {
+    let store = mini_store();
+    let adj = Adjacency::build(&store).unwrap();
+
+    // 预算 4：center + ring1 全部，ring2 进不来。
+    let ego = store.ego_graph(&adj, "a", 2, 4).unwrap();
+    let ids: Vec<_> = ego.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, vec!["a", "main", "b", "com1"]);
+
+    // 预算 3：ring1 按 (度数降序, 下标升序) 截到 2 个。
+    let ego = store.ego_graph(&adj, "a", 2, 3).unwrap();
+    let ids: Vec<_> = ego.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, vec!["a", "main", "b"]);
+
+    // depth 0 → 只有 center。
+    let ego = store.ego_graph(&adj, "a", 0, 2000).unwrap();
+    assert_eq!(ego.nodes.len(), 1);
+    assert!(ego.edges.is_empty());
+}
+
+#[test]
+fn ego_graph_deterministic_and_missing_center() {
+    let store = mini_store();
+    let adj = Adjacency::build(&store).unwrap();
+
+    let a = serde_json::to_string(&store.ego_graph(&adj, "main", 2, 100).unwrap()).unwrap();
+    let b = serde_json::to_string(&store.ego_graph(&adj, "main", 2, 100).unwrap()).unwrap();
+    assert_eq!(a, b, "ego 输出必须逐位确定");
+
+    assert!(matches!(
+        store.ego_graph(&adj, "nope", 2, 100),
+        Err(GraphError::Invalid(_))
+    ));
+}
+
 // ── perf smoke：10 万节点 / 50 万边（zipf 度分布） ────────────────
 
 struct Lcg(u64);

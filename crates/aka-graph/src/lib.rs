@@ -10,12 +10,14 @@
 //!   （二进制形态）/ [`GraphStore::cluster_graph`]（簇级聚合视图）。
 
 pub mod adjacency;
+pub mod ego;
 pub mod error;
 pub mod layout;
 pub mod lod;
 pub mod store;
 
 pub use adjacency::{Adjacency, Neighbor, CALLS_TYPE, IMPACT_EDGE_TYPES};
+pub use ego::EGO_RING_STEP;
 pub use error::{GraphError, Result};
 pub use layout::compute_layout;
 pub use lod::{ClusterEdge, ClusterGraph, ClusterNode, LodBinary, LodGraph, LodNode};

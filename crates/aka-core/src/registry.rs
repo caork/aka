@@ -26,6 +26,16 @@ pub struct RepoEntry {
     /// 语义检索开关（默认关——用户拍板：embedding 须手动开启）。
     #[serde(default)]
     pub embeddings_enabled: bool,
+    /// 仓库来源：`local` / `git` / `zip`（旧 registry.json 缺省回落 local）。
+    #[serde(default = "default_source_kind")]
+    pub source_kind: String,
+    /// git 来源的 clone URL（local / zip 为 None）。
+    #[serde(default)]
+    pub source_url: Option<String>,
+}
+
+fn default_source_kind() -> String {
+    "local".to_string()
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -96,6 +106,20 @@ impl Registry {
         self.repos.iter().find(|r| r.repo_path == repo_path)
     }
 
+    pub fn find_by_name(&self, name: &str) -> Option<&RepoEntry> {
+        self.repos.iter().find(|r| r.name == name)
+    }
+
+    pub fn find_by_name_mut(&mut self, name: &str) -> Option<&mut RepoEntry> {
+        self.repos.iter_mut().find(|r| r.name == name)
+    }
+
+    pub fn remove_by_name(&mut self, name: &str) -> bool {
+        let before = self.repos.len();
+        self.repos.retain(|r| r.name != name);
+        self.repos.len() != before
+    }
+
     /// 插入或更新（按 repo_path 去重）。
     pub fn upsert(&mut self, entry: RepoEntry) {
         match self.repos.iter_mut().find(|r| r.repo_path == entry.repo_path) {
@@ -139,12 +163,15 @@ mod tests {
             engine_sha: None,
             stats: ArtifactStats::default(),
             embeddings_enabled: false,
+            source_kind: "git".into(),
+            source_url: Some("https://example.com/demo.git".into()),
         });
         reg.save_to(&path).unwrap();
 
         let mut reg2 = Registry::load_from(&path).unwrap();
         assert_eq!(reg2.repos.len(), 1);
         assert!(!reg2.repos[0].embeddings_enabled, "embedding 默认必须是关");
+        assert_eq!(reg2.repos[0].source_kind, "git");
 
         reg2.upsert(RepoEntry {
             name: "demo2".into(),
@@ -154,8 +181,26 @@ mod tests {
             engine_sha: None,
             stats: ArtifactStats::default(),
             embeddings_enabled: false,
+            source_kind: "local".into(),
+            source_url: None,
         });
         assert_eq!(reg2.repos.len(), 1, "同路径 upsert 不新增");
         assert_eq!(reg2.repos[0].name, "demo2");
+    }
+
+    #[test]
+    fn old_registry_without_source_fields_defaults_to_local() {
+        // 旧版 registry.json（无 sourceKind/sourceUrl）必须能加载且回落 local。
+        let body = r#"{"repos":[{"name":"old","repoPath":"/tmp/old","dataDir":"/tmp/old-data"}]}"#;
+        let dir = std::env::temp_dir().join("aka-registry-compat-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        fs::write(&path, body).unwrap();
+
+        let reg = Registry::load_from(&path).unwrap();
+        assert_eq!(reg.repos.len(), 1);
+        assert_eq!(reg.repos[0].source_kind, "local");
+        assert_eq!(reg.repos[0].source_url, None);
     }
 }

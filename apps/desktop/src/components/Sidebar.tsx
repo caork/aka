@@ -1,5 +1,8 @@
 import { motion } from "framer-motion";
+import { useState } from "react";
 import { useAppStore } from "../store";
+import ImportRepoModal from "./ImportRepoModal";
+import RepoSettingsModal from "./RepoSettingsModal";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 
@@ -7,6 +10,12 @@ export default function Sidebar() {
   const repos = useAppStore((s) => s.repos);
   const selectedRepoId = useAppStore((s) => s.selectedRepoId);
   const selectRepo = useAppStore((s) => s.selectRepo);
+  const [importOpen, setImportOpen] = useState(false);
+  const [settingsRepoId, setSettingsRepoId] = useState<string | null>(null);
+
+  const settingsRepo = settingsRepoId
+    ? (repos.find((r) => r.id === settingsRepoId) ?? null)
+    : null;
 
   return (
     <motion.aside
@@ -41,16 +50,25 @@ export default function Sidebar() {
         {repos.map((repo, idx) => {
           const active = repo.id === selectedRepoId;
           return (
-            <motion.button
+            <motion.div
               key={repo.id}
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ ...spring, delay: 0.04 + idx * 0.02 }}
+              role="button"
+              tabIndex={0}
               onClick={() => selectRepo(repo.id)}
-              className="focus-ring group relative mb-0.5 flex w-full items-center gap-2.5 rounded-[10px] px-3 py-2 text-left transition-colors duration-150 ease-out"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  selectRepo(repo.id);
+                }
+              }}
+              className="focus-ring group relative mb-0.5 flex w-full cursor-pointer items-center gap-2.5 rounded-[10px] px-3 py-2 text-left transition-colors duration-150 ease-out"
               style={{
                 background: active ? "rgba(46,124,246,0.09)" : "transparent",
               }}
+              data-testid={`repo-row-${repo.id}`}
             >
               <span className={`beacon ${repo.status}`} />
               <span className="min-w-0 flex-1">
@@ -61,33 +79,85 @@ export default function Sidebar() {
                 >
                   {repo.name}
                 </span>
-                <span className="block truncate text-[11px] text-ink-3">
-                  {repo.status === "indexing"
-                    ? "indexing…"
-                    : repo.status === "idle"
-                      ? "not indexed"
-                      : `${repo.symbols.toLocaleString()} symbols`}
+                <span
+                  className="block truncate text-[11px]"
+                  style={{
+                    color: repo.status === "failed" ? "#b3261e" : undefined,
+                  }}
+                >
+                  <span className={repo.status === "failed" ? "" : "text-ink-3"}>
+                    {repo.status === "indexing"
+                      ? "indexing…"
+                      : repo.status === "failed"
+                        ? (repo.detail ?? "索引失败")
+                        : repo.status === "idle"
+                          ? "not indexed"
+                          : `${repo.symbols.toLocaleString()} symbols`}
+                  </span>
                 </span>
               </span>
-            </motion.button>
+
+              {/* hover gear → per-repo settings */}
+              <button
+                aria-label={`${repo.name} settings`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSettingsRepoId(repo.id);
+                }}
+                className="focus-ring absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[7px] text-ink-3 opacity-0 transition-all duration-150 ease-out hover:bg-[rgba(15,23,42,0.06)] hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+                style={{ background: "rgba(255,255,255,0.7)" }}
+                data-testid={`repo-settings-${repo.id}`}
+              >
+                <GearIcon size={13} />
+              </button>
+            </motion.div>
           );
         })}
       </nav>
 
-      {/* settings */}
+      {/* add repository */}
       <div className="border-t border-[rgba(15,23,42,0.06)] p-3">
-        <button className="focus-ring flex w-full items-center gap-2.5 rounded-[10px] px-3 py-2 text-[13px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.04)]">
-          <GearIcon />
-          Settings
+        <button
+          onClick={() => setImportOpen(true)}
+          className="glass focus-ring flex w-full items-center justify-center gap-2 rounded-[10px] px-3 py-2 text-[13px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-[#2e7cf6]"
+          data-testid="add-repository"
+        >
+          <PlusIcon />
+          Add repository
         </button>
       </div>
+
+      <ImportRepoModal open={importOpen} onClose={() => setImportOpen(false)} />
+      <RepoSettingsModal
+        repo={settingsRepo}
+        onClose={() => setSettingsRepoId(null)}
+      />
     </motion.aside>
   );
 }
 
-function GearIcon() {
+function PlusIcon() {
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M12 5v14M5 12h14"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function GearIcon({ size = 15 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden
+    >
       <path
         d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"
         stroke="currentColor"

@@ -172,17 +172,30 @@ fn register(repo: &std::path::Path, paths: &RepoPaths, artifact: &ArtifactDir) -
         .map(|s| s.trim().to_string());
 
     let mut registry = Registry::load()?;
+    // 同路径重新分析（后台 update 任务也走这里）：继承旧条目的
+    // name / source_kind / source_url / embeddings_enabled，
+    // 不能把 git/zip 来源覆写回 local、也不能丢用户设置。
+    let prev = registry.find(repo).cloned();
     registry.upsert(RepoEntry {
-        name: repo
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "repo".into()),
+        name: prev
+            .as_ref()
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| {
+                repo.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "repo".into())
+            }),
         repo_path: repo.to_path_buf(),
         data_dir: paths.root.clone(),
         indexed_at: Some(now_unix()),
         engine_sha,
         stats: artifact.manifest.stats.clone(),
-        embeddings_enabled: false,
+        embeddings_enabled: prev.as_ref().is_some_and(|e| e.embeddings_enabled),
+        source_kind: prev
+            .as_ref()
+            .map(|e| e.source_kind.clone())
+            .unwrap_or_else(|| "local".into()),
+        source_url: prev.as_ref().and_then(|e| e.source_url.clone()),
     });
     registry.save()?;
     Ok(())

@@ -47,6 +47,14 @@ pub struct RepoInfo {
     /// 索引完成时间（unix 秒）；None = 注册过但尚未成功索引。
     pub indexed_at: Option<u64>,
     pub embeddings_enabled: bool,
+    /// 运行时状态：`ready` / `indexing` / `failed`。
+    pub status: String,
+    /// 来源：`local` / `git` / `zip`。
+    pub source_kind: String,
+    /// git 来源的 clone URL。
+    pub source_url: Option<String>,
+    /// 失败原因等补充信息（status = failed 时携带）。
+    pub detail: Option<String>,
 }
 
 /// 数据层抽象。所有工具（MCP 八件套 + HTTP API）只依赖这个 trait。
@@ -85,5 +93,71 @@ pub trait Backend: Send + Sync + 'static {
     fn graph_lod(&self, repo: &str, max_nodes: usize) -> anyhow::Result<serde_json::Value> {
         let _ = (repo, max_nodes);
         anyhow::bail!("graph_lod not supported by this backend")
+    }
+
+    // ── 仓库管理（导入 / 更新 / 删除 / 设置）──────────────────────
+    // 默认全部 bail "not supported"——只有真实 Backend（aka-cli）覆写。
+    // 导入 / 更新都是 202 语义：调用立即返回仓库名，分析任务在后台执行，
+    // 进度经 `repo_runtime_status` / `list_repos` 的 status 字段暴露。
+
+    /// 导入新仓库。`kind` = `git`（src 为 clone URL）或 `local`（src 为本地路径）。
+    /// 返回最终仓库名；分析在后台执行。
+    fn import_repo(&self, kind: &str, src: &str, name: Option<&str>) -> anyhow::Result<String> {
+        let _ = (kind, src, name);
+        anyhow::bail!("import_repo not supported by this backend")
+    }
+
+    /// 重新拉取并分析（git: pull + analyze；local: 直接 analyze；zip: 报错提示走 update-zip）。
+    fn update_repo(&self, name: &str) -> anyhow::Result<String> {
+        let _ = name;
+        anyhow::bail!("update_repo not supported by this backend")
+    }
+
+    /// 用新 zip 覆盖更新 zip 来源仓库（清空 checkout 后重新解压 + analyze）。
+    fn update_repo_zip(&self, name: &str, zip_path: &std::path::Path) -> anyhow::Result<String> {
+        let _ = (name, zip_path);
+        anyhow::bail!("update_repo_zip not supported by this backend")
+    }
+
+    /// 从 zip 包导入新仓库（解压到受管 checkout 目录 + 后台 analyze）。
+    fn import_repo_zip(&self, name: &str, zip_path: &std::path::Path) -> anyhow::Result<String> {
+        let _ = (name, zip_path);
+        anyhow::bail!("import_repo_zip not supported by this backend")
+    }
+
+    /// 移除仓库：注册表 + 数据目录；受管 checkout 一并删除（用户本地路径不动）。
+    fn remove_repo(&self, name: &str) -> anyhow::Result<()> {
+        let _ = name;
+        anyhow::bail!("remove_repo not supported by this backend")
+    }
+
+    /// 每仓库设置（当前只有 embedding 开关；向量回填是后续版本）。
+    fn set_repo_settings(&self, name: &str, embeddings_enabled: bool) -> anyhow::Result<()> {
+        let _ = (name, embeddings_enabled);
+        anyhow::bail!("set_repo_settings not supported by this backend")
+    }
+
+    /// 节点详情（完整 properties + 度数概要），给前端弹窗用。
+    fn node_detail(&self, repo: &str, id: &str) -> anyhow::Result<serde_json::Value> {
+        let _ = (repo, id);
+        anyhow::bail!("node_detail not supported by this backend")
+    }
+
+    /// 以某节点为中心的 ego 子图（与 LodGraph 同形 JSON），给中心化重渲用。
+    fn ego_graph(
+        &self,
+        repo: &str,
+        id: &str,
+        depth: u32,
+        max_nodes: usize,
+    ) -> anyhow::Result<serde_json::Value> {
+        let _ = (repo, id, depth, max_nodes);
+        anyhow::bail!("ego_graph not supported by this backend")
+    }
+
+    /// 后台任务运行时状态：仓库名 → (status, detail)。
+    /// status ∈ {indexing, failed}；不在 map 里 = ready。
+    fn repo_runtime_status(&self) -> std::collections::HashMap<String, (String, Option<String>)> {
+        Default::default()
     }
 }

@@ -1,0 +1,293 @@
+import { motion } from "framer-motion";
+import { useEffect, useRef, useState } from "react";
+import {
+  deleteRepo,
+  setRepoSettings,
+  updateRepo,
+  updateZip,
+} from "../repo-api";
+import { refreshRepos, useAppStore, type Repo } from "../store";
+import Modal, { ErrorBar } from "./Modal";
+
+/** 每仓库设置：embeddings 开关 / 更新重建 / 移除。 */
+export default function RepoSettingsModal({
+  repo,
+  onClose,
+}: {
+  repo: Repo | null;
+  onClose(): void;
+}) {
+  const [embeddings, setEmbeddings] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"" | "toggle" | "update" | "zip" | "delete">("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const zipRef = useRef<HTMLInputElement>(null);
+
+  /* 弹窗目标变化时同步初始状态 */
+  useEffect(() => {
+    setEmbeddings(repo?.embeddings ?? false);
+    setError(null);
+    setNotice(null);
+    setBusy("");
+    setConfirmDelete(false);
+  }, [repo?.id, repo?.embeddings]);
+
+  if (!repo) return <Modal open={false} onClose={onClose} title="" children={null} />;
+
+  const fail = (e: unknown, fallback: string) => {
+    setError(e instanceof Error ? e.message : fallback);
+  };
+
+  const toggleEmbeddings = async () => {
+    if (busy) return;
+    const next = !embeddings;
+    setEmbeddings(next); /* 乐观切换 */
+    setBusy("toggle");
+    setError(null);
+    setNotice(null);
+    try {
+      await setRepoSettings(repo.name, next);
+      void refreshRepos();
+    } catch (e) {
+      setEmbeddings(!next); /* 回滚 */
+      fail(e, "设置失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const runUpdate = async () => {
+    if (busy) return;
+    setBusy("update");
+    setError(null);
+    setNotice(null);
+    try {
+      await updateRepo(repo.name);
+      setNotice("已开始更新并重建索引——侧栏将显示 indexing 进度");
+      void refreshRepos();
+    } catch (e) {
+      fail(e, "更新失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const runZipUpdate = async (file: File | undefined | null) => {
+    if (!file || busy) return;
+    if (!file.name.toLowerCase().endsWith(".zip")) {
+      setError("仅支持 .zip 文件");
+      return;
+    }
+    setBusy("zip");
+    setError(null);
+    setNotice(null);
+    try {
+      await updateZip(repo.name, file);
+      setNotice("新 zip 已上传——侧栏将显示 indexing 进度");
+      void refreshRepos();
+    } catch (e) {
+      fail(e, "上传失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const runDelete = async () => {
+    if (busy) return;
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    setBusy("delete");
+    setError(null);
+    try {
+      await deleteRepo(repo.name);
+      /* 若删的是当前选中仓库，refreshRepos 会自动回落到首个仓库 */
+      onClose();
+      void refreshRepos();
+    } catch (e) {
+      setBusy("");
+      setConfirmDelete(false);
+      fail(e, "移除失败");
+    }
+  };
+
+  const sourceText =
+    repo.source.kind === "git"
+      ? (repo.source.url ?? "git 仓库")
+      : repo.source.kind === "zip"
+        ? "zip 导入"
+        : repo.path;
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={
+        <span className="flex items-center gap-2">
+          <span className="truncate">{repo.name}</span>
+          <span
+            className="rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-2"
+            style={{ background: "rgba(15,23,42,0.05)" }}
+          >
+            {repo.source.kind}
+          </span>
+        </span>
+      }
+    >
+      {error && <ErrorBar message={error} />}
+      {notice && (
+        <div
+          className="mb-3 rounded-[10px] px-3 py-2 text-[12px]"
+          style={{ background: "rgba(52,199,89,0.1)", color: "#1f7a39" }}
+          data-testid="settings-notice"
+        >
+          {notice}
+        </div>
+      )}
+
+      {/* source info */}
+      <div
+        className="mono mb-4 truncate rounded-[10px] px-3 py-2 text-[11.5px] text-ink-3"
+        style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.08)" }}
+        title={sourceText}
+        data-testid="settings-source"
+      >
+        {sourceText}
+      </div>
+
+      {/* embeddings switch */}
+      <div className="mb-4 flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-medium text-ink">Embeddings</div>
+          <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
+            开启后将下载本地模型并回填向量（后续版本启用计算）
+          </div>
+        </div>
+        <GlassSwitch
+          on={embeddings}
+          disabled={busy === "toggle"}
+          onToggle={() => void toggleEmbeddings()}
+        />
+      </div>
+
+      {/* actions */}
+      <div className="mb-4 border-t border-[rgba(15,23,42,0.06)] pt-4">
+        {repo.source.kind === "zip" ? (
+          <>
+            <button
+              onClick={() => zipRef.current?.click()}
+              disabled={busy !== ""}
+              className="focus-ring w-full rounded-[10px] px-3 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink"
+              style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.1)" }}
+              data-testid="settings-update-zip"
+            >
+              {busy === "zip" ? "上传中…" : "上传新 zip 更新"}
+            </button>
+            <input
+              ref={zipRef}
+              type="file"
+              accept=".zip"
+              className="hidden"
+              onChange={(e) => {
+                void runZipUpdate(e.target.files?.[0]);
+                e.target.value = "";
+              }}
+            />
+          </>
+        ) : (
+          <button
+            onClick={() => void runUpdate()}
+            disabled={busy !== ""}
+            className="focus-ring w-full rounded-[10px] px-3 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink"
+            style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.1)" }}
+            data-testid="settings-update"
+          >
+            {busy === "update" ? "请求中…" : "检查更新并重建索引"}
+          </button>
+        )}
+      </div>
+
+      {/* danger zone */}
+      <div className="border-t border-[rgba(15,23,42,0.06)] pt-4">
+        <button
+          onClick={() => void runDelete()}
+          disabled={busy !== "" && busy !== "delete"}
+          className="focus-ring w-full rounded-[10px] px-3 py-2 text-[12.5px] font-semibold transition-colors duration-150 ease-out"
+          style={
+            confirmDelete
+              ? {
+                  background: "#ff3b30",
+                  color: "#fff",
+                  boxShadow:
+                    "0 0 0 1px rgba(255,59,48,.3), 0 0 18px rgba(255,59,48,.18)",
+                }
+              : {
+                  color: "#b3261e",
+                  boxShadow: "inset 0 0 0 0.5px rgba(255,59,48,0.35)",
+                }
+          }
+          data-testid="settings-delete"
+        >
+          {busy === "delete"
+            ? "移除中…"
+            : confirmDelete
+              ? "确认移除？此操作不可恢复"
+              : "移除仓库"}
+        </button>
+        {confirmDelete && busy !== "delete" && (
+          <button
+            onClick={() => setConfirmDelete(false)}
+            className="focus-ring mt-1.5 w-full rounded-[10px] px-3 py-1.5 text-[12px] text-ink-3 hover:text-ink-2"
+          >
+            取消
+          </button>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+/** iOS 风格玻璃开关，开 = 蓝发光。 */
+function GlassSwitch({
+  on,
+  disabled,
+  onToggle,
+}: {
+  on: boolean;
+  disabled?: boolean;
+  onToggle(): void;
+}) {
+  return (
+    <button
+      role="switch"
+      aria-checked={on}
+      disabled={disabled}
+      onClick={onToggle}
+      className="focus-ring relative mt-0.5 h-[24px] w-[40px] flex-none rounded-full transition-colors duration-150 ease-out"
+      style={{
+        background: on ? "#2e7cf6" : "rgba(15,23,42,0.12)",
+        boxShadow: on
+          ? "0 0 0 1px rgba(46,124,246,.28), 0 0 20px rgba(46,124,246,.18)"
+          : "inset 0 0 0 0.5px rgba(15,23,42,0.08)",
+        opacity: disabled ? 0.6 : 1,
+      }}
+      data-testid="embeddings-switch"
+    >
+      <motion.span
+        className="absolute top-[2px] h-[20px] w-[20px] rounded-full bg-white"
+        style={{ boxShadow: "0 1px 3px rgba(16,24,40,.25)" }}
+        animate={{ left: on ? 18 : 2 }}
+        transition={{ type: "spring", stiffness: 400, damping: 32 }}
+      />
+    </button>
+  );
+}
+
+/** 当前选中仓库的便捷取值（设置弹窗常用）。 */
+export function useRepoById(id: string | null): Repo | null {
+  const repos = useAppStore((s) => s.repos);
+  if (!id) return null;
+  return repos.find((r) => r.id === id) ?? null;
+}

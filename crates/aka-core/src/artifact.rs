@@ -141,7 +141,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         let mut f = File::create(dir.join("nodes.ndjson")).unwrap();
         writeln!(f, r#"{{"id":"n1","label":"Function","properties":{{"name":"foo","filePath":"a.ts","startLine":1,"endLine":3}}}}"#).unwrap();
-        writeln!(f, "").unwrap();
+        writeln!(f).unwrap();
         writeln!(f, r#"{{"id":"n2","label":"Class","properties":{{"name":"Bar"}}}}"#).unwrap();
         let mut f = File::create(dir.join("edges.ndjson")).unwrap();
         writeln!(f, r#"{{"id":"e1","sourceId":"n1","targetId":"n2","type":"CALLS","confidence":0.9,"reason":"local-call"}}"#).unwrap();

@@ -8,7 +8,7 @@ publish.workspace = true
 # Backend trait 与 ops 输出 DTO 共享自 aka-mcp（aka-mcp 不依赖本 crate，无循环）。
 aka-mcp = { path = "../aka-mcp" }
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }

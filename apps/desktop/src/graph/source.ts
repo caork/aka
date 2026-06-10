@@ -1,50 +1,58 @@
-/* Real-data loader — pulls the LOD snapshot from a local `aka serve`
+/* Real-data loader — pulls LOD / ego snapshots from a local `aka serve`
    instance (http://127.0.0.1:4111). Returns null when the server is not
-   running / has no indexed repos, so the caller can fall back to the
-   synthetic demo graph. */
+   running / the repo has no data, so the caller can fall back to the
+   synthetic demo graph (or surface a graceful error for ego mode). */
 
 import { parseGraphJSON, type GraphData, type GraphJSON } from "./format";
 
 const SERVER = "http://127.0.0.1:4111";
 const MAX_NODES = 300_000;
+const EGO_MAX_NODES = 2_000;
 
-interface RepoOut {
-  name: string;
-  nodes?: number;
-}
-
-export interface RealGraph {
-  data: GraphData;
-  repo: string;
-}
-
-export async function loadRealGraph(): Promise<RealGraph | null> {
+/** 指定 repo 的完整 LOD 快照；失败/离线返回 null（调用方回退 demo）。 */
+export async function loadRealGraph(
+  repo: string,
+  signal?: AbortSignal,
+): Promise<GraphData | null> {
   try {
-    const rr = await fetch(`${SERVER}/api/repos`, {
-      signal: AbortSignal.timeout(1500),
-    });
-    if (!rr.ok) return null;
-    const body = (await rr.json()) as { repos?: RepoOut[] };
-    const repos = body.repos ?? [];
-    if (repos.length === 0) return null;
-
-    /* 节点最多的仓库最值得看 */
-    const best = [...repos].sort((a, b) => (b.nodes ?? 0) - (a.nodes ?? 0))[0];
     const lr = await fetch(
-      `${SERVER}/api/graph/lod?repo=${encodeURIComponent(best.name)}&max_nodes=${MAX_NODES}`,
-      { signal: AbortSignal.timeout(20_000) },
+      `${SERVER}/api/graph/lod?repo=${encodeURIComponent(repo)}&max_nodes=${MAX_NODES}`,
+      { signal: signal ?? AbortSignal.timeout(20_000) },
     );
     if (!lr.ok) return null;
-    const json = (await lr.json()) as GraphJSON;
-    if (!json.nodes?.length) return null;
-
-    /* renderer 的 edgeFraction 远景采样假设边序无偏；服务端按源节点
-       排序输出，这里洗牌一次（确定性 LCG，刷新结果稳定）。 */
-    shuffleEdgePairs(json.edges);
-    return { data: parseGraphJSON(json), repo: best.name };
-  } catch {
+    return parseGraphBody((await lr.json()) as GraphJSON);
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
     return null;
   }
+}
+
+/** 以某节点为中心的 ego 子图（中心节点 i=0 在原点）；不支持/失败返回 null。 */
+export async function loadEgoGraph(
+  repo: string,
+  id: string,
+  depth = 2,
+  signal?: AbortSignal,
+): Promise<GraphData | null> {
+  try {
+    const lr = await fetch(
+      `${SERVER}/api/graph/ego?repo=${encodeURIComponent(repo)}&id=${encodeURIComponent(id)}&depth=${depth}&max_nodes=${EGO_MAX_NODES}`,
+      { signal: signal ?? AbortSignal.timeout(20_000) },
+    );
+    if (!lr.ok) return null;
+    return parseGraphBody((await lr.json()) as GraphJSON);
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    return null;
+  }
+}
+
+function parseGraphBody(json: GraphJSON): GraphData | null {
+  if (!json.nodes?.length) return null;
+  /* renderer 的 edgeFraction 远景采样假设边序无偏；服务端按源节点
+     排序输出，这里洗牌一次（确定性 LCG，刷新结果稳定）。 */
+  shuffleEdgePairs(json.edges);
+  return parseGraphJSON(json);
 }
 
 function shuffleEdgePairs(edges: number[]): void {

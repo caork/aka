@@ -39,6 +39,13 @@ async fn list_repos_shape() {
     assert_eq!(repos[0]["embeddings"], false);
     // beta 未索引：indexed_at 直接省略（token 友好）。
     assert!(repos[1].get("indexed_at").is_none());
+    // 合同新增字段：status / source{kind,url} / detail（后两者显式 null）。
+    assert_eq!(repos[0]["status"], "ready");
+    assert_eq!(repos[0]["source"]["kind"], "local");
+    assert!(repos[0]["source"]["url"].is_null());
+    assert!(repos[0]["detail"].is_null());
+    assert_eq!(repos[1]["source"]["kind"], "git");
+    assert_eq!(repos[1]["source"]["url"], "https://example.com/beta.git");
 }
 
 #[tokio::test]

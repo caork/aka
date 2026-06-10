@@ -124,6 +124,10 @@ impl Backend for MockBackend {
                 edges: 4,
                 indexed_at: Some(1_750_000_000),
                 embeddings_enabled: false,
+                status: "ready".into(),
+                source_kind: "local".into(),
+                source_url: None,
+                detail: None,
             },
             RepoInfo {
                 name: "beta".into(),
@@ -132,6 +136,10 @@ impl Backend for MockBackend {
                 edges: 0,
                 indexed_at: None,
                 embeddings_enabled: false,
+                status: "ready".into(),
+                source_kind: "git".into(),
+                source_url: Some("https://example.com/beta.git".into()),
+                detail: None,
             },
         ])
     }

@@ -151,6 +151,10 @@ body {
 .beacon.idle {
   background: #c3ccd9;
 }
+.beacon.failed {
+  background: #ff3b30;
+  box-shadow: 0 0 0 2.5px rgba(255, 59, 48, 0.14);
+}
 
 @keyframes beacon-pulse {
   0%,

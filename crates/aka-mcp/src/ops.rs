@@ -60,6 +60,14 @@ impl From<SymbolRef> for RefOut {
     }
 }
 
+/// 仓库来源（合同：`{"kind":"local|git|zip","url":string|null}`）。
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SourceOut {
+    pub kind: String,
+    /// 合同要求显式 null，不省略。
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RepoOut {
     pub name: String,
@@ -69,6 +77,11 @@ pub struct RepoOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexed_at: Option<u64>,
     pub embeddings: bool,
+    /// `ready` / `indexing` / `failed`。
+    pub status: String,
+    pub source: SourceOut,
+    /// 失败原因等补充信息；合同要求显式 null。
+    pub detail: Option<String>,
 }
 
 impl From<RepoInfo> for RepoOut {
@@ -80,6 +93,12 @@ impl From<RepoInfo> for RepoOut {
             edges: r.edges,
             indexed_at: r.indexed_at,
             embeddings: r.embeddings_enabled,
+            status: r.status,
+            source: SourceOut {
+                kind: r.source_kind,
+                url: r.source_url,
+            },
+            detail: r.detail,
         }
     }
 }
