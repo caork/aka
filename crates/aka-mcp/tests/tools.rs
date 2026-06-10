@@ -1,0 +1,222 @@
+//! 八个工具 handler 的输出 JSON 形状测试（直接调用，不走 transport）。
+
+use std::sync::Arc;
+
+use aka_mcp::backend::{Backend, RepoInfo, SearchHit, SymbolRef};
+use aka_mcp::mock::MockBackend;
+use aka_mcp::service::{
+    AkaMcpServer, AnalyzeParams, AugmentParams, ImpactParams, QueryParams, ReferencesParams,
+    SymbolParams,
+};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::CallToolResult;
+use serde_json::Value;
+
+fn server() -> AkaMcpServer {
+    AkaMcpServer::new(Arc::new(MockBackend::demo()))
+}
+
+/// 取工具结果里的 JSON 文本并解析。
+fn text_json(res: &CallToolResult) -> Value {
+    assert_ne!(res.is_error, Some(true), "tool errored: {res:?}");
+    assert_eq!(res.content.len(), 1, "expect single text content");
+    let raw = &res.content[0].as_text().expect("text content").text;
+    serde_json::from_str(raw).expect("output is valid JSON")
+}
+
+fn keys(v: &Value) -> Vec<&str> {
+    v.as_object().unwrap().keys().map(String::as_str).collect()
+}
+
+#[tokio::test]
+async fn list_repos_shape() {
+    let res = server().list_repos().await.unwrap();
+    let v = text_json(&res);
+    let repos = v["repos"].as_array().unwrap();
+    assert_eq!(repos.len(), 2);
+    assert_eq!(repos[0]["name"], "demo");
+    assert_eq!(repos[0]["nodes"], 5);
+    assert_eq!(repos[0]["embeddings"], false);
+    // beta 未索引：indexed_at 直接省略（token 友好）。
+    assert!(repos[1].get("indexed_at").is_none());
+}
+
+#[tokio::test]
+async fn query_shape() {
+    let res = server()
+        .query(Parameters(QueryParams {
+            repo: Some("demo".into()),
+            query: "handle".into(),
+            limit: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(keys(&v), ["hits"]);
+    let hits = v["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    let hit = &hits[0];
+    assert_eq!(hit["name"], "handle_request");
+    assert_eq!(hit["label"], "Function");
+    assert_eq!(hit["file"], "src/handler.rs");
+    assert_eq!(hit["line"], 12);
+    assert!(hit["score"].as_f64().unwrap() > 0.0);
+    assert!(hit["snip"].as_str().unwrap().contains("handle_request"));
+}
+
+#[tokio::test]
+async fn context_shape() {
+    let res = server()
+        .context(Parameters(SymbolParams {
+            repo: None,
+            symbol: "handle_request".into(),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["symbol"], "handle_request");
+    assert_eq!(v["defs"].as_array().unwrap().len(), 1);
+    let callers: Vec<_> = v["callers"].as_array().unwrap().iter().map(|r| &r["name"]).collect();
+    assert_eq!(callers, [&Value::from("main")]);
+    let callees: Vec<_> = v["callees"].as_array().unwrap().iter().map(|r| &r["name"]).collect();
+    assert_eq!(callees, [&Value::from("parse_config"), &Value::from("write_output")]);
+    assert_eq!(v["refs"].as_array().unwrap()[0]["edge"], "CALLS");
+}
+
+#[tokio::test]
+async fn find_definition_shape() {
+    let res = server()
+        .find_definition(Parameters(SymbolParams {
+            repo: None,
+            symbol: "parse_config".into(),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    let defs = v["defs"].as_array().unwrap();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0]["file"], "src/config.rs");
+    assert_eq!(defs[0]["line"], 8);
+
+    // 未知符号 → 空数组而不是错误。
+    let res = server()
+        .find_definition(Parameters(SymbolParams { repo: None, symbol: "nope".into() }))
+        .await
+        .unwrap();
+    assert!(text_json(&res)["defs"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn search_references_shape() {
+    let res = server()
+        .search_references(Parameters(ReferencesParams {
+            repo: None,
+            symbol: "read_file".into(),
+            limit: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    let refs = v["refs"].as_array().unwrap();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0]["name"], "parse_config");
+    assert_eq!(refs[0]["edge"], "CALLS");
+    assert_eq!(refs[0]["depth"], 1);
+}
+
+#[tokio::test]
+async fn impact_shape() {
+    let res = server()
+        .impact(Parameters(ImpactParams {
+            repo: None,
+            symbol: "read_file".into(),
+            depth: None, // 默认 2 跳
+            limit: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["count"], 2);
+    let impacted = v["impacted"].as_array().unwrap();
+    assert_eq!(impacted[0]["name"], "parse_config");
+    assert_eq!(impacted[0]["depth"], 1);
+    assert_eq!(impacted[1]["name"], "handle_request");
+    assert_eq!(impacted[1]["depth"], 2);
+}
+
+#[tokio::test]
+async fn analyze_shape() {
+    let res = server()
+        .analyze(Parameters(AnalyzeParams { repo_path: "/tmp/demo".into() }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(keys(&v), ["summary"]);
+    assert!(v["summary"].as_str().unwrap().contains("/tmp/demo"));
+}
+
+#[tokio::test]
+async fn augment_shape() {
+    let res = server()
+        .augment(Parameters(AugmentParams { repo: None, query: "main".into() }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "substring 'main' → main + beta_main");
+    let first = &items[0];
+    assert_eq!(first["hit"]["name"], "main");
+    assert!(first["callers"].as_array().unwrap().is_empty());
+    let callees: Vec<_> =
+        first["callees"].as_array().unwrap().iter().map(|r| &r["name"]).collect();
+    assert_eq!(callees, [&Value::from("handle_request")]);
+}
+
+// ---- 错误路径：Backend 故障必须变成 in-band tool error，不能炸协议 ----
+
+struct FailBackend;
+
+impl Backend for FailBackend {
+    fn list_repos(&self) -> anyhow::Result<Vec<RepoInfo>> {
+        anyhow::bail!("index corrupted")
+    }
+    fn search(&self, _: Option<&str>, _: &str, _: usize) -> anyhow::Result<Vec<SearchHit>> {
+        anyhow::bail!("index corrupted")
+    }
+    fn find_definition(&self, _: Option<&str>, _: &str) -> anyhow::Result<Vec<SearchHit>> {
+        anyhow::bail!("index corrupted")
+    }
+    fn references(&self, _: Option<&str>, _: &str, _: usize) -> anyhow::Result<Vec<SymbolRef>> {
+        anyhow::bail!("index corrupted")
+    }
+    fn callers(&self, _: Option<&str>, _: &str, _: u32) -> anyhow::Result<Vec<SymbolRef>> {
+        anyhow::bail!("index corrupted")
+    }
+    fn callees(&self, _: Option<&str>, _: &str, _: u32) -> anyhow::Result<Vec<SymbolRef>> {
+        anyhow::bail!("index corrupted")
+    }
+    fn impact(
+        &self,
+        _: Option<&str>,
+        _: &str,
+        _: u32,
+        _: usize,
+    ) -> anyhow::Result<Vec<SymbolRef>> {
+        anyhow::bail!("index corrupted")
+    }
+    fn analyze(&self, _: &str) -> anyhow::Result<String> {
+        anyhow::bail!("index corrupted")
+    }
+}
+
+#[tokio::test]
+async fn backend_error_is_in_band() {
+    let server = AkaMcpServer::new(Arc::new(FailBackend));
+    let res = server
+        .query(Parameters(QueryParams { repo: None, query: "x".into(), limit: None }))
+        .await
+        .unwrap(); // 协议层 Ok
+    assert_eq!(res.is_error, Some(true));
+    let text = &res.content[0].as_text().unwrap().text;
+    assert!(text.contains("index corrupted"));
+}

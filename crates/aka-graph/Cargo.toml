@@ -4,4 +4,15 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+default = ["rayon"]
+# 并行布局（簇内坐标计算）。关掉则单线程，输出逐位一致。
+rayon = ["dep:rayon"]
+
 [dependencies]
+aka-core = { path = "../aka-core" }
+rayon = { version = "1.12", optional = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
