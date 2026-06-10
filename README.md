@@ -29,11 +29,26 @@ Rust core       aka-search (tantivy BM25 + usearch 向量 + RRF)
 
 ## 里程碑
 
-- **M0** 地基：engine 分支（上游 v1.6.7 + Ascend C 移植）、emit 工件层、golden 对比测试 ← 当前
-- **M1** Rust 索引核心：工件摄取 + tantivy + usearch，`aka analyze` / `aka search`
-- **M2** MCP 八工具齐平，接入 Claude Code dogfood
-- **M3** Tauri 桌面 MVP（仓库管理 / 搜索 / 符号 360° / 图谱 LOD）
-- **M4** headless daemon 部署 Jensen + 远程模式
+- **M0** ✅ engine 分支（上游 v1.6.7 + Ascend C 移植 25/25）、emit 工件层（合同 v0）、demo-ts E2E
+- **M1** ✅ Rust 索引核心：tantivy(代码感知 tokenizer) + usearch + RRF + SQLite/CSR 图存储；`aka analyze/search/context/lod`
+- **M2** ✅ MCP 八工具（rmcp stdio）+ axum HTTP；`aka mcp` 可直接接 Claude Code
+- **M3** ✅ 桌面 MVP：液态玻璃三视图全接真实数据；WebGL2 渲染器 500K 节点/1M 边 60fps，gitnexus 8.6K 节点实测
+- **M4** ◐ `aka serve` headless 可用；Docker 化 + Jensen 部署 + 远程模式待做
+- 待办：embedding 开关落地（本地 fastembed，默认关）、增量索引接 fileHashes、Tauri 打包(sidecar Bun compile)、wiki/group 按需移植
+
+## 快速使用
+
+```bash
+cargo build -p aka-cli
+./target/debug/aka analyze <repo>     # engine 解析 + 索引
+./target/debug/aka search "query"     # BM25 检索
+./target/debug/aka context <symbol>   # 符号 360°
+./target/debug/aka mcp                # MCP stdio（接 Claude Code: claude mcp add aka -- <abs路径>/aka mcp）
+./target/debug/aka serve              # HTTP :4111（桌面端数据源）
+cd apps/desktop && npm run dev        # 桌面 UI（自动连 serve，离线回退 demo）
+```
+
+实测截图见 [docs/assets/](docs/assets/)。
 
 ## 相关仓库
 
