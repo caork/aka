@@ -27,16 +27,7 @@ export default function Sidebar() {
     >
       {/* logo */}
       <div className="flex items-center gap-2.5 px-5 pb-4 pt-6">
-        <div
-          className="flex h-7 w-7 items-center justify-center rounded-[9px] text-[13px] font-bold text-white"
-          style={{
-            background: "linear-gradient(135deg, #2e7cf6, #5a9bff)",
-            boxShadow:
-              "0 0 0 1px rgba(46,124,246,.28), 0 0 20px rgba(46,124,246,.16)",
-          }}
-        >
-          a
-        </div>
+        <img src="/logo.png" alt="aka logo" className="h-7 w-7" draggable={false} />
         <div className="text-[15px] font-semibold tracking-tight text-ink">
           aka
         </div>
