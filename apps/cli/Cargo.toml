@@ -1,0 +1,11 @@
+[package]
+name = "aka-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "aka"
+path = "src/main.rs"
+
+[dependencies]

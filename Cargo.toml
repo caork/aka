@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aka-core",
+    "crates/aka-search",
+    "crates/aka-graph",
+    "crates/aka-mcp",
+    "crates/aka-server",
+    "apps/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
