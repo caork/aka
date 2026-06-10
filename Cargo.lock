@@ -16,8 +16,14 @@ name = "aka-cli"
 version = "0.1.0"
 dependencies = [
  "aka-core",
+ "aka-graph",
+ "aka-mcp",
+ "aka-search",
+ "aka-server",
  "anyhow",
  "clap",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

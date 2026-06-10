@@ -46,6 +46,10 @@ impl EngineRunner {
         Ok(Self { engine_dir })
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.engine_dir
+    }
+
     /// 从环境变量或默认位置发现 engine 目录。
     pub fn discover(explicit: Option<&Path>) -> Result<Self, EngineError> {
         if let Some(dir) = explicit {

@@ -10,5 +10,11 @@ path = "src/main.rs"
 
 [dependencies]
 aka-core = { path = "../../crates/aka-core" }
+aka-graph = { path = "../../crates/aka-graph" }
+aka-mcp = { path = "../../crates/aka-mcp" }
+aka-search = { path = "../../crates/aka-search" }
+aka-server = { path = "../../crates/aka-server" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
