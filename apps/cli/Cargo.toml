@@ -9,3 +9,6 @@ name = "aka"
 path = "src/main.rs"
 
 [dependencies]
+aka-core = { path = "../../crates/aka-core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
