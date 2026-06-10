@@ -8,7 +8,7 @@
 //! - `GET  /api/repos`          — 已索引仓库列表
 //! - `POST /api/query`          — 混合检索 `{ repo?, query, limit? }`
 //! - `POST /api/symbol/context` — 符号 360° 上下文 `{ repo?, symbol }`
-//! - `GET  /api/graph/lod`      — 图 LOD 数据（暂 501，由图谱批次接入）
+//! - `GET  /api/graph/lod`      — 图 LOD 数据 `?repo=&max_nodes=`（Backend 不支持时 501）
 //!
 //! CORS 仅放行 localhost / 127.0.0.1 / [::1] 来源（任意端口）。
 
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router, extract::State};
+use axum::{Json, Router, extract::Query, extract::State};
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -153,12 +153,38 @@ async fn symbol_context(
     run(b, move |b| ops::context(b, req.repo.as_deref(), &req.symbol)).await
 }
 
-/// 图 LOD 数据由图谱批次（aka-graph）接入后实现；先占住路由返回 501。
-async fn graph_lod() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({ "error": "graph LOD endpoint not implemented yet" })),
-    )
+#[derive(Deserialize)]
+struct LodParams {
+    repo: String,
+    #[serde(default = "default_max_nodes")]
+    max_nodes: usize,
+}
+
+fn default_max_nodes() -> usize {
+    50_000
+}
+
+/// 图 LOD 数据 — Backend 未接图存储（如 Mock）时保持 501 语义。
+async fn graph_lod(State(b): State<AppState>, Query(p): Query<LodParams>) -> Response {
+    let res = tokio::task::spawn_blocking(move || b.graph_lod(&p.repo, p.max_nodes)).await;
+    match res {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) if e.to_string().contains("not supported") => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("{e:#}") })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("backend task failed: {e}") })),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(test)]

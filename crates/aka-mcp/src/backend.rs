@@ -79,4 +79,11 @@ pub trait Backend: Send + Sync + 'static {
 
     /// 触发（重新）分析一个仓库，返回任务描述 / 结果摘要。
     fn analyze(&self, repo_path: &str) -> anyhow::Result<String>;
+
+    /// 图 LOD 快照（aka-graph `LodGraph` 的 JSON 形状），给可视化用。
+    /// 默认不支持——只有接了图存储的 Backend 才覆写。
+    fn graph_lod(&self, repo: &str, max_nodes: usize) -> anyhow::Result<serde_json::Value> {
+        let _ = (repo, max_nodes);
+        anyhow::bail!("graph_lod not supported by this backend")
+    }
 }

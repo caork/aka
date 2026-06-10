@@ -3,3 +3,6 @@ node_modules/
 dist/
 .DS_Store
 engine/vendor/**/build/
+/engine/gitnexus/
+/engine/gitnexus-shared/
+.playwright-mcp/

@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { Camera } from "../graph/camera";
 import { generateDemoGraph } from "../graph/demo";
+import { loadRealGraph } from "../graph/source";
 import type { GraphData } from "../graph/format";
 import { SpatialGrid } from "../graph/grid";
 import { LabelOverlay } from "../graph/labels";
@@ -104,10 +105,8 @@ export default function GraphView() {
     const ro = new ResizeObserver(applySize);
     ro.observe(container);
 
-    /* ---- demo data (deferred so the loading card paints first) ---- */
-    const genTimer = window.setTimeout(() => {
-      if (disposed) return;
-      const data = generateDemoGraph();
+    /* ---- data: real graph from `aka serve` first, demo fallback ---- */
+    const applyData = (data: GraphData) => {
       const grid = new SpatialGrid(data.positions, data.count, data.bounds);
 
       /* beacons: highest-degree hubs across distinct clusters */
@@ -147,6 +146,14 @@ export default function GraphView() {
         edges: data.edgeCount,
         ready: true,
       }));
+    };
+
+    const genTimer = window.setTimeout(() => {
+      if (disposed) return;
+      void loadRealGraph().then((real) => {
+        if (disposed) return;
+        applyData(real ? real.data : generateDemoGraph());
+      });
     }, 40);
 
     /* ---- interaction ---- */

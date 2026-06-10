@@ -88,14 +88,28 @@ async fn symbol_context_aggregates() {
 }
 
 #[tokio::test]
-async fn graph_lod_is_501() {
+async fn graph_lod_is_501_on_unsupported_backend() {
+    // MockBackend 不覆写 graph_lod → 默认 "not supported" → 501。
     let res = app()
-        .oneshot(Request::get("/api/graph/lod").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/api/graph/lod?repo=demo")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED);
     let v = body_json(res).await;
-    assert!(v["error"].as_str().unwrap().contains("not implemented"));
+    assert!(v["error"].as_str().unwrap().contains("not supported"));
+}
+
+#[tokio::test]
+async fn graph_lod_missing_repo_is_400() {
+    let res = app()
+        .oneshot(Request::get("/api/graph/lod").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

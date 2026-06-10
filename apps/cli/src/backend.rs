@@ -281,6 +281,14 @@ impl Backend for AkaBackend {
         })
     }
 
+    fn graph_lod(&self, repo: &str, max_nodes: usize) -> Result<serde_json::Value> {
+        let handles = self.targets(Some(repo))?;
+        let handle = handles.first().context("repo handle")?;
+        let store = handle.store.lock().expect("store lock");
+        let lod = store.lod_snapshot(max_nodes)?;
+        Ok(serde_json::to_value(lod)?)
+    }
+
     fn analyze(&self, repo_path: &str) -> Result<String> {
         let summary = crate::run_analyze(PathBuf::from(repo_path), None, false)
             .map_err(|e| anyhow!("{e:#}"))?;

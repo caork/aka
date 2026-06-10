@@ -1,13 +1,31 @@
 import { motion } from "framer-motion";
-import { useMemo } from "react";
+import { useEffect, useState } from "react";
 import { mockSearch } from "../mock";
+import { runSearch } from "../search-api";
 import { useAppStore } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 
 export default function SearchView() {
   const query = useAppStore((s) => s.query);
-  const results = useMemo(() => mockSearch(query), [query]);
+  const repoId = useAppStore((s) => s.selectedRepoId);
+  const [results, setResults] = useState(() => mockSearch(""));
+  const [tookMs, setTookMs] = useState(0);
+
+  useEffect(() => {
+    let stale = false;
+    const t = window.setTimeout(() => {
+      void runSearch(query, repoId || null).then((out) => {
+        if (stale) return;
+        setResults(out.results);
+        setTookMs(out.tookMs);
+      });
+    }, 120);
+    return () => {
+      stale = true;
+      window.clearTimeout(t);
+    };
+  }, [query, repoId]);
 
   return (
     <div className="scroll-area h-full px-6 py-5" data-testid="search-view">
@@ -17,7 +35,7 @@ export default function SearchView() {
             {query ? `Results for “${query}”` : "Top symbols"}
           </h2>
           <span className="tabular text-[12px] text-ink-3">
-            {results.length} matches · 3.2 ms
+            {results.length} matches · {tookMs.toFixed(1)} ms
           </span>
         </div>
 
