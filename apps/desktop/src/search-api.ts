@@ -2,6 +2,7 @@
    Falls back to the mock dataset when the server is offline. */
 
 import { mockSearch, type SearchResult } from "./mock";
+import { invokeDesktop, isDesktopRuntime } from "./desktop-api";
 
 const SERVER = "http://127.0.0.1:4111";
 
@@ -40,18 +41,13 @@ export async function runSearch(
 ): Promise<SearchOutcome> {
   const t0 = performance.now();
   try {
-    const r = await fetch(`${SERVER}/api/query`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        query: query.trim() || "a",
-        repo: repo ?? undefined,
-        limit: 30,
-      }),
-      signal: AbortSignal.timeout(2500),
-    });
-    if (!r.ok) throw new Error(String(r.status));
-    const body = (await r.json()) as { hits?: HitOut[] };
+    const body = isDesktopRuntime()
+      ? await invokeDesktop<{ hits?: HitOut[] }>("query", {
+          query: query.trim() || "a",
+          repo: repo ?? undefined,
+          limit: 30,
+        })
+      : await runSearchHttp(query, repo);
     const results: SearchResult[] = (body.hits ?? []).map((h) => ({
       id: h.id,
       name: h.name || h.file.split("/").pop() || h.id,
@@ -71,6 +67,24 @@ export async function runSearch(
       live: false,
     };
   }
+}
+
+async function runSearchHttp(
+  query: string,
+  repo: string | null,
+): Promise<{ hits?: HitOut[] }> {
+  const r = await fetch(`${SERVER}/api/query`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      query: query.trim() || "a",
+      repo: repo ?? undefined,
+      limit: 30,
+    }),
+    signal: AbortSignal.timeout(2500),
+  });
+  if (!r.ok) throw new Error(String(r.status));
+  return (await r.json()) as { hits?: HitOut[] };
 }
 
 /* ---- Symbol 360° 上下文（POST /api/symbol/context）——
@@ -107,6 +121,12 @@ export async function fetchSymbolContext(
   signal?: AbortSignal,
 ): Promise<SymbolContextResult> {
   try {
+    if (isDesktopRuntime()) {
+      return await invokeDesktop<SymbolContext>("symbol_context", {
+        symbol,
+        repo: repo ?? undefined,
+      });
+    }
     const r = await fetch(`${SERVER}/api/symbol/context`, {
       method: "POST",
       headers: { "content-type": "application/json" },

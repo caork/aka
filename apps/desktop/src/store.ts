@@ -7,6 +7,7 @@ import {
   type ResolvedTheme,
   type ThemeMode,
 } from "./theme";
+import { invokeDesktop, isDesktopRuntime } from "./desktop-api";
 
 export type ViewId = "code" | "graph";
 
@@ -161,11 +162,9 @@ let refreshSeq = 0;
 export async function refreshRepos(): Promise<void> {
   const seq = ++refreshSeq;
   try {
-    const r = await fetch(`${SERVER}/api/repos`, {
-      signal: AbortSignal.timeout(2500),
-    });
-    if (!r.ok) return;
-    const body = (await r.json()) as { repos?: RepoOut[] };
+    const body = isDesktopRuntime()
+      ? await invokeDesktop<{ repos?: RepoOut[] }>("list_repos")
+      : await fetchReposHttp();
     if (seq !== refreshSeq) return; /* 已被更新的一次刷新取代 */
     const repos = (body.repos ?? []).map(mapRepo);
     if (repos.length === 0) return;
@@ -183,6 +182,14 @@ export async function refreshRepos(): Promise<void> {
   } catch {
     /* server 未启动——保留现有数据 */
   }
+}
+
+async function fetchReposHttp(): Promise<{ repos?: RepoOut[] }> {
+  const r = await fetch(`${SERVER}/api/repos`, {
+    signal: AbortSignal.timeout(2500),
+  });
+  if (!r.ok) return {};
+  return (await r.json()) as { repos?: RepoOut[] };
 }
 
 function schedulePoll(needed: boolean): void {

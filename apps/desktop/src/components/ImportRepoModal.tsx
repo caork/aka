@@ -1,5 +1,7 @@
 import { motion } from "framer-motion";
 import { useRef, useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { isDesktopRuntime } from "../desktop-api";
 import { importRepo, importZip } from "../repo-api";
 import { refreshRepos } from "../store";
 import Modal, { ErrorBar, Field, TextInput } from "./Modal";
@@ -26,6 +28,7 @@ export default function ImportRepoModal({
   const [localPath, setLocalPath] = useState("");
   const [zipName, setZipName] = useState("");
   const [zipFile, setZipFile] = useState<File | null>(null);
+  const [zipPath, setZipPath] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +40,7 @@ export default function ImportRepoModal({
     setLocalPath("");
     setZipName("");
     setZipFile(null);
+    setZipPath("");
     setError(null);
     setBusy(false);
   };
@@ -60,13 +64,48 @@ export default function ImportRepoModal({
     }
   };
 
+  const pickLocalDirectory = async () => {
+    try {
+      const selected = await openDialog({ directory: true, multiple: false });
+      if (typeof selected !== "string") return;
+      setLocalPath(selected);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "选择目录失败");
+    }
+  };
+
+  const pickDesktopZip = async () => {
+    try {
+      const selected = await openDialog({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "Zip archive", extensions: ["zip"] }],
+      });
+      if (typeof selected !== "string") return;
+      setZipPath(selected);
+      setError(null);
+      if (!zipName.trim()) {
+        setZipName(
+          selected
+            .split(/[\\/]/)
+            .pop()
+            ?.replace(/\.zip$/i, "") ?? "",
+        );
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "选择 zip 失败");
+    }
+  };
+
   const canSubmit =
     !busy &&
     (kind === "git"
       ? gitUrl.trim().length > 0
       : kind === "local"
         ? localPath.trim().length > 0
-        : zipFile !== null && zipName.trim().length > 0);
+        : (isDesktopRuntime() ? zipPath.trim().length > 0 : zipFile !== null) &&
+          zipName.trim().length > 0);
 
   const submit = async () => {
     if (!canSubmit) return;
@@ -82,7 +121,7 @@ export default function ImportRepoModal({
       } else if (kind === "local") {
         await importRepo({ kind: "local", path: localPath.trim() });
       } else {
-        await importZip(zipName.trim(), zipFile!);
+        await importZip(zipName.trim(), isDesktopRuntime() ? zipPath.trim() : zipFile!);
       }
       reset();
       onClose();
@@ -156,27 +195,54 @@ export default function ImportRepoModal({
       )}
 
       {kind === "local" && (
-        <Field label="本地路径" hint="Tauri 环境后续接文件选择器">
-          <TextInput
-            value={localPath}
-            onChange={(e) => setLocalPath(e.target.value)}
-            placeholder="/path/to/repo"
-            autoFocus
-            data-testid="import-local-path"
-          />
+        <Field label="本地路径" hint={isDesktopRuntime() ? "选择本机代码仓库目录" : undefined}>
+          {isDesktopRuntime() ? (
+            <button
+              type="button"
+              onClick={() => void pickLocalDirectory()}
+              className="cmd-input focus-ring flex h-9 w-full items-center px-3 text-left text-[13px]"
+              data-testid="import-local-picker"
+            >
+              <span
+                className={
+                  localPath
+                    ? "mono min-w-0 truncate text-ink"
+                    : "min-w-0 truncate text-ink-3"
+                }
+              >
+                {localPath || "选择仓库文件夹"}
+              </span>
+            </button>
+          ) : (
+            <TextInput
+              value={localPath}
+              onChange={(e) => setLocalPath(e.target.value)}
+              placeholder="/path/to/repo"
+              autoFocus
+              data-testid="import-local-path"
+            />
+          )}
         </Field>
       )}
 
       {kind === "zip" && (
         <>
           <button
-            onClick={() => fileRef.current?.click()}
+            onClick={() =>
+              isDesktopRuntime()
+                ? void pickDesktopZip()
+                : fileRef.current?.click()
+            }
             onDragOver={(e) => {
+              if (isDesktopRuntime()) return;
               e.preventDefault();
               setDragOver(true);
             }}
-            onDragLeave={() => setDragOver(false)}
+            onDragLeave={() => {
+              if (!isDesktopRuntime()) setDragOver(false);
+            }}
             onDrop={(e) => {
+              if (isDesktopRuntime()) return;
               e.preventDefault();
               setDragOver(false);
               pickZip(e.dataTransfer.files?.[0]);
@@ -192,7 +258,16 @@ export default function ImportRepoModal({
             }}
             data-testid="import-zip-drop"
           >
-            {zipFile ? (
+            {isDesktopRuntime() && zipPath ? (
+              <>
+                <span className="mono max-w-full truncate text-[12.5px] font-semibold text-ink">
+                  {zipPath.split(/[\\/]/).pop()}
+                </span>
+                <span className="max-w-full truncate text-[11px] text-ink-3">
+                  {zipPath}
+                </span>
+              </>
+            ) : zipFile ? (
               <>
                 <span className="mono max-w-full truncate text-[12.5px] font-semibold text-ink">
                   {zipFile.name}
@@ -204,7 +279,7 @@ export default function ImportRepoModal({
             ) : (
               <>
                 <span className="text-[12.5px] font-medium text-ink-2">
-                  拖拽 .zip 到这里，或点击选择
+                  {isDesktopRuntime() ? "点击选择 .zip 文件" : "拖拽 .zip 到这里，或点击选择"}
                 </span>
                 <span className="text-[11px] text-ink-3">
                   压缩包内应为代码仓库根目录

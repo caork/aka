@@ -1,5 +1,7 @@
 import { motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { isDesktopRuntime } from "../desktop-api";
 import {
   deleteRepo,
   setRepoSettings,
@@ -116,9 +118,13 @@ export default function RepoSettingsModal({
     }
   };
 
-  const runZipUpdate = async (file: File | undefined | null) => {
-    if (!file || busy) return;
-    if (!file.name.toLowerCase().endsWith(".zip")) {
+  const runZipUpdate = async (fileOrPath: File | string | undefined | null) => {
+    if (!fileOrPath || busy) return;
+    const name =
+      typeof fileOrPath === "string"
+        ? fileOrPath.split(/[\\/]/).pop() ?? fileOrPath
+        : fileOrPath.name;
+    if (!name.toLowerCase().endsWith(".zip")) {
       setError("仅支持 .zip 文件");
       return;
     }
@@ -126,13 +132,33 @@ export default function RepoSettingsModal({
     setError(null);
     setNotice(null);
     try {
-      await updateZip(repo.name, file);
+      await updateZip(repo.name, fileOrPath);
       setNotice("新 zip 已上传——侧栏将显示 indexing 进度");
       void refreshRepos();
     } catch (e) {
       fail(e, "上传失败");
     } finally {
       setBusy("");
+    }
+  };
+
+  const pickZipUpdate = async () => {
+    if (busy) return;
+    if (!isDesktopRuntime()) {
+      zipRef.current?.click();
+      return;
+    }
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "Zip archive", extensions: ["zip"] }],
+      });
+      if (typeof selected === "string") {
+        void runZipUpdate(selected);
+      }
+    } catch (e) {
+      fail(e, "选择 zip 失败");
     }
   };
 
@@ -289,7 +315,7 @@ export default function RepoSettingsModal({
         {repo.source.kind === "zip" ? (
           <>
             <button
-              onClick={() => zipRef.current?.click()}
+              onClick={() => void pickZipUpdate()}
               disabled={busy !== ""}
               className="themed-hover focus-ring w-full rounded-[10px] px-3 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
               style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }}

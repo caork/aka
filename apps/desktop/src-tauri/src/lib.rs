@@ -1,18 +1,303 @@
-//! aka desktop shell.
-//!
-//! For now the frontend runs on mock data + file loading; real data will come
-//! from aka-core / aka-search / aka-graph via Tauri commands in a later
-//! milestone. The `ping` command exists so the IPC wiring can be smoke-tested.
+//! aka desktop shell with an embedded Rust backend.
+
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
+use aka_cli::AkaBackend;
+use aka_mcp::{clamp_render_nodes, ops, Backend, RepoSettingsUpdate, MAX_RENDER_NODES};
+use serde::Deserialize;
+use serde_json::json;
+use tauri::State;
+
+type BackendState = Arc<AkaBackend>;
+
+#[derive(Debug, Deserialize)]
+struct ImportRequest {
+    kind: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZipImportRequest {
+    name: String,
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoSettingsRequest {
+    embeddings_enabled: bool,
+    #[serde(default)]
+    render_max_nodes: Option<u32>,
+}
+
+async fn run_backend<T, F>(backend: State<'_, BackendState>, f: F) -> Result<T, String>
+where
+    T: serde::Serialize + Send + 'static,
+    F: FnOnce(BackendState) -> anyhow::Result<T> + Send + 'static,
+{
+    let backend = Arc::clone(&backend);
+    tauri::async_runtime::spawn_blocking(move || f(backend))
+        .await
+        .map_err(|e| format!("backend task failed: {e}"))?
+        .map_err(|e| format!("{e:#}"))
+}
+
+fn copy_zip_to_temp(path: &str) -> anyhow::Result<std::path::PathBuf> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let src = std::path::Path::new(path);
+    let tmp = std::env::temp_dir().join(format!(
+        "aka-desktop-zip-{}-{}.zip",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::copy(src, &tmp).map_err(|e| {
+        anyhow::anyhow!(
+            "copy zip to temp failed ({} -> {}): {e}",
+            src.display(),
+            tmp.display()
+        )
+    })?;
+    Ok(tmp)
+}
 
 #[tauri::command]
-fn ping() -> &'static str {
-    "pong"
+async fn list_repos(backend: State<'_, BackendState>) -> Result<ops::ReposOut, String> {
+    run_backend(backend, |b| ops::list_repos(b.as_ref())).await
+}
+
+#[tauri::command]
+async fn query(
+    backend: State<'_, BackendState>,
+    repo: Option<String>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<ops::QueryOut, String> {
+    let limit = limit
+        .unwrap_or(ops::DEFAULT_QUERY_LIMIT)
+        .clamp(1, ops::MAX_QUERY_LIMIT);
+    run_backend(backend, move |b| {
+        ops::query(b.as_ref(), repo.as_deref(), &query, limit)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn symbol_context(
+    backend: State<'_, BackendState>,
+    repo: Option<String>,
+    symbol: String,
+) -> Result<ops::ContextOut, String> {
+    run_backend(backend, move |b| {
+        ops::context(b.as_ref(), repo.as_deref(), &symbol)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn graph_lod(
+    backend: State<'_, BackendState>,
+    repo: String,
+    max_nodes: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let max_nodes = max_nodes.map(|n| {
+        let n32 = u32::try_from(n).unwrap_or(u32::MAX);
+        clamp_render_nodes(n32) as usize
+    });
+    run_backend(backend, move |b| b.graph_lod(&repo, max_nodes)).await
+}
+
+#[tauri::command]
+async fn graph_ego(
+    backend: State<'_, BackendState>,
+    repo: String,
+    id: String,
+    depth: Option<u32>,
+    max_nodes: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let depth = depth.unwrap_or(2).min(8);
+    let max_nodes = max_nodes
+        .unwrap_or(2000)
+        .clamp(1, MAX_RENDER_NODES as usize);
+    run_backend(backend, move |b| b.ego_graph(&repo, &id, depth, max_nodes)).await
+}
+
+#[tauri::command]
+async fn node_detail(
+    backend: State<'_, BackendState>,
+    repo: String,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    run_backend(backend, move |b| b.node_detail(&repo, &id)).await
+}
+
+#[tauri::command]
+async fn source(
+    backend: State<'_, BackendState>,
+    repo: String,
+    path: String,
+    start: Option<u32>,
+    end: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    run_backend(backend, move |b| b.read_source(&repo, &path, start, end)).await
+}
+
+#[tauri::command]
+async fn repo_files(
+    backend: State<'_, BackendState>,
+    repo: String,
+) -> Result<ops::FilesOut, String> {
+    run_backend(backend, move |b| ops::list_files(b.as_ref(), &repo)).await
+}
+
+#[tauri::command]
+async fn file_symbols(
+    backend: State<'_, BackendState>,
+    repo: String,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    run_backend(backend, move |b| b.file_symbols(&repo, &path)).await
+}
+
+#[tauri::command]
+async fn import_repo(
+    backend: State<'_, BackendState>,
+    request: ImportRequest,
+) -> Result<serde_json::Value, String> {
+    let src = match request.kind.as_str() {
+        "git" => request.url.clone(),
+        "local" => request.path.clone(),
+        other => {
+            return Err(format!(
+                "invalid import kind {other:?} (expect \"git\" or \"local\")"
+            ))
+        }
+    };
+    let Some(src) = src.filter(|s| !s.trim().is_empty()) else {
+        return Err("invalid import request: git needs \"url\", local needs \"path\"".into());
+    };
+    run_backend(backend, move |b| {
+        let name = b.import_repo(&request.kind, &src, request.name.as_deref())?;
+        Ok(json!({ "name": name }))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn import_repo_zip(
+    backend: State<'_, BackendState>,
+    request: ZipImportRequest,
+) -> Result<serde_json::Value, String> {
+    let name = request.name.trim().to_string();
+    if name.is_empty() {
+        return Err("invalid zip import request: name is required".into());
+    }
+    run_backend(backend, move |b| {
+        let zip = copy_zip_to_temp(&request.path)?;
+        let cleanup = zip.clone();
+        let name = match b.import_repo_zip(&name, &zip) {
+            Ok(name) => name,
+            Err(e) => {
+                let _ = std::fs::remove_file(&cleanup);
+                return Err(e);
+            }
+        };
+        Ok(json!({ "name": name }))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn update_repo(
+    backend: State<'_, BackendState>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    run_backend(backend, move |b| {
+        let detail = b.update_repo(&name)?;
+        Ok(json!({ "name": name, "detail": detail }))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn update_repo_zip(
+    backend: State<'_, BackendState>,
+    name: String,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    run_backend(backend, move |b| {
+        let zip = copy_zip_to_temp(&path)?;
+        let cleanup = zip.clone();
+        let name = match b.update_repo_zip(&name, &zip) {
+            Ok(name) => name,
+            Err(e) => {
+                let _ = std::fs::remove_file(&cleanup);
+                return Err(e);
+            }
+        };
+        Ok(json!({ "name": name }))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_repo_settings(
+    backend: State<'_, BackendState>,
+    name: String,
+    settings: RepoSettingsRequest,
+) -> Result<serde_json::Value, String> {
+    let settings = RepoSettingsUpdate {
+        embeddings_enabled: settings.embeddings_enabled,
+        render_max_nodes: settings.render_max_nodes.map(clamp_render_nodes),
+    };
+    run_backend(backend, move |b| {
+        b.set_repo_settings(&name, settings)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_repo(
+    backend: State<'_, BackendState>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    run_backend(backend, move |b| {
+        b.remove_repo(&name)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping])
+        .plugin(tauri_plugin_dialog::init())
+        .manage(Arc::new(AkaBackend::new()))
+        .invoke_handler(tauri::generate_handler![
+            list_repos,
+            query,
+            symbol_context,
+            graph_lod,
+            graph_ego,
+            node_detail,
+            source,
+            repo_files,
+            file_symbols,
+            import_repo,
+            import_repo_zip,
+            update_repo,
+            update_repo_zip,
+            set_repo_settings,
+            delete_repo,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

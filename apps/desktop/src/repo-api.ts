@@ -1,5 +1,6 @@
-/* Repo 管理 API —— 与后端 agent 锁定的合同（见仓库 README / 任务说明）。
-   旧后端尚未实现这些端点时返回 404/501，所有调用方都必须优雅降级。 */
+/* Repo 管理 API —— 桌面端优先走 Tauri 内嵌后端；浏览器/dev 回退 HTTP aka serve。 */
+
+import { asDesktopError, invokeDesktop, isDesktopRuntime } from "./desktop-api";
 
 const SERVER = "http://127.0.0.1:4111";
 
@@ -73,23 +74,63 @@ export type ImportInput =
   | { kind: "local"; path: string };
 
 export async function importRepo(input: ImportInput): Promise<void> {
+  if (isDesktopRuntime()) {
+    try {
+      await invokeDesktop("import_repo", { request: input });
+      return;
+    } catch (e) {
+      throw asDesktopError(e, "导入失败");
+    }
+  }
   await postJson("/api/repos/import", input);
 }
 
-export async function importZip(name: string, file: File): Promise<void> {
+export async function importZip(name: string, fileOrPath: File | string): Promise<void> {
+  if (isDesktopRuntime()) {
+    try {
+      await invokeDesktop("import_repo_zip", {
+        request: { name, path: String(fileOrPath) },
+      });
+      return;
+    } catch (e) {
+      throw asDesktopError(e, "导入失败");
+    }
+  }
+  if (typeof fileOrPath === "string") {
+    throw new Error("浏览器模式不支持直接读取本机 zip 路径");
+  }
   const form = new FormData();
   form.append("name", name);
-  form.append("file", file);
+  form.append("file", fileOrPath);
   await postForm("/api/repos/import-zip", form);
 }
 
 export async function updateRepo(name: string): Promise<void> {
+  if (isDesktopRuntime()) {
+    try {
+      await invokeDesktop("update_repo", { name });
+      return;
+    } catch (e) {
+      throw asDesktopError(e, "更新失败");
+    }
+  }
   await postJson(`/api/repos/${encodeURIComponent(name)}/update`, {});
 }
 
-export async function updateZip(name: string, file: File): Promise<void> {
+export async function updateZip(name: string, fileOrPath: File | string): Promise<void> {
+  if (isDesktopRuntime()) {
+    try {
+      await invokeDesktop("update_repo_zip", { name, path: String(fileOrPath) });
+      return;
+    } catch (e) {
+      throw asDesktopError(e, "上传失败");
+    }
+  }
+  if (typeof fileOrPath === "string") {
+    throw new Error("浏览器模式不支持直接读取本机 zip 路径");
+  }
   const form = new FormData();
-  form.append("file", file);
+  form.append("file", fileOrPath);
   await postForm(`/api/repos/${encodeURIComponent(name)}/update-zip`, form);
 }
 
@@ -103,6 +144,20 @@ export async function setRepoSettings(
   name: string,
   settings: RepoSettingsInput,
 ): Promise<void> {
+  if (isDesktopRuntime()) {
+    try {
+      await invokeDesktop("set_repo_settings", {
+        name,
+        settings: {
+          embeddingsEnabled: settings.embeddingsEnabled,
+          renderMaxNodes: settings.renderMaxNodes,
+        },
+      });
+      return;
+    } catch (e) {
+      throw asDesktopError(e, "设置失败");
+    }
+  }
   await postJson(`/api/repos/${encodeURIComponent(name)}/settings`, {
     embeddings_enabled: settings.embeddingsEnabled,
     render_max_nodes: settings.renderMaxNodes,
@@ -110,6 +165,14 @@ export async function setRepoSettings(
 }
 
 export async function deleteRepo(name: string): Promise<void> {
+  if (isDesktopRuntime()) {
+    try {
+      await invokeDesktop("delete_repo", { name });
+      return;
+    } catch (e) {
+      throw asDesktopError(e, "移除失败");
+    }
+  }
   let r: Response;
   try {
     r = await fetch(`${SERVER}/api/repos/${encodeURIComponent(name)}`, {
@@ -189,6 +252,10 @@ export async function fetchNodeDetail(
   signal?: AbortSignal,
 ): Promise<NodeDetailResult> {
   try {
+    if (isDesktopRuntime()) {
+      const detail = await invokeDesktop<NodeDetail>("node_detail", { repo, id });
+      return { state: "ok", detail };
+    }
     const r = await fetch(
       `${SERVER}/api/node?repo=${encodeURIComponent(repo)}&id=${encodeURIComponent(id)}`,
       { signal: signal ?? AbortSignal.timeout(4000) },
@@ -199,6 +266,9 @@ export async function fetchNodeDetail(
     return { state: "ok", detail };
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") throw e;
+    if (typeof e === "string" && e.includes("not supported")) {
+      return { state: "unsupported" };
+    }
     return { state: "offline" };
   }
 }
@@ -234,6 +304,15 @@ export async function fetchSource(
   if (start !== undefined) params.set("start", String(start));
   if (end !== undefined) params.set("end", String(end));
   try {
+    if (isDesktopRuntime()) {
+      const source = await invokeDesktop<SourceSlice>("source", {
+        repo,
+        path,
+        start,
+        end,
+      });
+      return { state: "ok", source };
+    }
     const r = await fetch(`${SERVER}/api/source?${params.toString()}`, {
       signal: signal ?? AbortSignal.timeout(6000),
     });
@@ -244,6 +323,10 @@ export async function fetchSource(
     return { state: "ok", source };
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") throw e;
+    if (typeof e === "string") {
+      if (e.includes("not supported")) return { state: "unsupported" };
+      if (e.includes("invalid file")) return { state: "binary" };
+    }
     return { state: "offline" };
   }
 }
@@ -269,6 +352,10 @@ export async function fetchRepoFiles(
 ): Promise<RepoFilesResult> {
   const params = new URLSearchParams({ repo });
   try {
+    if (isDesktopRuntime()) {
+      const body = await invokeDesktop<{ files?: RepoFile[] }>("repo_files", { repo });
+      return { state: "ok", files: body.files ?? [] };
+    }
     const r = await fetch(`${SERVER}/api/files?${params.toString()}`, {
       signal: signal ?? AbortSignal.timeout(6000),
     });
@@ -278,6 +365,9 @@ export async function fetchRepoFiles(
     return { state: "ok", files: body.files ?? [] };
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") throw e;
+    if (typeof e === "string" && e.includes("not supported")) {
+      return { state: "unsupported" };
+    }
     return { state: "offline" };
   }
 }
@@ -306,6 +396,13 @@ export async function fetchFileSymbols(
 ): Promise<FileSymbolsResult> {
   const params = new URLSearchParams({ repo, path });
   try {
+    if (isDesktopRuntime()) {
+      const body = await invokeDesktop<{ symbols?: FileSymbol[] }>("file_symbols", {
+        repo,
+        path,
+      });
+      return { state: "ok", symbols: body.symbols ?? [] };
+    }
     const r = await fetch(`${SERVER}/api/file/symbols?${params.toString()}`, {
       signal: signal ?? AbortSignal.timeout(6000),
     });
@@ -315,6 +412,9 @@ export async function fetchFileSymbols(
     return { state: "ok", symbols: body.symbols ?? [] };
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") throw e;
+    if (typeof e === "string" && e.includes("not supported")) {
+      return { state: "unsupported" };
+    }
     return { state: "offline" };
   }
 }

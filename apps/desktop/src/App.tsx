@@ -6,12 +6,15 @@ import GraphView from "./components/GraphView";
 import RepoDropdown from "./components/RepoDropdown";
 import SearchBubble from "./components/SearchBubble";
 import SegmentedControl from "./components/SegmentedControl";
+import { isDesktopRuntime } from "./desktop-api";
 import { useAppStore } from "./store";
 
 export default function App() {
   const view = useAppStore((s) => s.view);
   const setView = useAppStore((s) => s.setView);
   const syncSystemTheme = useAppStore((s) => s.syncSystemTheme);
+  const needsTitlebarSafeArea =
+    isDesktopRuntime() && navigator.userAgent.includes("Mac");
 
   useEffect(() => {
     syncSystemTheme();
@@ -25,7 +28,9 @@ export default function App() {
     <div className="flex h-full">
       <div className="app-backdrop" />
       <main
-        className="relative min-h-0 flex-1 overflow-hidden"
+        className={`relative min-h-0 flex-1 overflow-hidden ${
+          needsTitlebarSafeArea ? "titlebar-safe" : ""
+        }`}
         style={{
           background: "var(--main-surface)",
           backdropFilter: "blur(24px) saturate(180%)",
@@ -34,7 +39,7 @@ export default function App() {
         }}
       >
         {/* Logo + Search bubble — top-left, laid out in a row so search expands rightward */}
-        <div className="absolute left-3 top-3 z-20 flex items-center gap-2">
+        <div className="app-top-left-controls absolute top-3 z-20 flex items-center gap-2">
           <RepoDropdown />
           <SearchBubble />
         </div>

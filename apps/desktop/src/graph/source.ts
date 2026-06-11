@@ -8,6 +8,7 @@ import {
   RENDER_MAX_LIMIT,
   RENDER_MAX_MIN,
 } from "../store";
+import { invokeDesktop, isDesktopRuntime } from "../desktop-api";
 import { parseGraphJSON, type GraphData, type GraphJSON } from "./format";
 
 const SERVER = "http://127.0.0.1:4111";
@@ -28,16 +29,27 @@ export async function loadRealGraph(
     Math.max(RENDER_MAX_MIN, maxNodes ?? RENDER_MAX_DEFAULT),
   );
   try {
-    const lr = await fetch(
-      `${SERVER}/api/graph/lod?repo=${encodeURIComponent(repo)}&max_nodes=${budget}`,
-      { signal: signal ?? AbortSignal.timeout(20_000) },
-    );
-    if (!lr.ok) return null;
-    return parseGraphBody((await lr.json()) as GraphJSON);
+    const json = isDesktopRuntime()
+      ? await invokeDesktop<GraphJSON>("graph_lod", { repo, maxNodes: budget })
+      : await loadRealGraphHttp(repo, budget, signal);
+    return parseGraphBody(json);
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") throw e;
     return null;
   }
+}
+
+async function loadRealGraphHttp(
+  repo: string,
+  budget: number,
+  signal?: AbortSignal,
+): Promise<GraphJSON> {
+  const lr = await fetch(
+    `${SERVER}/api/graph/lod?repo=${encodeURIComponent(repo)}&max_nodes=${budget}`,
+    { signal: signal ?? AbortSignal.timeout(20_000) },
+  );
+  if (!lr.ok) throw new Error(String(lr.status));
+  return (await lr.json()) as GraphJSON;
 }
 
 /** 以某节点为中心的 ego 子图（中心节点 i=0 在原点）；不支持/失败返回 null。 */
@@ -48,16 +60,33 @@ export async function loadEgoGraph(
   signal?: AbortSignal,
 ): Promise<GraphData | null> {
   try {
-    const lr = await fetch(
-      `${SERVER}/api/graph/ego?repo=${encodeURIComponent(repo)}&id=${encodeURIComponent(id)}&depth=${depth}&max_nodes=${EGO_MAX_NODES}`,
-      { signal: signal ?? AbortSignal.timeout(20_000) },
-    );
-    if (!lr.ok) return null;
-    return parseGraphBody((await lr.json()) as GraphJSON);
+    const json = isDesktopRuntime()
+      ? await invokeDesktop<GraphJSON>("graph_ego", {
+          repo,
+          id,
+          depth,
+          maxNodes: EGO_MAX_NODES,
+        })
+      : await loadEgoGraphHttp(repo, id, depth, signal);
+    return parseGraphBody(json);
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") throw e;
     return null;
   }
+}
+
+async function loadEgoGraphHttp(
+  repo: string,
+  id: string,
+  depth: number,
+  signal?: AbortSignal,
+): Promise<GraphJSON> {
+  const lr = await fetch(
+    `${SERVER}/api/graph/ego?repo=${encodeURIComponent(repo)}&id=${encodeURIComponent(id)}&depth=${depth}&max_nodes=${EGO_MAX_NODES}`,
+    { signal: signal ?? AbortSignal.timeout(20_000) },
+  );
+  if (!lr.ok) throw new Error(String(lr.status));
+  return (await lr.json()) as GraphJSON;
 }
 
 function parseGraphBody(json: GraphJSON): GraphData | null {
