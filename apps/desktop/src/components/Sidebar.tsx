@@ -1,5 +1,5 @@
-import { motion } from "framer-motion";
-import { useState } from "react";
+import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
+import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../store";
 import ImportRepoModal from "./ImportRepoModal";
 import RepoSettingsModal from "./RepoSettingsModal";
@@ -10,12 +10,45 @@ export default function Sidebar() {
   const repos = useAppStore((s) => s.repos);
   const selectedRepoId = useAppStore((s) => s.selectedRepoId);
   const selectRepo = useAppStore((s) => s.selectRepo);
+  const query = useAppStore((s) => s.query);
+  const setQuery = useAppStore((s) => s.setQuery);
   const [importOpen, setImportOpen] = useState(false);
   const [settingsRepoId, setSettingsRepoId] = useState<string | null>(null);
+  const [searchExpanded, setSearchExpanded] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const settingsRepo = settingsRepoId
     ? (repos.find((r) => r.id === settingsRepoId) ?? null)
     : null;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchExpanded(true);
+        requestAnimationFrame(() => {
+          inputRef.current?.focus();
+          inputRef.current?.select();
+        });
+      }
+      if (e.key === "Escape" && searchExpanded) {
+        setSearchExpanded(false);
+        setQuery("");
+        inputRef.current?.blur();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [searchExpanded, setQuery]);
+
+  const openSearch = () => {
+    setSearchExpanded(true);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const collapseSearch = () => {
+    if (!query) setSearchExpanded(false);
+  };
 
   return (
     <motion.aside
@@ -26,15 +59,66 @@ export default function Sidebar() {
       data-testid="sidebar"
     >
       {/* logo */}
-      <div className="flex items-center gap-2.5 px-5 pb-4 pt-6">
+      <div className="flex items-center gap-2.5 px-5 pb-3 pt-6">
         <img src="/logo.png" alt="aka logo" className="h-7 w-7" draggable={false} />
-        <div className="text-[15px] font-semibold tracking-tight text-ink">
-          aka
-        </div>
+        <div className="text-[15px] font-semibold tracking-tight text-ink">aka</div>
+      </div>
+
+      {/* search bubble */}
+      <div className="px-3 pb-3">
+        <LayoutGroup>
+          <motion.div
+            layout
+            transition={spring}
+            onClick={searchExpanded ? undefined : openSearch}
+            style={{ borderRadius: searchExpanded ? 10 : 18 }}
+            className={[
+              "cmd-input relative flex h-9 shrink-0 items-center overflow-hidden",
+              searchExpanded
+                ? "w-full cursor-text gap-2.5 px-3"
+                : "w-9 cursor-pointer justify-center",
+            ].join(" ")}
+            data-testid="sidebar-search-bubble"
+          >
+            <SearchIcon />
+            <AnimatePresence>
+              {searchExpanded && (
+                <motion.input
+                  key="input"
+                  ref={inputRef}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.12 }}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onBlur={collapseSearch}
+                  placeholder="Search symbols…"
+                  className="h-full min-w-0 flex-1 text-[13px]"
+                  data-testid="global-search"
+                />
+              )}
+            </AnimatePresence>
+            <AnimatePresence>
+              {searchExpanded && (
+                <motion.span
+                  key="kbd"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
+                  className="kbd flex-none text-[10px]"
+                >
+                  ⌘K
+                </motion.span>
+              )}
+            </AnimatePresence>
+          </motion.div>
+        </LayoutGroup>
       </div>
 
       {/* repo list */}
-      <div className="px-3 pb-1 pt-2 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+      <div className="px-3 pb-1 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
         <span className="px-2">Repositories</span>
       </div>
       <nav className="scroll-area flex-1 px-2">
@@ -72,9 +156,7 @@ export default function Sidebar() {
                 </span>
                 <span
                   className="block truncate text-[11px]"
-                  style={{
-                    color: repo.status === "failed" ? "#b3261e" : undefined,
-                  }}
+                  style={{ color: repo.status === "failed" ? "#b3261e" : undefined }}
                 >
                   <span className={repo.status === "failed" ? "" : "text-ink-3"}>
                     {repo.status === "indexing"
@@ -88,7 +170,6 @@ export default function Sidebar() {
                 </span>
               </span>
 
-              {/* hover gear → per-repo settings */}
               <button
                 aria-label={`${repo.name} settings`}
                 onClick={(e) => {
@@ -127,33 +208,27 @@ export default function Sidebar() {
   );
 }
 
+function SearchIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden className="flex-none text-ink-3">
+      <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
+      <path d="m20 20-3.5-3.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function PlusIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path
-        d="M12 5v14M5 12h14"
-        stroke="currentColor"
-        strokeWidth="2.2"
-        strokeLinecap="round"
-      />
+      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
     </svg>
   );
 }
 
 function GearIcon({ size = 15 }: { size?: number }) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden
-    >
-      <path
-        d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"
-        stroke="currentColor"
-        strokeWidth="1.7"
-      />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" stroke="currentColor" strokeWidth="1.7" />
       <path
         d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"
         stroke="currentColor"
