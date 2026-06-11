@@ -54,7 +54,7 @@ cd apps/desktop && npx tsc --noEmit && npm run build
 2. **定位**：找到相关 crate/组件和数据流，确认改动点与影响面（别绕过工件合同和 Backend trait 接缝）。
 3. **开发**：**多 agent 并行分模块**是本项目的默认工作方式（用户明确要求，嫌单线程慢）——能拆就拆给后台 agent 并行，按 crate/目录划界避免文件冲突，主线程做集成。
 4. **拉取最新代码**：commit 前 `git fetch` 同步 `main`，别在过时基线上提交。
-5. **提交**：过上面的提交门槛后按规范 commit：`<类型>: <描述>`（feat/fix/refactor/docs/infra），结尾 `Co-Authored-By` 署名。
+5. **提交**：**一个独立任务完成后必须立刻单独提交一个 commit**，不要把多个任务/修复攒成一个大提交；过上面的提交门槛后按规范 commit：`<类型>: <描述>`（feat/fix/refactor/docs/infra），结尾 `Co-Authored-By` 署名。
 6. **验证**：浏览器真实渲染/接口冒烟确认达标；UI 改动截图；没过回到第 3 步。
 
 ## 建议工作方式
