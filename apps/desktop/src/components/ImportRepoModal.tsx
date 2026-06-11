@@ -137,7 +137,9 @@ export default function ImportRepoModal({
         })}
       </div>
 
-      {error && <ErrorBar message={error} />}
+      {/* fixed-height zone so the modal never shifts when switching tabs */}
+      <div className="min-h-[200px]">
+        {error && <ErrorBar message={error} />}
 
       {kind === "git" && (
         <>
@@ -239,6 +241,8 @@ export default function ImportRepoModal({
           </Field>
         </>
       )}
+
+      </div>{/* end fixed-height zone */}
 
       <div className="mt-1 flex items-center justify-end gap-2">
         <button
