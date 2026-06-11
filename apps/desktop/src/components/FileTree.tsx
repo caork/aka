@@ -103,7 +103,8 @@ function ancestorDirs(nodes: TreeNode[], filePath: string): string[] {
 type LoadState =
   | { phase: "loading" }
   | { phase: "ok"; files: RepoFile[]; live: boolean }
-  | { phase: "empty" };
+  /** serve 可达但端点不支持/仓库未找到——不假装有文件 */
+  | { phase: "unsupported" };
 
 /* ============================== 组件 ============================== */
 
@@ -128,11 +129,15 @@ export default function FileTree() {
     void fetchRepoFiles(repoId, ctrl.signal)
       .then((res) => {
         if (stale) return;
-        if (res.state === "ok" && res.files.length > 0) {
+        if (res.state === "ok") {
+          /* 真实数据（含空仓库 → 走"暂无文件"空态，不造假） */
           setLoad({ phase: "ok", files: res.files, live: true });
-        } else {
-          /* 离线 / 旧后端 / 空 —— 回退演示数据 */
+        } else if (res.state === "offline") {
+          /* 仅在 serve 真正不可达时回退演示数据（离线展示） */
           setLoad({ phase: "ok", files: mockFiles(), live: false });
+        } else {
+          /* serve 可达但 404/501 —— 给明确提示，不展示会死链的假文件 */
+          setLoad({ phase: "unsupported" });
         }
       })
       .catch(() => {
@@ -198,9 +203,16 @@ export default function FileTree() {
 
       <div className="scroll-area min-h-0 flex-1 px-1.5 pb-3">
         {load.phase === "loading" && <TreeSkeleton />}
+        {load.phase === "unsupported" && (
+          <div className="px-3 py-6 text-center text-[12px] leading-relaxed text-ink-3">
+            该仓库未在 aka serve 注册,或后端版本过旧
+            <br />
+            <span className="text-[11px]">选择左侧已索引的仓库</span>
+          </div>
+        )}
         {load.phase === "ok" && load.files.length === 0 && (
           <div className="px-3 py-6 text-center text-[12px] text-ink-3">
-            该仓库暂无文件
+            该仓库暂无可浏览的文件
           </div>
         )}
         {load.phase === "ok" &&
