@@ -257,8 +257,13 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
   if [[ -n "${TARGET}" ]]; then
     build_args+=(--target "${TRIPLE}")
   fi
-  echo "==> cargo ${build_args[*]}"
-  (cd "${REPO_ROOT}" && cargo "${build_args[@]}")
+  if [[ "${TRIPLE}" = "x86_64-pc-windows-msvc" ]] && [[ "$(uname -s)" = "Darwin" ]] && command -v cargo-xwin >/dev/null 2>&1; then
+    echo "==> cargo xwin ${build_args[*]}"
+    (cd "${REPO_ROOT}" && cargo xwin "${build_args[@]}")
+  else
+    echo "==> cargo ${build_args[*]}"
+    (cd "${REPO_ROOT}" && cargo "${build_args[@]}")
+  fi
 fi
 
 if [[ -n "${TARGET}" ]]; then
