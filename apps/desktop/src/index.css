@@ -5,24 +5,31 @@
    --------------------------------------------------------------------------- */
 
 :root {
-  --canvas: #f6f8fb;
+  --canvas: rgba(246, 248, 251, 0.72);
   --ink: #0f172a;
   --ink-2: #475569;
   --ink-3: #94a3b8;
   --accent: #2e7cf6;
   --beacon: #f6a623;
 
-  --glass-bg: rgba(255, 255, 255, 0.62);
-  --glass-bg-strong: rgba(255, 255, 255, 0.68);
-  --glass-border: rgba(255, 255, 255, 0.65);
-  --glass-inner: rgba(15, 23, 42, 0.06);
+  --glass-bg: rgba(255, 255, 255, 0.30);
+  --glass-bg-strong: rgba(255, 255, 255, 0.38);
+  --glass-bg-solid: rgba(248, 251, 255, 0.86);
+  --glass-border: rgba(255, 255, 255, 0.78);
+  --glass-border-low: rgba(15, 23, 42, 0.07);
+  --glass-highlight: rgba(255, 255, 255, 0.76);
+  --glass-inner: rgba(15, 23, 42, 0.045);
+  --glass-tint: rgba(46, 124, 246, 0.035);
+  --code-bg: rgba(250, 252, 255, 0.38);
+  --code-gutter-bg: rgba(248, 251, 255, 0.72);
+  --code-gutter-bg-focused: rgba(230, 240, 255, 0.82);
 
   --shadow-float:
     0 1px 2px rgba(16, 24, 40, 0.05),
-    0 4px 12px rgba(16, 24, 40, 0.06);
+    0 5px 18px rgba(16, 24, 40, 0.08);
   --shadow-panel:
     0 2px 6px rgba(16, 24, 40, 0.05),
-    0 16px 40px -12px rgba(16, 24, 40, 0.14);
+    0 20px 54px -16px rgba(16, 24, 40, 0.17);
   --glow-accent:
     0 0 0 1px rgba(46, 124, 246, 0.28),
     0 0 20px rgba(46, 124, 246, 0.16);
@@ -44,7 +51,7 @@ body,
 }
 
 body {
-  background: var(--canvas);
+  background: transparent;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -55,17 +62,31 @@ body {
   inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(
-      620px 480px at 22% 8%,
-      rgba(46, 124, 246, 0.04),
-      transparent 70%
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.48) 0%,
+      rgba(240, 247, 255, 0.14) 46%,
+      rgba(255, 255, 255, 0.24) 100%
     ),
-    radial-gradient(
-      560px 460px at 86% 88%,
-      rgba(246, 166, 35, 0.03),
-      transparent 70%
+    linear-gradient(
+      118deg,
+      rgba(46, 124, 246, 0.13) 0%,
+      transparent 24%,
+      transparent 58%,
+      rgba(246, 166, 35, 0.11) 100%
     );
-  filter: blur(120px);
+}
+
+.app-backdrop::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  opacity: 0.26;
+  background-image:
+    linear-gradient(rgba(15, 23, 42, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: linear-gradient(to bottom, transparent, #000 14%, #000 88%, transparent);
 }
 
 /* ---------------------------------------------------------------------------
@@ -73,25 +94,86 @@ body {
    --------------------------------------------------------------------------- */
 
 .glass {
-  background: var(--glass-bg);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, var(--glass-highlight), transparent 46%),
+    linear-gradient(180deg, var(--glass-bg), rgba(255, 255, 255, 0.26));
+  -webkit-backdrop-filter: blur(28px) saturate(190%) contrast(1.02);
+  backdrop-filter: blur(28px) saturate(190%) contrast(1.02);
   border-radius: 14px;
   box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
     inset 0 0 0 0.5px var(--glass-inner),
     0 0 0 1px var(--glass-border),
     var(--shadow-float);
 }
 
 .glass-panel {
-  background: var(--glass-bg-strong);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, var(--glass-highlight), transparent 42%),
+    linear-gradient(180deg, var(--glass-bg-strong), rgba(255, 255, 255, 0.32));
+  -webkit-backdrop-filter: blur(34px) saturate(205%) contrast(1.03);
+  backdrop-filter: blur(34px) saturate(205%) contrast(1.03);
   border-radius: 18px;
   box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.76),
     inset 0 0 0 0.5px var(--glass-inner),
     0 0 0 1px var(--glass-border),
     var(--shadow-panel);
+}
+
+.glass::before,
+.glass-panel::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  border-radius: inherit;
+  background:
+    linear-gradient(120deg, rgba(255, 255, 255, 0.46), transparent 28%),
+    linear-gradient(300deg, transparent 64%, rgba(46, 124, 246, 0.055));
+  opacity: 0.72;
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass,
+  .glass-panel,
+  .cmd-input {
+    background: var(--glass-bg-solid);
+  }
+}
+
+.glass-segmented {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.58), transparent 52%),
+    rgba(255, 255, 255, 0.24);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  backdrop-filter: blur(22px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    inset 0 0 0 0.5px rgba(15, 23, 42, 0.06);
+}
+
+.glass-segment-thumb {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.74), transparent 58%),
+    rgba(255, 255, 255, 0.42);
+  -webkit-backdrop-filter: blur(18px) saturate(170%);
+  backdrop-filter: blur(18px) saturate(170%);
+  box-shadow:
+    0 1px 2px rgba(16, 24, 40, 0.06),
+    0 4px 10px rgba(16, 24, 40, 0.07),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82),
+    inset 0 0 0 0.5px rgba(15, 23, 42, 0.045);
+}
+
+.glass-code {
+  background: var(--code-bg);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
 }
 
 /* ---------------------------------------------------------------------------
@@ -185,11 +267,16 @@ body {
 
 /* search input */
 .cmd-input {
-  background: rgba(255, 255, 255, 0.55);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.68), transparent 50%),
+    rgba(255, 255, 255, 0.34);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  backdrop-filter: blur(22px) saturate(180%);
   border-radius: 10px;
   box-shadow:
-    inset 0 0 0 0.5px rgba(15, 23, 42, 0.08),
-    0 1px 2px rgba(16, 24, 40, 0.04);
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 0 0 0 0.5px rgba(15, 23, 42, 0.065),
+    0 1px 2px rgba(16, 24, 40, 0.045);
   transition: box-shadow 150ms ease-out;
 }
 .cmd-input:focus-within {

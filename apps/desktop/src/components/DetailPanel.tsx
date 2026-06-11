@@ -792,19 +792,17 @@ function SourcePreview({
 
   const { start, lines, total_lines, truncated } = source.source;
   const hash = hashComments(file);
-  /* 行号栏：按最大行号位数定宽（含 10px 左 padding + 12px 右间距），
-     横向滚动时 sticky 钉在左缘，不透明背景盖住滚过的代码（GitHub 做法）。 */
+  /* 行号栏：按最大行号位数定宽（含 10px 左 padding + 12px 右间距）。 */
   const digits = Math.max(3, String(start + lines.length - 1).length);
   const gutterWidth = `calc(${digits}ch + 22px)`;
-  /* sticky 行号背景需不透明（面板是毛玻璃）：取代码区底色在画布上的实色近似 */
-  const gutterBg = "rgb(246,247,249)";
-  const gutterBgFocused = "rgb(229,237,250)";
 
   return (
     <div
       className="overflow-hidden rounded-[10px]"
       style={{
-        background: "rgba(15,23,42,0.025)",
+        background: "rgba(255,255,255,0.24)",
+        backdropFilter: "blur(16px) saturate(160%)",
+        WebkitBackdropFilter: "blur(16px) saturate(160%)",
         boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.07)",
       }}
       data-testid="source-preview"
@@ -829,7 +827,11 @@ function SourcePreview({
                   width: gutterWidth,
                   paddingLeft: 10,
                   paddingRight: 12,
-                  background: focused ? gutterBgFocused : gutterBg,
+                  background: focused
+                    ? "var(--code-gutter-bg-focused)"
+                    : "var(--code-gutter-bg)",
+                  backdropFilter: "blur(14px) saturate(150%)",
+                  WebkitBackdropFilter: "blur(14px) saturate(150%)",
                   boxShadow: focused
                     ? "inset 2px 0 0 rgba(46,124,246,0.55)"
                     : undefined,
@@ -860,7 +862,9 @@ function SourceSkeleton() {
     <div
       className="space-y-2 rounded-[10px] px-3 py-3"
       style={{
-        background: "rgba(15,23,42,0.025)",
+        background: "rgba(255,255,255,0.24)",
+        backdropFilter: "blur(16px) saturate(160%)",
+        WebkitBackdropFilter: "blur(16px) saturate(160%)",
         boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.07)",
       }}
       data-testid="source-skeleton"

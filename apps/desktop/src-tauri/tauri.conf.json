@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "aka",
@@ -18,7 +19,19 @@
         "minWidth": 1024,
         "minHeight": 640,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "transparent": true,
+        "windowEffects": {
+          "effects": [
+            "sidebar",
+            "headerView",
+            "mica",
+            "acrylic"
+          ],
+          "state": "followsWindowActiveState",
+          "radius": 12,
+          "color": "#F7FAFFCC"
+        }
       }
     ],
     "security": {

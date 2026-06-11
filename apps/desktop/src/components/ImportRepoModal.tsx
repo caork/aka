@@ -98,11 +98,7 @@ export default function ImportRepoModal({
     <Modal open={open} onClose={close} title="Add repository">
       {/* source kind switcher */}
       <div
-        className="mb-4 flex items-center gap-0.5 rounded-[10px] p-0.5"
-        style={{
-          background: "rgba(15,23,42,0.05)",
-          boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.06)",
-        }}
+        className="glass-segmented mb-4 flex items-center gap-0.5 rounded-[10px] p-0.5"
         role="tablist"
         data-testid="import-kind-switcher"
       >
@@ -124,11 +120,7 @@ export default function ImportRepoModal({
                 <motion.span
                   layoutId="import-kind-thumb"
                   transition={{ type: "spring", stiffness: 400, damping: 32 }}
-                  className="absolute inset-0 rounded-[8px] bg-white"
-                  style={{
-                    boxShadow:
-                      "0 1px 2px rgba(16,24,40,.06), 0 2px 6px rgba(16,24,40,.06), inset 0 0 0 0.5px rgba(15,23,42,.04)",
-                  }}
+                  className="glass-segment-thumb absolute inset-0 rounded-[8px]"
                 />
               )}
               <span className="relative z-10">{k.label}</span>
@@ -193,10 +185,12 @@ export default function ImportRepoModal({
             style={{
               background: dragOver
                 ? "rgba(46,124,246,0.07)"
-                : "rgba(255,255,255,0.5)",
+                : "rgba(255,255,255,0.28)",
+              backdropFilter: "blur(18px) saturate(170%)",
+              WebkitBackdropFilter: "blur(18px) saturate(170%)",
               boxShadow: dragOver
                 ? "inset 0 0 0 1.5px rgba(46,124,246,0.45)"
-                : "inset 0 0 0 1px rgba(15,23,42,0.1)",
+                : "inset 0 1px 0 rgba(255,255,255,0.7), inset 0 0 0 1px rgba(15,23,42,0.08)",
             }}
             data-testid="import-zip-drop"
           >

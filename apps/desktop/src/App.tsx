@@ -18,10 +18,12 @@ export default function App() {
       <main
         className="relative min-h-0 flex-1 overflow-hidden"
         style={{
-          background: "rgba(255,255,255,0.38)",
-          backdropFilter: "blur(24px) saturate(180%)",
-          WebkitBackdropFilter: "blur(24px) saturate(180%)",
-          boxShadow: "inset 1px 0 0 rgba(15,23,42,0.06)",
+          background:
+            "linear-gradient(135deg, rgba(255,255,255,0.30), rgba(246,250,255,0.18))",
+          backdropFilter: "blur(28px) saturate(190%)",
+          WebkitBackdropFilter: "blur(28px) saturate(190%)",
+          boxShadow:
+            "inset 1px 0 0 rgba(255,255,255,0.42), inset 0 0 0 0.5px rgba(15,23,42,0.035)",
         }}
       >
         {/* Search bubble — top-left corner */}

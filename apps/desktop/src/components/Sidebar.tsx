@@ -92,7 +92,13 @@ export default function Sidebar() {
                   setSettingsRepoId(repo.id);
                 }}
                 className="focus-ring absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[7px] text-ink-3 opacity-0 transition-all duration-150 ease-out hover:bg-[rgba(15,23,42,0.06)] hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
-                style={{ background: "rgba(255,255,255,0.7)" }}
+                style={{
+                  background: "rgba(255,255,255,0.34)",
+                  backdropFilter: "blur(14px) saturate(170%)",
+                  WebkitBackdropFilter: "blur(14px) saturate(170%)",
+                  boxShadow:
+                    "inset 0 1px 0 rgba(255,255,255,0.72), inset 0 0 0 0.5px rgba(15,23,42,0.06)",
+                }}
                 data-testid={`repo-settings-${repo.id}`}
               >
                 <GearIcon size={13} />
