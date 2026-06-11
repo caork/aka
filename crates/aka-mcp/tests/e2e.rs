@@ -4,9 +4,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use aka_mcp::{AkaMcpServer, MockBackend};
+use aka_mcp::AkaMcpServer;
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
+
+mod support;
+
+use support::fixture_backend::FixtureBackend;
 
 const EXPECTED_TOOLS: [&str; 8] = [
     "list_repos",
@@ -23,7 +27,7 @@ const EXPECTED_TOOLS: [&str; 8] = [
 async fn initialize_list_and_call_query() -> anyhow::Result<()> {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
 
-    let handler = AkaMcpServer::new(Arc::new(MockBackend::demo()));
+    let handler = AkaMcpServer::new(Arc::new(FixtureBackend::fixture()));
     let server_task = tokio::spawn(async move {
         let svc = handler.serve(server_io).await.expect("server initialize");
         let _ = svc.waiting().await;
@@ -47,7 +51,7 @@ async fn initialize_list_and_call_query() -> anyhow::Result<()> {
     assert!(schema["properties"].get("limit").is_some());
 
     // tools/call query
-    let args = serde_json::json!({ "repo": "demo", "query": "handle" });
+    let args = serde_json::json!({ "repo": "fixture", "query": "handle" });
     let result = client
         .call_tool(
             CallToolRequestParams::new("query")

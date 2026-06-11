@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { mockFiles } from "../mock";
 import { fetchRepoFiles, type RepoFile } from "../repo-api";
 import { useAppStore } from "../store";
 
@@ -102,7 +101,8 @@ function ancestorDirs(nodes: TreeNode[], filePath: string): string[] {
 
 type LoadState =
   | { phase: "loading" }
-  | { phase: "ok"; files: RepoFile[]; live: boolean }
+  | { phase: "pending"; status: "indexing" | "failed"; detail?: string | null }
+  | { phase: "ok"; files: RepoFile[] }
   /** serve 可达但端点不支持/仓库未找到——不假装有文件 */
   | { phase: "unsupported" };
 
@@ -114,7 +114,8 @@ export default function FileTree() {
   const codeTarget = useAppStore((s) => s.codeTarget);
   const openCode = useAppStore((s) => s.openCode);
 
-  const repoName = repos.find((r) => r.id === repoId)?.name ?? repoId;
+  const repo = repos.find((r) => r.id === repoId) ?? null;
+  const repoName = repo?.name ?? repoId;
   const activePath = codeTarget?.path ?? null;
 
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
@@ -125,16 +126,29 @@ export default function FileTree() {
   useEffect(() => {
     let stale = false;
     const ctrl = new AbortController();
+    if (!repoId || !repo) {
+      setLoad({ phase: "ok", files: [] });
+      return () => {
+        stale = true;
+        ctrl.abort();
+      };
+    }
+    if (repo?.status === "indexing" || repo?.status === "failed") {
+      setLoad({ phase: "pending", status: repo.status, detail: repo.detail });
+      return () => {
+        stale = true;
+        ctrl.abort();
+      };
+    }
     setLoad({ phase: "loading" });
     void fetchRepoFiles(repoId, ctrl.signal)
       .then((res) => {
         if (stale) return;
         if (res.state === "ok") {
           /* 真实数据（含空仓库 → 走"暂无文件"空态，不造假） */
-          setLoad({ phase: "ok", files: res.files, live: true });
+          setLoad({ phase: "ok", files: res.files });
         } else if (res.state === "offline") {
-          /* 仅在 serve 真正不可达时回退演示数据（离线展示） */
-          setLoad({ phase: "ok", files: mockFiles(), live: false });
+          setLoad({ phase: "unsupported" });
         } else {
           /* serve 可达但 404/501 —— 给明确提示，不展示会死链的假文件 */
           setLoad({ phase: "unsupported" });
@@ -147,7 +161,7 @@ export default function FileTree() {
       stale = true;
       ctrl.abort();
     };
-  }, [repoId]);
+  }, [repoId, repo?.status, repo?.detail]);
 
   const tree = useMemo(
     () => (load.phase === "ok" ? buildTree(load.files) : []),
@@ -191,8 +205,7 @@ export default function FileTree() {
 
   return (
     <div className="flex h-full flex-col" data-testid="file-tree">
-      {/* 顶部留白避开浮动搜索泡 */}
-      <div className="flex items-baseline justify-between px-3 pb-2 pt-14">
+      <div className="flex items-baseline justify-between px-3 pb-2 pt-3">
         <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
           Files
         </span>
@@ -203,6 +216,17 @@ export default function FileTree() {
 
       <div className="scroll-area min-h-0 flex-1 px-1.5 pb-3">
         {load.phase === "loading" && <TreeSkeleton />}
+        {load.phase === "pending" && (
+          <div className="px-3 py-6 text-center text-[12px] leading-relaxed text-ink-3">
+            {load.status === "indexing" ? "仓库正在索引中" : "仓库索引失败"}
+            {load.detail && (
+              <>
+                <br />
+                <span className="text-[11px]">{load.detail}</span>
+              </>
+            )}
+          </div>
+        )}
         {load.phase === "unsupported" && (
           <div className="px-3 py-6 text-center text-[12px] leading-relaxed text-ink-3">
             该仓库未在 aka serve 注册,或后端版本过旧
@@ -229,11 +253,6 @@ export default function FileTree() {
           ))}
       </div>
 
-      {load.phase === "ok" && !load.live && (
-        <div className="themed-divider border-t px-3 py-1.5 text-[10px] text-ink-3">
-          演示文件树 · 连接 aka serve 后显示真实数据
-        </div>
-      )}
     </div>
   );
 }

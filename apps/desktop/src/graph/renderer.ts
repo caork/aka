@@ -169,8 +169,7 @@ export interface LodParams {
    * Fraction of the edge index buffer drawn this frame (prefix sample).
    * Far zoom shows every edge as overlapping blended fragments anyway, so we
    * draw a random subset with compensated alpha — same nebula, far less fill.
-   * Assumes edge order is unbiased (true for the demo generator; real
-   * datasets should pre-shuffle once at load).
+   * Assumes edge order is unbiased; real snapshots are shuffled once at load.
    */
   edgeFraction: number;
 }
@@ -457,6 +456,13 @@ export class GraphRenderer {
     }
 
     gl.bindVertexArray(null);
+  }
+
+  clearData() {
+    const gl = this.gl;
+    this.data = null;
+    for (const b of this.ownedBuffers) gl.deleteBuffer(b);
+    this.ownedBuffers.length = 0;
   }
 
   get devicePixelRatio() {

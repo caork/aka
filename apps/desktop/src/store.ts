@@ -81,8 +81,6 @@ interface AppState {
   setView(view: ViewId): void;
 
   repos: Repo[];
-  /** repos 是否来自真实 `aka serve`（false = mock 演示数据） */
-  reposLive: boolean;
   selectedRepoId: string;
   selectRepo(id: string): void;
 
@@ -157,17 +155,29 @@ let refreshSeq = 0;
 /**
  * 从本地 `aka serve` 拉取仓库列表，可重复调用（导入/更新后刷新）。
  * 只要存在 "indexing" 状态的仓库就每 3s 轮询，直到全部 ready/failed。
- * 服务不可达时保留当前数据（首次即 mock 演示数据）。
+ * 服务不可达时保留当前状态；桌面端首次启动为空仓库列表。
  */
 export async function refreshRepos(): Promise<void> {
   const seq = ++refreshSeq;
   try {
+    const desktop = isDesktopRuntime();
     const body = isDesktopRuntime()
       ? await invokeDesktop<{ repos?: RepoOut[] }>("list_repos")
       : await fetchReposHttp();
     if (seq !== refreshSeq) return; /* 已被更新的一次刷新取代 */
     const repos = (body.repos ?? []).map(mapRepo);
-    if (repos.length === 0) return;
+    if (repos.length === 0) {
+      if (desktop) {
+        useAppStore.setState({
+          repos: [],
+          selectedRepoId: "",
+          detailTarget: null,
+          codeTarget: null,
+        });
+        schedulePoll(false);
+      }
+      return;
+    }
 
     const current = useAppStore.getState().selectedRepoId;
     const persisted = readPersistedSelection();
@@ -177,7 +187,7 @@ export async function refreshRepos(): Promise<void> {
         ? persisted
         : repos[0].id;
 
-    useAppStore.setState({ repos, selectedRepoId, reposLive: true });
+    useAppStore.setState({ repos, selectedRepoId });
     schedulePoll(repos.some((x) => x.status === "indexing"));
   } catch {
     /* server 未启动——保留现有数据 */
@@ -225,55 +235,6 @@ function persistSelection(id: string): void {
   }
 }
 
-/** Mock repos — `aka serve` 不在线时的演示数据。 */
-const MOCK_REPOS: Repo[] = [
-  {
-    id: "aka",
-    name: "aka",
-    path: "~/workSpace/aka",
-    status: "ready",
-    symbols: 18432,
-    embeddings: false,
-    renderMaxNodes: null,
-    source: { kind: "local", url: null },
-    detail: null,
-  },
-  {
-    id: "gitnexus",
-    name: "GitNexus",
-    path: "~/workSpace/GitNexus",
-    status: "indexing",
-    symbols: 52210,
-    embeddings: false,
-    renderMaxNodes: null,
-    source: { kind: "git", url: "https://github.com/caork/GitNexus" },
-    detail: null,
-  },
-  {
-    id: "tantivy",
-    name: "tantivy",
-    path: "~/oss/tantivy",
-    status: "ready",
-    symbols: 31876,
-    embeddings: true,
-    renderMaxNodes: null,
-    source: { kind: "local", url: null },
-    detail: null,
-  },
-  {
-    id: "linux",
-    name: "linux",
-    path: "~/oss/linux",
-    status: "idle",
-    symbols: 0,
-    embeddings: false,
-    renderMaxNodes: null,
-    source: { kind: "local", url: null },
-    detail: null,
-  },
-];
-
-
 export const useAppStore = create<AppState>((set) => ({
   themeMode: INITIAL_THEME_MODE,
   resolvedTheme: INITIAL_RESOLVED_THEME,
@@ -293,9 +254,8 @@ export const useAppStore = create<AppState>((set) => ({
   view: "code",
   setView: (view) => set({ view }),
 
-  repos: MOCK_REPOS,
-  reposLive: false,
-  selectedRepoId: readPersistedSelection() ?? "aka",
+  repos: [],
+  selectedRepoId: readPersistedSelection() ?? "",
   selectRepo: (selectedRepoId) => {
     persistSelection(selectedRepoId);
     set({ selectedRepoId, detailTarget: null, codeTarget: null });

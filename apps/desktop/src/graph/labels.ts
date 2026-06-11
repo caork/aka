@@ -71,6 +71,14 @@ export class LabelOverlay {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  clear() {
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    this.nodeFade.clear();
+    this.clusterFade.clear();
+    this.prevNodeSel.clear();
+    this.prevTime = 0;
+  }
+
   render(
     camera: Camera,
     lod: LodParams,

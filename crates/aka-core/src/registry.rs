@@ -175,15 +175,15 @@ mod tests {
         assert!(reg.repos.is_empty());
 
         reg.upsert(RepoEntry {
-            name: "demo".into(),
-            repo_path: "/tmp/demo".into(),
+            name: "fixture".into(),
+            repo_path: "/tmp/fixture".into(),
             data_dir: "/tmp/data".into(),
             indexed_at: Some(now_unix()),
             engine_sha: None,
             stats: ArtifactStats::default(),
             embeddings_enabled: false,
             source_kind: "git".into(),
-            source_url: Some("https://example.com/demo.git".into()),
+            source_url: Some("https://example.com/fixture.git".into()),
             render_max_nodes: Some(120_000),
         });
         reg.save_to(&path).unwrap();
@@ -195,8 +195,8 @@ mod tests {
         assert_eq!(reg2.repos[0].render_max_nodes, Some(120_000));
 
         reg2.upsert(RepoEntry {
-            name: "demo2".into(),
-            repo_path: "/tmp/demo".into(),
+            name: "fixture2".into(),
+            repo_path: "/tmp/fixture".into(),
             data_dir: "/tmp/data".into(),
             indexed_at: None,
             engine_sha: None,
@@ -207,7 +207,7 @@ mod tests {
             render_max_nodes: None,
         });
         assert_eq!(reg2.repos.len(), 1, "同路径 upsert 不新增");
-        assert_eq!(reg2.repos[0].name, "demo2");
+        assert_eq!(reg2.repos[0].name, "fixture2");
     }
 
     #[test]

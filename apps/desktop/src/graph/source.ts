@@ -1,7 +1,5 @@
-/* Real-data loader — pulls LOD / ego snapshots from a local `aka serve`
-   instance (http://127.0.0.1:4111). Returns null when the server is not
-   running / the repo has no data, so the caller can fall back to the
-   synthetic demo graph (or surface a graceful error for ego mode). */
+/* Real-data loader — pulls LOD / ego snapshots from the embedded desktop
+   backend or a local `aka serve` instance (http://127.0.0.1:4111). */
 
 import {
   RENDER_MAX_DEFAULT,
@@ -15,7 +13,7 @@ const SERVER = "http://127.0.0.1:4111";
 const EGO_MAX_NODES = 2_000;
 
 /**
- * 指定 repo 的完整 LOD 快照；失败/离线返回 null（调用方回退 demo）。
+ * 指定 repo 的完整 LOD 快照；失败/离线返回 null。
  * `maxNodes` 来自 per-repo 的 render_max_nodes 设置（null/缺省 = 50_000），
  * 始终 clamp 到合同范围 [1_000, 500_000]。
  */

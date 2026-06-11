@@ -2,15 +2,19 @@
 
 use std::sync::Arc;
 
-use aka_server::{Backend, MockBackend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef, router};
+use aka_server::{Backend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+mod support;
+
+use support::fixture_backend::FixtureBackend;
+
 fn app() -> axum::Router {
-    router(Arc::new(MockBackend::demo()))
+    router(Arc::new(FixtureBackend::fixture()))
 }
 
 async fn body_json(res: axum::response::Response) -> Value {
@@ -39,7 +43,7 @@ async fn health_ok() {
 }
 
 #[tokio::test]
-async fn repos_lists_mock_data() {
+async fn repos_lists_fixture_data() {
     let res = app()
         .oneshot(Request::get("/api/repos").body(Body::empty()).unwrap())
         .await
@@ -48,7 +52,7 @@ async fn repos_lists_mock_data() {
     let v = body_json(res).await;
     let repos = v["repos"].as_array().unwrap();
     assert_eq!(repos.len(), 2);
-    assert_eq!(repos[0]["name"], "demo");
+    assert_eq!(repos[0]["name"], "fixture");
     assert_eq!(repos[0]["nodes"], 5);
     // 合同字段：status / source{kind,url} / detail / render_max_nodes。
     assert_eq!(repos[0]["status"], "ready");
@@ -67,7 +71,7 @@ async fn query_returns_hits() {
     let res = app()
         .oneshot(post_json(
             "/api/query",
-            json!({ "repo": "demo", "query": "handle" }),
+            json!({ "repo": "fixture", "query": "handle" }),
         ))
         .await
         .unwrap();
@@ -99,10 +103,10 @@ async fn symbol_context_aggregates() {
 
 #[tokio::test]
 async fn graph_lod_is_501_on_unsupported_backend() {
-    // MockBackend 不覆写 graph_lod → 默认 "not supported" → 501。
+    // FixtureBackend 不覆写 graph_lod → 默认 "not supported" → 501。
     let res = app()
         .oneshot(
-            Request::get("/api/graph/lod?repo=demo")
+            Request::get("/api/graph/lod?repo=fixture")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -216,25 +220,25 @@ async fn import_invalid_kind_is_400() {
 }
 
 #[tokio::test]
-async fn management_endpoints_are_501_on_mock() {
+async fn management_endpoints_are_501_on_fixture() {
     // Mock 不覆写仓库管理方法 → 默认 bail "not supported" → 501。
     let cases: Vec<Request<Body>> = vec![
         post_json("/api/repos/import", json!({ "kind": "git", "url": "https://x/y.git" })),
-        post_json("/api/repos/demo/settings", json!({ "embeddings_enabled": true })),
-        Request::post("/api/repos/demo/update").body(Body::empty()).unwrap(),
-        Request::delete("/api/repos/demo").body(Body::empty()).unwrap(),
-        Request::get("/api/node?repo=demo&id=demo:fn:main").body(Body::empty()).unwrap(),
-        Request::get("/api/graph/ego?repo=demo&id=demo:fn:main").body(Body::empty()).unwrap(),
-        Request::get("/api/source?repo=demo&path=src/main.rs").body(Body::empty()).unwrap(),
-        Request::get("/api/file/symbols?repo=demo&path=src/main.rs").body(Body::empty()).unwrap(),
-        Request::get("/api/files?repo=demo").body(Body::empty()).unwrap(),
+        post_json("/api/repos/fixture/settings", json!({ "embeddings_enabled": true })),
+        Request::post("/api/repos/fixture/update").body(Body::empty()).unwrap(),
+        Request::delete("/api/repos/fixture").body(Body::empty()).unwrap(),
+        Request::get("/api/node?repo=fixture&id=fixture:fn:main").body(Body::empty()).unwrap(),
+        Request::get("/api/graph/ego?repo=fixture&id=fixture:fn:main").body(Body::empty()).unwrap(),
+        Request::get("/api/source?repo=fixture&path=src/main.rs").body(Body::empty()).unwrap(),
+        Request::get("/api/file/symbols?repo=fixture&path=src/main.rs").body(Body::empty()).unwrap(),
+        Request::get("/api/files?repo=fixture").body(Body::empty()).unwrap(),
         multipart_req(
             "/api/repos/import-zip",
             "XB",
             multipart_body("XB", Some("z"), Some(b"PK")),
         ),
         multipart_req(
-            "/api/repos/demo/update-zip",
+            "/api/repos/fixture/update-zip",
             "XB",
             multipart_body("XB", None, Some(b"PK")),
         ),
@@ -242,7 +246,7 @@ async fn management_endpoints_are_501_on_mock() {
     for req in cases {
         let uri = req.uri().clone();
         let res = app().oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED, "{uri} should be 501 on mock");
+        assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED, "{uri} should be 501 on fixture");
         let v = body_json(res).await;
         assert!(v["error"].as_str().unwrap().contains("not supported"));
     }
@@ -264,7 +268,7 @@ async fn import_zip_missing_fields_is_400() {
     // update-zip 缺 file 字段。
     let res = app()
         .oneshot(multipart_req(
-            "/api/repos/demo/update-zip",
+            "/api/repos/fixture/update-zip",
             "XB",
             multipart_body("XB", None, None),
         ))
@@ -335,7 +339,7 @@ impl Backend for ManagedBackend {
         Ok(())
     }
     fn set_repo_settings(&self, name: &str, settings: RepoSettingsUpdate) -> anyhow::Result<()> {
-        assert_eq!(name, "demo");
+        assert_eq!(name, "fixture");
         assert!(settings.embeddings_enabled);
         // server 必须先 clamp 再传给 backend（1_000..=500_000）。
         if let Some(v) = settings.render_max_nodes {
@@ -357,7 +361,7 @@ impl Backend for ManagedBackend {
         start: Option<u32>,
         end: Option<u32>,
     ) -> anyhow::Result<Value> {
-        assert_eq!(repo, "demo");
+        assert_eq!(repo, "fixture");
         if path.contains("..") {
             anyhow::bail!("invalid path (escapes repo root): {path}");
         }
@@ -366,7 +370,7 @@ impl Backend for ManagedBackend {
         }
         Ok(json!({
             "path": path,
-            "abs_path": format!("/tmp/demo/{path}"),
+            "abs_path": format!("/tmp/fixture/{path}"),
             "total_lines": 240,
             "start": start.unwrap_or(1),
             "end": end.unwrap_or(240),
@@ -375,21 +379,21 @@ impl Backend for ManagedBackend {
         }))
     }
     fn file_symbols(&self, repo: &str, path: &str) -> anyhow::Result<Value> {
-        if repo != "demo" {
+        if repo != "fixture" {
             anyhow::bail!("未注册的仓库: {repo}");
         }
         let symbols = if path == "src/empty.ts" {
             json!([])
         } else {
             json!([
-                {"id": "demo:fn:alpha", "name": "alpha", "label": "Function", "file": path, "line": 3, "end_line": 9},
-                {"id": "demo:cls:Beta", "name": "Beta", "label": "Class", "file": path, "line": 50, "end_line": 54},
+                {"id": "fixture:fn:alpha", "name": "alpha", "label": "Function", "file": path, "line": 3, "end_line": 9},
+                {"id": "fixture:cls:Beta", "name": "Beta", "label": "Class", "file": path, "line": 50, "end_line": 54},
             ])
         };
         Ok(json!({ "path": path, "symbols": symbols }))
     }
     fn list_files(&self, repo: &str) -> anyhow::Result<Vec<aka_server::ops::FileEntry>> {
-        if repo != "demo" {
+        if repo != "fixture" {
             anyhow::bail!("未注册的仓库: {repo}");
         }
         // 故意逆序返回，断言 backend 自身保证升序（这里直接给已排序数据）。
@@ -475,7 +479,7 @@ async fn settings_delete_node_ego_shapes() {
     // settings → 200 {"ok":true}（render_max_nodes 缺省 = 恢复默认）
     let res = managed()
         .oneshot(post_json(
-            "/api/repos/demo/settings",
+            "/api/repos/fixture/settings",
             json!({ "embeddings_enabled": true }),
         ))
         .await
@@ -486,7 +490,7 @@ async fn settings_delete_node_ego_shapes() {
     // 显式 null 与缺省等价。
     let res = managed()
         .oneshot(post_json(
-            "/api/repos/demo/settings",
+            "/api/repos/fixture/settings",
             json!({ "embeddings_enabled": true, "render_max_nodes": null }),
         ))
         .await
@@ -497,7 +501,7 @@ async fn settings_delete_node_ego_shapes() {
     for v in [1u32, 999, 50_000, 600_000, u32::MAX] {
         let res = managed()
             .oneshot(post_json(
-                "/api/repos/demo/settings",
+                "/api/repos/fixture/settings",
                 json!({ "embeddings_enabled": true, "render_max_nodes": v }),
             ))
             .await
@@ -508,7 +512,7 @@ async fn settings_delete_node_ego_shapes() {
 
     // delete → 200 {"ok":true}
     let res = managed()
-        .oneshot(Request::delete("/api/repos/demo").body(Body::empty()).unwrap())
+        .oneshot(Request::delete("/api/repos/fixture").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -517,7 +521,7 @@ async fn settings_delete_node_ego_shapes() {
     // node 详情合同形状。
     let res = managed()
         .oneshot(
-            Request::get("/api/node?repo=demo&id=demo:fn:main")
+            Request::get("/api/node?repo=fixture&id=fixture:fn:main")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -525,14 +529,14 @@ async fn settings_delete_node_ego_shapes() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let v = body_json(res).await;
-    assert_eq!(v["id"], "demo:fn:main");
+    assert_eq!(v["id"], "fixture:fn:main");
     assert!(v["properties"].is_object());
     assert!(v["degree"]["callers"].is_number());
 
     // ego 子图：depth/max_nodes 默认值穿透 + LodGraph 同形。
     let res = managed()
         .oneshot(
-            Request::get("/api/graph/ego?repo=demo&id=demo:fn:main")
+            Request::get("/api/graph/ego?repo=fixture&id=fixture:fn:main")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -551,7 +555,7 @@ async fn settings_delete_node_ego_shapes() {
 async fn lod_max_nodes_clamped_and_default_is_none() {
     // 未显式传 max_nodes → backend 收到 None（由其解析 per-repo 设置）。
     let res = managed()
-        .oneshot(Request::get("/api/graph/lod?repo=demo").body(Body::empty()).unwrap())
+        .oneshot(Request::get("/api/graph/lod?repo=fixture").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -562,7 +566,7 @@ async fn lod_max_nodes_clamped_and_default_is_none() {
     for (q, expect) in [(1usize, 1_000u64), (999, 1_000), (50_000, 50_000), (9_999_999, 500_000)] {
         let res = managed()
             .oneshot(
-                Request::get(format!("/api/graph/lod?repo=demo&max_nodes={q}"))
+                Request::get(format!("/api/graph/lod?repo=fixture&max_nodes={q}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -579,7 +583,7 @@ async fn ego_max_nodes_clamped_to_hard_limit() {
     // ego 的上限统一用 MAX_RENDER_NODES（500_000）。
     let res = managed()
         .oneshot(
-            Request::get("/api/graph/ego?repo=demo&id=demo:fn:main&max_nodes=600000")
+            Request::get("/api/graph/ego?repo=fixture&id=fixture:fn:main&max_nodes=600000")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -595,7 +599,7 @@ async fn source_endpoint_contract_and_errors() {
     // 正常切片 → 200 + 合同形状。
     let res = managed()
         .oneshot(
-            Request::get("/api/source?repo=demo&path=src/x.ts&start=10&end=80")
+            Request::get("/api/source?repo=fixture&path=src/x.ts&start=10&end=80")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -604,7 +608,7 @@ async fn source_endpoint_contract_and_errors() {
     assert_eq!(res.status(), StatusCode::OK);
     let v = body_json(res).await;
     assert_eq!(v["path"], "src/x.ts");
-    assert_eq!(v["abs_path"], "/tmp/demo/src/x.ts");
+    assert_eq!(v["abs_path"], "/tmp/fixture/src/x.ts");
     assert_eq!(v["total_lines"], 240);
     assert_eq!(v["start"], 10);
     assert_eq!(v["end"], 80);
@@ -614,7 +618,7 @@ async fn source_endpoint_contract_and_errors() {
     // 路径穿越 → 400。
     let res = managed()
         .oneshot(
-            Request::get("/api/source?repo=demo&path=..%2Fsecret.txt")
+            Request::get("/api/source?repo=fixture&path=..%2Fsecret.txt")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -627,7 +631,7 @@ async fn source_endpoint_contract_and_errors() {
     // 文件不存在 → 404。
     let res = managed()
         .oneshot(
-            Request::get("/api/source?repo=demo&path=gone.rs")
+            Request::get("/api/source?repo=fixture&path=gone.rs")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -637,7 +641,7 @@ async fn source_endpoint_contract_and_errors() {
 
     // 缺必填参数 → 400。
     let res = managed()
-        .oneshot(Request::get("/api/source?repo=demo").body(Body::empty()).unwrap())
+        .oneshot(Request::get("/api/source?repo=fixture").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -648,7 +652,7 @@ async fn file_symbols_contract_and_errors() {
     // 正常 → 200 + 合同形状（path 回显 + symbols 按 line 升序）。
     let res = managed()
         .oneshot(
-            Request::get("/api/file/symbols?repo=demo&path=src/x.ts")
+            Request::get("/api/file/symbols?repo=fixture&path=src/x.ts")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -659,7 +663,7 @@ async fn file_symbols_contract_and_errors() {
     assert_eq!(v["path"], "src/x.ts");
     let symbols = v["symbols"].as_array().unwrap();
     assert_eq!(symbols.len(), 2);
-    assert_eq!(symbols[0]["id"], "demo:fn:alpha");
+    assert_eq!(symbols[0]["id"], "fixture:fn:alpha");
     assert_eq!(symbols[0]["name"], "alpha");
     assert_eq!(symbols[0]["label"], "Function");
     assert_eq!(symbols[0]["file"], "src/x.ts");
@@ -670,7 +674,7 @@ async fn file_symbols_contract_and_errors() {
     // 文件存在但没有符号 → 200 + 空数组。
     let res = managed()
         .oneshot(
-            Request::get("/api/file/symbols?repo=demo&path=src/empty.ts")
+            Request::get("/api/file/symbols?repo=fixture&path=src/empty.ts")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -693,7 +697,7 @@ async fn file_symbols_contract_and_errors() {
 
     // 缺必填参数 → 400。
     let res = managed()
-        .oneshot(Request::get("/api/file/symbols?repo=demo").body(Body::empty()).unwrap())
+        .oneshot(Request::get("/api/file/symbols?repo=fixture").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -703,12 +707,12 @@ async fn file_symbols_contract_and_errors() {
 async fn files_contract_and_errors() {
     // 正常 → 200 + 合同形状（repo 回显 + files 按 path 升序，每项含 symbols 计数）。
     let res = managed()
-        .oneshot(Request::get("/api/files?repo=demo").body(Body::empty()).unwrap())
+        .oneshot(Request::get("/api/files?repo=fixture").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let v = body_json(res).await;
-    assert_eq!(v["repo"], "demo");
+    assert_eq!(v["repo"], "fixture");
     let files = v["files"].as_array().unwrap();
     assert_eq!(files.len(), 2);
     assert_eq!(files[0]["path"], "src/a.ts");

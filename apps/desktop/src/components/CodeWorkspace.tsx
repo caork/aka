@@ -16,6 +16,7 @@ const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 export default function CodeWorkspace() {
   const codeTarget = useAppStore((s) => s.codeTarget);
   const query = useAppStore((s) => s.query);
+  const hasRepos = useAppStore((s) => s.repos.length > 0);
   const searching = query.trim().length > 0;
 
   return (
@@ -52,7 +53,9 @@ export default function CodeWorkspace() {
               className="flex h-full items-center justify-center"
               data-testid="code-landing"
             >
-              <span className="text-[12px] text-ink-3">请点击左侧文件开始浏览</span>
+              <span className="text-[12px] text-ink-3">
+                {hasRepos ? "请点击左侧文件开始浏览" : "请先导入一个代码仓库"}
+              </span>
             </motion.div>
           )}
         </AnimatePresence>

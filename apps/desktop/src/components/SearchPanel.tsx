@@ -1,7 +1,6 @@
 import { motion } from "framer-motion";
 import { useEffect, useState } from "react";
-import { mockSearch } from "../mock";
-import { runSearch } from "../search-api";
+import { runSearch, type SearchResult } from "../search-api";
 import { useAppStore } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
@@ -10,13 +9,24 @@ const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 export default function SearchPanel({ compact = false }: { compact?: boolean }) {
   const query = useAppStore((s) => s.query);
   const repoId = useAppStore((s) => s.selectedRepoId);
+  const hasRepos = useAppStore((s) => s.repos.length > 0);
+  const repoStatus = useAppStore(
+    (s) => s.repos.find((r) => r.id === s.selectedRepoId)?.status ?? "ready",
+  );
   const openDetail = useAppStore((s) => s.openDetail);
   const openCode = useAppStore((s) => s.openCode);
-  const [results, setResults] = useState(() => mockSearch(""));
+  const [results, setResults] = useState<SearchResult[]>([]);
   const [tookMs, setTookMs] = useState(0);
 
   useEffect(() => {
     let stale = false;
+    if (!hasRepos || repoStatus === "indexing" || repoStatus === "failed") {
+      setResults([]);
+      setTookMs(0);
+      return () => {
+        stale = true;
+      };
+    }
     const t = window.setTimeout(() => {
       void runSearch(query, repoId || null).then((out) => {
         if (stale) return;
@@ -28,20 +38,22 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
       stale = true;
       window.clearTimeout(t);
     };
-  }, [query, repoId]);
+  }, [query, repoId, repoStatus, hasRepos]);
 
   if (compact) {
     return (
-      <div className="scroll-area h-full px-2 pb-3 pt-14" data-testid="search-panel-compact">
+      <div className="scroll-area h-full px-2 pb-3 pt-3" data-testid="search-panel-compact">
         <div className="mb-2 flex items-center justify-between px-2">
           <span className="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">
-            {query ? "Results" : "Top symbols"}
+            Results
           </span>
           <span className="tabular text-[10.5px] text-ink-3">{results.length}</span>
         </div>
 
         {results.length === 0 && (
-          <div className="px-2 py-6 text-center text-[12px] text-ink-3">No matches</div>
+          <div className="px-2 py-6 text-center text-[12px] text-ink-3">
+            {hasRepos ? "No matches" : "No repositories"}
+          </div>
         )}
 
         {results.map((r, idx) => (
@@ -76,11 +88,11 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
 
   /* full-width layout */
   return (
-    <div className="scroll-area h-full px-6 pb-5 pt-14" data-testid="search-view">
+    <div className="scroll-area h-full px-6 pb-5 pt-3" data-testid="search-view">
       <div className="mx-auto max-w-[760px]">
         <div className="mb-3 flex items-baseline justify-between">
           <h2 className="text-[13px] font-semibold text-ink-2">
-            {query ? `Results for "${query}"` : "Top symbols"}
+            {query ? `Results for "${query}"` : "Results"}
           </h2>
           <span className="tabular text-[12px] text-ink-3">
             {results.length} matches · {tookMs.toFixed(1)} ms
@@ -96,7 +108,7 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
           >
             <span className="text-[14px] font-medium text-ink">No matches</span>
             <span className="text-[12.5px] text-ink-3">
-              Try a different identifier — fuzzy + BM25 search lands with the Rust core.
+              {hasRepos ? "Try a different identifier." : "Import a repository to start searching."}
             </span>
           </motion.div>
         )}

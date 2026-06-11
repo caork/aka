@@ -43,8 +43,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub use aka_mcp::ops;
 pub use aka_mcp::{
-    clamp_render_nodes, Backend, MockBackend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef,
-    MAX_RENDER_NODES, MIN_RENDER_NODES,
+    clamp_render_nodes, Backend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef, MAX_RENDER_NODES,
+    MIN_RENDER_NODES,
 };
 
 type AppState = Arc<dyn Backend>;

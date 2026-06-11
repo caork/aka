@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use aka_mcp::backend::{Backend, RepoInfo, SearchHit, SymbolRef};
-use aka_mcp::mock::MockBackend;
 use aka_mcp::service::{
     AkaMcpServer, AnalyzeParams, AugmentParams, ImpactParams, QueryParams, ReferencesParams,
     SymbolParams,
@@ -12,8 +11,12 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use serde_json::Value;
 
+mod support;
+
+use support::fixture_backend::FixtureBackend;
+
 fn server() -> AkaMcpServer {
-    AkaMcpServer::new(Arc::new(MockBackend::demo()))
+    AkaMcpServer::new(Arc::new(FixtureBackend::fixture()))
 }
 
 /// 取工具结果里的 JSON 文本并解析。
@@ -34,7 +37,7 @@ async fn list_repos_shape() {
     let v = text_json(&res);
     let repos = v["repos"].as_array().unwrap();
     assert_eq!(repos.len(), 2);
-    assert_eq!(repos[0]["name"], "demo");
+    assert_eq!(repos[0]["name"], "fixture");
     assert_eq!(repos[0]["nodes"], 5);
     assert_eq!(repos[0]["embeddings"], false);
     // beta 未索引：indexed_at 直接省略（token 友好）。
@@ -52,7 +55,7 @@ async fn list_repos_shape() {
 async fn query_shape() {
     let res = server()
         .query(Parameters(QueryParams {
-            repo: Some("demo".into()),
+            repo: Some("fixture".into()),
             query: "handle".into(),
             limit: None,
         }))
@@ -116,12 +119,12 @@ async fn context_shape() {
     // 流程归属：ProcessHit 原样序列化（process_id/name/process_type/step/step_count）。
     let procs = v["processes"].as_array().unwrap();
     assert_eq!(procs.len(), 2);
-    assert_eq!(procs[0]["process_id"], "demo:proc:request-flow");
+    assert_eq!(procs[0]["process_id"], "fixture:proc:request-flow");
     assert_eq!(procs[0]["name"], "main → read_file");
     assert_eq!(procs[0]["process_type"], "call_chain");
     assert_eq!(procs[0]["step"], 2);
     assert_eq!(procs[0]["step_count"], 4);
-    assert_eq!(procs[1]["process_id"], "demo:proc:output-flow");
+    assert_eq!(procs[1]["process_id"], "fixture:proc:output-flow");
 }
 
 #[tokio::test]
@@ -188,13 +191,13 @@ async fn impact_shape() {
     // request-flow 三个符号受波及、最早断在第 2 步；output-flow 只波及 handle_request。
     let procs = v["affected_processes"].as_array().unwrap();
     assert_eq!(procs.len(), 2);
-    assert_eq!(procs[0]["process_id"], "demo:proc:request-flow");
+    assert_eq!(procs[0]["process_id"], "fixture:proc:request-flow");
     assert_eq!(procs[0]["name"], "main → read_file");
     assert_eq!(procs[0]["process_type"], "call_chain");
     assert_eq!(procs[0]["step_count"], 4);
     assert_eq!(procs[0]["first_affected_step"], 2);
     assert_eq!(procs[0]["affected_symbols"], 3);
-    assert_eq!(procs[1]["process_id"], "demo:proc:output-flow");
+    assert_eq!(procs[1]["process_id"], "fixture:proc:output-flow");
     assert_eq!(procs[1]["affected_symbols"], 1);
     assert_eq!(procs[1]["first_affected_step"], 2);
 }
@@ -218,12 +221,12 @@ async fn impact_affected_processes_empty_without_membership() {
 #[tokio::test]
 async fn analyze_shape() {
     let res = server()
-        .analyze(Parameters(AnalyzeParams { repo_path: "/tmp/demo".into() }))
+        .analyze(Parameters(AnalyzeParams { repo_path: "/tmp/fixture".into() }))
         .await
         .unwrap();
     let v = text_json(&res);
     assert_eq!(keys(&v), ["summary"]);
-    assert!(v["summary"].as_str().unwrap().contains("/tmp/demo"));
+    assert!(v["summary"].as_str().unwrap().contains("/tmp/fixture"));
 }
 
 #[tokio::test]

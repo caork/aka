@@ -1,7 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { Camera } from "../graph/camera";
-import { generateDemoGraph } from "../graph/demo";
 import { loadEgoGraph, loadRealGraph } from "../graph/source";
 import type { GraphData } from "../graph/format";
 import { SpatialGrid } from "../graph/grid";
@@ -87,7 +86,7 @@ export default function GraphView() {
   const [stats, setStats] = useState<Stats>({ fps: 0, lod: 0, nodes: 0, edges: 0 });
   const [hover, setHover] = useState<HoverInfo | null>(null);
   const [loading, setLoading] = useState(true);
-  const [live, setLive] = useState(false);
+  const [emptyReason, setEmptyReason] = useState<"none" | "missing" | "unavailable">("none");
   const [ego, setEgo] = useState<EgoState | null>(null);
   const [egoError, setEgoError] = useState<string | null>(null);
 
@@ -383,6 +382,21 @@ export default function GraphView() {
   useEffect(() => {
     const rig = rigRef.current;
     if (!rig) return;
+    if (!repoId || !repo) {
+      rig.renderer.clearData();
+      rig.labels.clear();
+      rig.data = null;
+      rig.grid = null;
+      rig.beacons = [];
+      rig.centerIndex = -1;
+      rig.selectedIndex = -1;
+      rig.hoverIndex = -1;
+      setHover(null);
+      setStats((s) => ({ ...s, nodes: 0, edges: 0 }));
+      setLoading(false);
+      setEmptyReason("missing");
+      return;
+    }
     /* repo 切换时退出旧 repo 的 ego 模式（effect 会以 ego=null 重跑） */
     if (ego && ego.repoId !== repoId) {
       setEgo(null);
@@ -405,7 +419,7 @@ export default function GraphView() {
         if (data) {
           rig.applyData(data);
           rig.centerIndex = 0; /* 合同：ego 中心节点 i=0 */
-          setLive(true);
+          setEmptyReason("none");
           setEgoError(null);
           setLoading(false);
         } else {
@@ -421,10 +435,19 @@ export default function GraphView() {
         rig.centerIndex = -1;
         if (data) {
           rig.applyData(data);
-          setLive(true);
+          setEmptyReason("none");
         } else {
-          rig.applyData(generateDemoGraph());
-          setLive(false);
+          rig.renderer.clearData();
+          rig.labels.clear();
+          rig.data = null;
+          rig.grid = null;
+          rig.beacons = [];
+          rig.centerIndex = -1;
+          rig.selectedIndex = -1;
+          rig.hoverIndex = -1;
+          setHover(null);
+          setStats((s) => ({ ...s, nodes: 0, edges: 0 }));
+          setEmptyReason("unavailable");
         }
         setLoading(false);
       }
@@ -434,7 +457,7 @@ export default function GraphView() {
       cancelled = true;
       ctrl.abort();
     };
-  }, [repoId, ego, renderBudget]);
+  }, [repoId, repo, ego, renderBudget]);
 
   /* ---- DetailPanel「Ego 视图」发来的下钻请求 ---- */
   useEffect(() => {
@@ -541,6 +564,21 @@ export default function GraphView() {
         className="pointer-events-none absolute inset-0 h-full w-full"
       />
 
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 z-[5] h-[58px]"
+        style={{
+          background:
+            "linear-gradient(180deg, rgba(255,255,255,0.58) 0%, rgba(255,255,255,0.24) 52%, rgba(255,255,255,0) 100%)",
+          backdropFilter: "blur(18px) saturate(160%)",
+          WebkitBackdropFilter: "blur(18px) saturate(160%)",
+          maskImage:
+            "linear-gradient(180deg, black 0%, black 58%, transparent 100%)",
+          WebkitMaskImage:
+            "linear-gradient(180deg, black 0%, black 58%, transparent 100%)",
+        }}
+        aria-hidden
+      />
+
       {/* ego breadcrumb — top center */}
       <AnimatePresence>
         {ego && !loading && (
@@ -605,6 +643,28 @@ export default function GraphView() {
 
       {/* loading card */}
       <AnimatePresence>
+        {!loading && emptyReason !== "none" && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={spring}
+            className="glass-panel absolute left-1/2 top-1/2 z-10 max-w-[360px] -translate-x-1/2 -translate-y-1/2 px-6 py-5 text-center"
+            data-testid="graph-empty"
+          >
+            <div className="text-[14px] font-semibold text-ink">
+              {emptyReason === "missing" ? "No repositories" : "Graph unavailable"}
+            </div>
+            <div className="mt-1.5 text-[12px] leading-relaxed text-ink-3">
+              {emptyReason === "missing"
+                ? "Import a repository to view its graph."
+                : "This repository does not have graph data yet."}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {loading && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
@@ -666,12 +726,12 @@ export default function GraphView() {
         )}
       </AnimatePresence>
 
-      {/* zoom controls — bottom left */}
+      {/* zoom controls — bottom left, shifted to clear the repo button */}
       <motion.div
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ ...spring, delay: 0.08 }}
-        className="glass absolute bottom-4 left-4 z-10 flex flex-col overflow-hidden"
+        className="glass absolute bottom-4 left-[68px] z-10 flex flex-col overflow-hidden"
       >
         <CtrlButton label="Zoom in" onClick={() => zoom(1.7)}>
           <PlusIcon />
@@ -710,7 +770,7 @@ export default function GraphView() {
         <span
           className="text-ink-3"
           title={
-            live && totalNodes > 0
+            totalNodes > 0
               ? `已渲染 ${stats.nodes.toLocaleString()} / 仓库共 ${totalNodes.toLocaleString()} 节点`
               : `已渲染 ${stats.nodes.toLocaleString()} 节点`
           }
@@ -718,7 +778,7 @@ export default function GraphView() {
           <span className="font-medium text-ink-2" data-testid="node-count">
             {formatCount(stats.nodes)}
           </span>
-          {live && totalNodes > 0 && (
+          {totalNodes > 0 && (
             <span data-testid="node-total"> / {formatCount(totalNodes)}</span>
           )}{" "}
           nodes
@@ -735,16 +795,6 @@ export default function GraphView() {
           data-testid="lod-level"
         >
           {LOD_NAMES[stats.lod]}
-        </span>
-        <span
-          className="rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-          style={{
-            color: live ? "var(--accent-ink)" : "var(--warning-ink)",
-            background: live ? "var(--accent-fill)" : "var(--warning-fill)",
-          }}
-          data-testid="graph-live-badge"
-        >
-          {live ? "live" : "demo"}
         </span>
       </motion.div>
     </div>

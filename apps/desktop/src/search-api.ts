@@ -1,7 +1,5 @@
-/* Real search — POST /api/query against a local `aka serve`.
-   Falls back to the mock dataset when the server is offline. */
+/* Real search — POST /api/query against the embedded desktop backend or aka serve. */
 
-import { mockSearch, type SearchResult } from "./mock";
 import { invokeDesktop, isDesktopRuntime } from "./desktop-api";
 
 const SERVER = "http://127.0.0.1:4111";
@@ -14,6 +12,16 @@ interface HitOut {
   line: number;
   score: number;
   snip?: string | null;
+}
+
+export interface SearchResult {
+  id: string;
+  name: string;
+  label: "Function" | "Class" | "Method" | "Interface" | "File" | "Process";
+  file: string;
+  line: number;
+  snippet: string;
+  score: number;
 }
 
 const KNOWN_LABELS = new Set([
@@ -32,7 +40,6 @@ function stripBold(s: string): string {
 export interface SearchOutcome {
   results: SearchResult[];
   tookMs: number;
-  live: boolean;
 }
 
 export async function runSearch(
@@ -59,12 +66,11 @@ export async function runSearch(
       snippet: stripBold(h.snip ?? ""),
       score: h.score,
     }));
-    return { results, tookMs: performance.now() - t0, live: true };
+    return { results, tookMs: performance.now() - t0 };
   } catch {
     return {
-      results: mockSearch(query),
+      results: [],
       tookMs: performance.now() - t0,
-      live: false,
     };
   }
 }

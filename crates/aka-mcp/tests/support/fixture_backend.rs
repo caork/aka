@@ -1,6 +1,6 @@
-//! 内存 MockBackend — 测试与手测用的假数据实现。
+//! 内存 FixtureBackend — 测试与手测用的假数据实现。
 //!
-//! 数据集（repo `demo`，5 个函数 + 调用关系）：
+//! 数据集（repo `fixture`，5 个函数 + 调用关系）：
 //!
 //! ```text
 //! main ──CALLS──▶ handle_request ──CALLS──▶ parse_config ──CALLS──▶ read_file
@@ -16,10 +16,10 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use crate::backend::{Backend, ProcessHit, RepoInfo, SearchHit, SymbolRef};
+use aka_mcp::{Backend, ProcessHit, RepoInfo, SearchHit, SymbolRef};
 
 #[derive(Debug, Clone)]
-struct MockNode {
+struct FixtureNode {
     id: &'static str,
     name: &'static str,
     label: &'static str,
@@ -29,26 +29,26 @@ struct MockNode {
 }
 
 /// (source idx, target idx, edge type)
-type MockEdge = (usize, usize, &'static str);
+type FixtureEdge = (usize, usize, &'static str);
 
-const NODES: &[MockNode] = &[
-    MockNode { id: "demo:fn:main", name: "main", label: "Function", repo: "demo", file: "src/main.rs", line: 3 },
-    MockNode { id: "demo:fn:handle_request", name: "handle_request", label: "Function", repo: "demo", file: "src/handler.rs", line: 12 },
-    MockNode { id: "demo:fn:parse_config", name: "parse_config", label: "Function", repo: "demo", file: "src/config.rs", line: 8 },
-    MockNode { id: "demo:fn:read_file", name: "read_file", label: "Function", repo: "demo", file: "src/io.rs", line: 5 },
-    MockNode { id: "demo:fn:write_output", name: "write_output", label: "Function", repo: "demo", file: "src/io.rs", line: 21 },
-    MockNode { id: "beta:fn:beta_main", name: "beta_main", label: "Function", repo: "beta", file: "src/main.rs", line: 1 },
+const NODES: &[FixtureNode] = &[
+    FixtureNode { id: "fixture:fn:main", name: "main", label: "Function", repo: "fixture", file: "src/main.rs", line: 3 },
+    FixtureNode { id: "fixture:fn:handle_request", name: "handle_request", label: "Function", repo: "fixture", file: "src/handler.rs", line: 12 },
+    FixtureNode { id: "fixture:fn:parse_config", name: "parse_config", label: "Function", repo: "fixture", file: "src/config.rs", line: 8 },
+    FixtureNode { id: "fixture:fn:read_file", name: "read_file", label: "Function", repo: "fixture", file: "src/io.rs", line: 5 },
+    FixtureNode { id: "fixture:fn:write_output", name: "write_output", label: "Function", repo: "fixture", file: "src/io.rs", line: 21 },
+    FixtureNode { id: "beta:fn:beta_main", name: "beta_main", label: "Function", repo: "beta", file: "src/main.rs", line: 1 },
 ];
 
-const EDGES: &[MockEdge] = &[
+const EDGES: &[FixtureEdge] = &[
     (0, 1, "CALLS"), // main -> handle_request
     (1, 2, "CALLS"), // handle_request -> parse_config
     (1, 4, "CALLS"), // handle_request -> write_output
     (2, 3, "CALLS"), // parse_config -> read_file
 ];
 
-/// Process 合成节点的归属数据（`符号-[STEP_IN_PROCESS]->Process` 的 mock 版）。
-struct MockProcess {
+/// Process 合成节点的归属数据（`符号-[STEP_IN_PROCESS]->Process` 的 fixture 版）。
+struct FixtureProcess {
     id: &'static str,
     name: &'static str,
     process_type: &'static str,
@@ -56,35 +56,35 @@ struct MockProcess {
     steps: &'static [(usize, u32)],
 }
 
-const PROCESSES: &[MockProcess] = &[
-    MockProcess {
-        id: "demo:proc:request-flow",
+const PROCESSES: &[FixtureProcess] = &[
+    FixtureProcess {
+        id: "fixture:proc:request-flow",
         name: "main → read_file",
         process_type: "call_chain",
         steps: &[(0, 1), (1, 2), (2, 3), (3, 4)],
     },
-    MockProcess {
-        id: "demo:proc:output-flow",
+    FixtureProcess {
+        id: "fixture:proc:output-flow",
         name: "main → write_output",
         process_type: "call_chain",
         steps: &[(0, 1), (1, 2), (4, 3)],
     },
 ];
 
-/// 内存假数据 Backend。`MockBackend::demo()` 即可用。
+/// 内存假数据 Backend。`FixtureBackend::fixture()` 即可用。
 #[derive(Debug, Default, Clone)]
-pub struct MockBackend;
+pub struct FixtureBackend;
 
-impl MockBackend {
-    pub fn demo() -> Self {
+impl FixtureBackend {
+    pub fn fixture() -> Self {
         Self
     }
 
-    fn node_in_repo(node: &MockNode, repo: Option<&str>) -> bool {
+    fn node_in_repo(node: &FixtureNode, repo: Option<&str>) -> bool {
         repo.is_none_or(|r| r == node.repo)
     }
 
-    fn hit(node: &MockNode, score: f32, snippet: bool) -> SearchHit {
+    fn hit(node: &FixtureNode, score: f32, snippet: bool) -> SearchHit {
         SearchHit {
             node_id: node.id.to_string(),
             name: node.name.to_string(),
@@ -97,7 +97,7 @@ impl MockBackend {
         }
     }
 
-    fn symbol_ref(node: &MockNode, edge_type: &str, depth: u32) -> SymbolRef {
+    fn symbol_ref(node: &FixtureNode, edge_type: &str, depth: u32) -> SymbolRef {
         SymbolRef {
             node_id: node.id.to_string(),
             name: node.name.to_string(),
@@ -143,12 +143,12 @@ impl MockBackend {
     }
 }
 
-impl Backend for MockBackend {
+impl Backend for FixtureBackend {
     fn list_repos(&self) -> anyhow::Result<Vec<RepoInfo>> {
         Ok(vec![
             RepoInfo {
-                name: "demo".into(),
-                path: "/tmp/demo".into(),
+                name: "fixture".into(),
+                path: "/tmp/fixture".into(),
                 nodes: 5,
                 edges: 4,
                 indexed_at: Some(1_750_000_000),
@@ -250,7 +250,7 @@ impl Backend for MockBackend {
 
     fn analyze(&self, repo_path: &str) -> anyhow::Result<String> {
         Ok(format!(
-            "mock analyze: queued indexing for {repo_path} (nodes=5 edges=4, no-op)"
+            "fixture analyze: queued indexing for {repo_path} (nodes=5 edges=4, no-op)"
         ))
     }
 
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn callers_bfs_depth() {
-        let b = MockBackend::demo();
+        let b = FixtureBackend::fixture();
         let one = b.callers(None, "read_file", 1).unwrap();
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].name, "parse_config");
@@ -297,25 +297,25 @@ mod tests {
 
     #[test]
     fn repo_filter() {
-        let b = MockBackend::demo();
+        let b = FixtureBackend::fixture();
         assert!(b.search(Some("beta"), "main", 10).unwrap().len() == 1);
         assert!(b.find_definition(Some("beta"), "main").unwrap().is_empty());
     }
 
     #[test]
     fn processes_of_membership() {
-        let b = MockBackend::demo();
-        let hits = b.processes_of(None, "demo:fn:handle_request").unwrap();
+        let b = FixtureBackend::fixture();
+        let hits = b.processes_of(None, "fixture:fn:handle_request").unwrap();
         assert_eq!(hits.len(), 2, "handle_request 在两条执行流里");
-        assert_eq!(hits[0].process_id, "demo:proc:request-flow");
+        assert_eq!(hits[0].process_id, "fixture:proc:request-flow");
         assert_eq!(hits[0].process_type, "call_chain");
         assert_eq!(hits[0].step, Some(2));
         assert_eq!(hits[0].step_count, Some(4));
-        assert_eq!(hits[1].process_id, "demo:proc:output-flow");
+        assert_eq!(hits[1].process_id, "fixture:proc:output-flow");
         assert_eq!(hits[1].step_count, Some(3));
 
-        // repo 过滤：beta 仓库里没有 demo 的节点。
-        assert!(b.processes_of(Some("beta"), "demo:fn:handle_request").unwrap().is_empty());
+        // repo 过滤：beta 仓库里没有 fixture 的节点。
+        assert!(b.processes_of(Some("beta"), "fixture:fn:handle_request").unwrap().is_empty());
         // 未知节点 → 空 Vec 而非错误（合同：查不到不是错误）。
         assert!(b.processes_of(None, "nope").unwrap().is_empty());
         // 不在任何流程里的节点 → 空 Vec。

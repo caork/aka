@@ -1,7 +1,7 @@
 //! 数据层接缝 — MCP / HTTP 工具逻辑全部面向这个 trait 编写。
 //!
 //! 真实实现（tantivy 检索 + SQLite/CSR 图查询）由集成批次接入；
-//! 本 crate 自带 [`crate::mock::MockBackend`] 供测试与手测。
+//! 生产入口由 CLI / 桌面端注入真实 backend；测试夹具只存在于 integration tests。
 //!
 //! 约定：
 //! - `repo = None` 表示「所有已注册仓库」；`Some(name)` 按 registry 里的仓库名过滤。
@@ -115,7 +115,7 @@ pub trait Backend: Send + Sync + 'static {
 
     /// 节点所属的执行流程（沿 `符号-[STEP_IN_PROCESS]->Process` 边查归属）。
     /// `node_id` 是图谱节点 id（不是符号名）；节点不存在或没有流程数据
-    /// 一律返回空 Vec（合同只增不改，默认空实现保 mock / 测试不破）。
+    /// 一律返回空 Vec（合同只增不改，默认空实现保旧实现 / 测试不破）。
     fn processes_of(&self, repo: Option<&str>, node_id: &str) -> anyhow::Result<Vec<ProcessHit>> {
         let _ = (repo, node_id);
         Ok(Vec::new())

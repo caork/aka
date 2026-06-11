@@ -17,7 +17,3 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 [dev-dependencies]
 # 端到端测试需要 client 角色（内存 duplex transport 走 transport-async-rw，已随 server 启用）。
 rmcp = { version = "1.7", features = ["client"] }
-
-[[bin]]
-name = "aka-mcp-mock"
-path = "src/bin/aka-mcp-mock.rs"
