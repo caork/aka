@@ -298,6 +298,15 @@ async fn delete_repo(
     .await
 }
 
+#[tauri::command]
+async fn clear_app_data(backend: State<'_, BackendState>) -> Result<serde_json::Value, String> {
+    run_backend(backend, move |b| {
+        b.clear_runtime_data()?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -325,6 +334,7 @@ pub fn run() {
             update_repo_zip,
             set_repo_settings,
             delete_repo,
+            clear_app_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

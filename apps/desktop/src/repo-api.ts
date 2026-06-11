@@ -185,6 +185,17 @@ export async function deleteRepo(name: string): Promise<void> {
   await ensureOk(r);
 }
 
+export async function clearAppData(): Promise<void> {
+  if (!isDesktopRuntime()) {
+    throw new Error("清理应用数据仅支持桌面版");
+  }
+  try {
+    await invokeDesktop("clear_app_data");
+  } catch (e) {
+    throw asDesktopError(e, "清理失败");
+  }
+}
+
 /* ---- 流程（Process 合成节点）语义 ----
    engine 检测出的调用链节点（label=="Process"）没有自身源码位置，
    后端在 /api/node 响应里附带流程语义；旧后端无这些字段，调用方必须防御。 */

@@ -351,6 +351,25 @@ impl AkaBackend {
         }
     }
 
+    pub fn clear_runtime_data(&self) -> Result<()> {
+        {
+            let jobs = self.jobs.lock().expect("jobs lock");
+            if jobs.values().any(|j| j.status == "indexing") {
+                bail!("cannot clear app data while indexing is running");
+            }
+        }
+        self.handles.lock().expect("handles lock").clear();
+        self.jobs.lock().expect("jobs lock").clear();
+        let home = aka_home();
+        if home.exists() {
+            std::fs::remove_dir_all(&home)
+                .with_context(|| format!("clear aka data dir {}", home.display()))?;
+        }
+        std::fs::create_dir_all(&home)
+            .with_context(|| format!("recreate aka data dir {}", home.display()))?;
+        Ok(())
+    }
+
     /// 名字可用性守卫：已注册或有进行中任务 → 拒绝。
     fn guard_name_free(&self, name: &str) -> Result<()> {
         if Registry::load()?.find_by_name(name).is_some() {
