@@ -122,6 +122,45 @@ export async function deleteRepo(name: string): Promise<void> {
   await ensureOk(r);
 }
 
+/* ---- 流程（Process 合成节点）语义 ----
+   engine 检测出的调用链节点（label=="Process"）没有自身源码位置，
+   后端在 /api/node 响应里附带流程语义；旧后端无这些字段，调用方必须防御。 */
+
+/** 流程内的符号引用（入口 entry / 终点 terminal 共用形状） */
+export interface ProcessSymbolRef {
+  id: string;
+  name: string;
+  label: string;
+  file: string;
+  line: number;
+}
+
+/** 流程步骤（steps 按 step 升序） */
+export interface ProcessStep extends ProcessSymbolRef {
+  /** 1-based 步序 */
+  step: number;
+}
+
+export interface ProcessInfo {
+  /** "cross_community" | "intra_community"（前向兼容保留 string） */
+  process_type: string;
+  step_count: number;
+  entry: ProcessSymbolRef | null;
+  terminal: ProcessSymbolRef | null;
+  steps: ProcessStep[];
+}
+
+/** 普通符号节点参与的某条流程 */
+export interface ProcessMembership {
+  /** 对应 Process 节点的 id，可直接用于 /api/node 查询 */
+  process_id: string;
+  name: string;
+  process_type: string;
+  /** 该符号在流程中的步序（1-based） */
+  step: number;
+  step_count: number;
+}
+
 /* ---- 节点详情 ---- */
 
 export interface NodeDetail {
@@ -133,6 +172,10 @@ export interface NodeDetail {
   end_line: number;
   properties: Record<string, unknown>;
   degree: { callers: number; callees: number; refs: number };
+  /** 仅 label=="Process" 的合成流程节点附带（旧后端无此字段） */
+  process?: ProcessInfo | null;
+  /** 该符号参与的流程列表，可能为空数组（旧后端无此字段） */
+  processes?: ProcessMembership[] | null;
 }
 
 export type NodeDetailResult =

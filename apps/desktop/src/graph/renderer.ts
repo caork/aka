@@ -28,6 +28,9 @@ const CLASS_COLORS: Record<string, string> = {
   Struct: "#7fb89a",
   Enum: "#c893b4",
   Trait: "#a9a1d6",
+  /* 合成节点(无源码位置)用区别于真实符号的色相:流程绿、社区灰紫 */
+  Process: "#6fb287",
+  Community: "#b3a8c9",
 };
 const FALLBACK_COLOR = "#8fa0b8";
 export const ACCENT = "#2e7cf6";

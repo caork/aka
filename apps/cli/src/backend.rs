@@ -22,7 +22,7 @@ use aka_core::{
     aka_home, clamp_render_nodes, Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
 };
 use aka_graph::{Adjacency, GraphStore, NodeRow};
-use aka_mcp::{Backend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef};
+use aka_mcp::{Backend, ProcessHit, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef};
 use aka_search::SearchIndex;
 
 /// `/api/source` 单次最多返回的行数。
@@ -635,6 +635,28 @@ impl Backend for AkaBackend {
         })
     }
 
+    fn processes_of(&self, repo: Option<&str>, node_id: &str) -> Result<Vec<ProcessHit>> {
+        // node_id 是图谱节点 id：先解析 rowid 再查 STEP_IN_PROCESS 归属。
+        // 跨仓库查询（repo = None）时节点只会落在其中一个库里，查不到跳过即可。
+        let mut out = Vec::new();
+        for handle in self.targets(repo)? {
+            let store = handle.store.lock().expect("store lock");
+            let Some(row) = store.node_by_id(node_id)? else {
+                continue;
+            };
+            for m in store.processes_of_node(row.rowid)? {
+                out.push(ProcessHit {
+                    process_id: m.process_id,
+                    name: m.name,
+                    process_type: m.process_type,
+                    step: m.step,
+                    step_count: m.step_count,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     fn graph_lod(&self, repo: &str, max_nodes: Option<usize>) -> Result<serde_json::Value> {
         // 缺省 → per-repo render_max_nodes 设置 → 默认 50_000；一律 clamp 到硬上限。
         let requested = match max_nodes {
@@ -950,7 +972,7 @@ impl Backend for AkaBackend {
         } else {
             serde_json::json!({})
         };
-        Ok(serde_json::json!({
+        let mut detail = serde_json::json!({
             "id": row.id,
             "name": row.name.clone().unwrap_or_default(),
             "label": row.label,
@@ -959,7 +981,69 @@ impl Backend for AkaBackend {
             "end_line": row.end_line.unwrap_or(0),
             "properties": properties,
             "degree": { "callers": callers, "callees": callees, "refs": refs },
-        }))
+        });
+        // 流程视角：Process 合成节点展开成完整的 "process" 对象（端点 + 步骤），
+        // 其他节点给 "processes" 归属数组——空数组也要给，前端据此判断渲染。
+        let store = handle.store.lock().expect("store lock");
+        if row.label == "Process" {
+            // entry/terminal 从 props 的 entryPointId/terminalId 解析；
+            // id 失配（工件不完整 / 节点被裁掉）→ null 而非报错。
+            let endpoint = |key: &str| -> Result<serde_json::Value> {
+                let Some(id) = row.props.get(key).and_then(|v| v.as_str()) else {
+                    return Ok(serde_json::Value::Null);
+                };
+                Ok(match store.node_by_id(id)? {
+                    Some(n) => serde_json::json!({
+                        "id": n.id,
+                        "name": n.name.unwrap_or_default(),
+                        "label": n.label,
+                        "file": n.file_path.unwrap_or_default(),
+                        "line": n.start_line.unwrap_or(0),
+                    }),
+                    None => serde_json::Value::Null,
+                })
+            };
+            let entry = endpoint("entryPointId")?;
+            let terminal = endpoint("terminalId")?;
+            // 步骤按 step 升序（process_steps 已排好），缺步号的排最后。
+            let steps: Vec<serde_json::Value> = store
+                .process_steps(row.rowid)?
+                .into_iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "id": s.id,
+                        "name": s.name,
+                        "label": s.label,
+                        "file": s.file_path.unwrap_or_default(),
+                        "line": s.start_line.unwrap_or(0),
+                        "step": s.step,
+                    })
+                })
+                .collect();
+            detail["process"] = serde_json::json!({
+                "process_type": row.props.get("processType").and_then(|v| v.as_str()).unwrap_or(""),
+                // stepCount 以 props 为准（裁剪后 steps 可能不全），缺失回退实际步数。
+                "step_count": row.props.get("stepCount").and_then(|v| v.as_u64())
+                    .unwrap_or(steps.len() as u64),
+                "entry": entry,
+                "terminal": terminal,
+                "steps": steps,
+            });
+        } else {
+            let processes: Vec<ProcessHit> = store
+                .processes_of_node(row.rowid)?
+                .into_iter()
+                .map(|m| ProcessHit {
+                    process_id: m.process_id,
+                    name: m.name,
+                    process_type: m.process_type,
+                    step: m.step,
+                    step_count: m.step_count,
+                })
+                .collect();
+            detail["processes"] = serde_json::to_value(processes)?;
+        }
+        Ok(detail)
     }
 
     fn file_symbols(&self, repo: &str, path: &str) -> Result<serde_json::Value> {

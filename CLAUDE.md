@@ -67,4 +67,5 @@ cd apps/desktop && npx tsc --noEmit && npm run build
 ## 现状
 
 （2026-06-10）M0–M3 完成：engine 移植（Ascend C 25/25）+ 工件合同 v0；Rust 五 crate 全绿（workspace 73 测试 + clippy -D warnings）；CLI 八命令；MCP/HTTP 双服务；桌面端三视图真实数据 + 仓库全生命周期（git/zip 导入、一键更新、per-repo 设置、删除）+ 节点详情/ego 下钻；WebGL 50 万节点/百万边 60fps 实测。
+（2026-06-11）Process 执行流全链路接入：edges.step 摄取（旧库自动迁移）、布局 Processes 专属簇、MCP impact 报 affected_processes（哪条流断在第几步）、query/context 带流程归属、/api/node 对 Process 展开 entry/terminal/steps、桌面端流程详情视图（入口源码+步骤时间线）+ 普通符号"参与流程"。改完需对已有仓库重跑 `aka index` 补 step 数据。
 **待办**：M4 Docker 化 + Jensen 部署 + 远程模式；embedding 实现（本地 fastembed，默认关）；增量索引（fileHashes/parse-cache）；Tauri 正式打包（engine Bun compile 成 sidecar）；wiki/group 按需移植；导入中 update 返回 404 的小语义瑕疵。

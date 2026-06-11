@@ -44,6 +44,14 @@ fn edge(source: &str, target: &str, edge_type: &str) -> EdgeRec {
     }
 }
 
+/// 带步号的 `符号 -[STEP_IN_PROCESS]-> Process` 边。
+fn step_edge(source: &str, process: &str, step: u32) -> EdgeRec {
+    EdgeRec {
+        step: Some(step),
+        ..edge(source, process, "STEP_IN_PROCESS")
+    }
+}
+
 /// 手造 mini 图（10 节点 13 边）：
 /// main→A→B→C 调用链 + Derived EXTENDS Base + Base HAS_METHOD M
 /// + 两个 Community（com1: main/a/b，com2: c/base/derived/m）+ File 节点。
@@ -333,6 +341,160 @@ fn layout_without_communities_uses_top_dirs() {
             ("ui".to_string(), 1)
         ]
     );
+}
+
+// ── Process 流程 ─────────────────────────────────────────────────
+
+/// 流程图：main→alpha→beta 调用链 + 两条 Process
+/// （proc1 三步全带步号、摄取序故意打乱；proc2 混入无步号边）。
+fn process_store() -> GraphStore {
+    let mut store = GraphStore::open_in_memory().unwrap();
+    let nodes = vec![
+        node("main", "Function", json!({"name": "main", "filePath": "src/main.rs", "startLine": 0})),
+        node("a", "Function", json!({"name": "alpha", "filePath": "src/main.rs", "startLine": 9})),
+        node("b", "Function", json!({"name": "beta", "filePath": "src/lib/util.rs", "startLine": 19})),
+        node("proc1", "Process", json!({"name": "main→beta", "processType": "call-chain", "stepCount": 3})),
+        node("proc2", "Process", json!({"name": "alpha-loop", "processType": "cycle"})),
+    ];
+    let edges = vec![
+        edge("main", "a", "CALLS"),
+        edge("a", "b", "CALLS"),
+        edge("main", "proc1", "ENTRY_POINT_OF"),
+        step_edge("b", "proc1", 3),
+        step_edge("main", "proc1", 1),
+        step_edge("a", "proc1", 2),
+        step_edge("a", "proc2", 1),
+        edge("b", "proc2", "STEP_IN_PROCESS"),
+    ];
+    let stats = store.ingest(nodes.into_iter(), edges.into_iter()).unwrap();
+    assert_eq!(stats.nodes, 5);
+    assert_eq!(stats.edges, 8);
+    store
+}
+
+#[test]
+fn processes_of_node_memberships() {
+    let store = process_store();
+    let rowid_of = |id: &str| store.node_by_id(id).unwrap().unwrap().rowid;
+
+    // a 参与两条流程，process_rowid 升序。
+    let ms = store.processes_of_node(rowid_of("a")).unwrap();
+    assert_eq!(ms.len(), 2);
+    assert_eq!(ms[0].process_rowid, rowid_of("proc1"));
+    assert_eq!(ms[0].process_id, "proc1");
+    assert_eq!(ms[0].name, "main→beta");
+    assert_eq!(ms[0].process_type, "call-chain");
+    assert_eq!(ms[0].step, Some(2));
+    assert_eq!(ms[0].step_count, Some(3));
+    // proc2 无 stepCount → None。
+    assert_eq!(ms[1].process_id, "proc2");
+    assert_eq!(ms[1].process_type, "cycle");
+    assert_eq!(ms[1].step, Some(1));
+    assert_eq!(ms[1].step_count, None);
+
+    // ENTRY_POINT_OF 不算 membership：main 只通过 STEP_IN_PROCESS 进 proc1。
+    let ms = store.processes_of_node(rowid_of("main")).unwrap();
+    assert_eq!(ms.len(), 1);
+    assert_eq!(ms[0].process_id, "proc1");
+    assert_eq!(ms[0].step, Some(1));
+
+    // Process 自身没有出向 STEP_IN_PROCESS → 空。
+    assert!(store.processes_of_node(rowid_of("proc1")).unwrap().is_empty());
+}
+
+#[test]
+fn process_steps_ordered_by_step() {
+    let store = process_store();
+    let rowid_of = |id: &str| store.node_by_id(id).unwrap().unwrap().rowid;
+
+    // proc1：摄取序乱、读回按 step 升序。
+    let steps = store.process_steps(rowid_of("proc1")).unwrap();
+    let view: Vec<_> = steps.iter().map(|s| (s.id.as_str(), s.step)).collect();
+    assert_eq!(view, vec![("main", Some(1)), ("a", Some(2)), ("b", Some(3))]);
+    assert_eq!(steps[0].name, "main");
+    assert_eq!(steps[0].label, "Function");
+    assert_eq!(steps[0].file_path.as_deref(), Some("src/main.rs"));
+    /* 工件 startLine=0（0-based）→ 存储为 1-based 的 1 */
+    assert_eq!(steps[0].start_line, Some(1));
+    assert_eq!(steps[2].file_path.as_deref(), Some("src/lib/util.rs"));
+    assert_eq!(steps[2].start_line, Some(20));
+
+    // proc2：无步号的边排最后。
+    let steps = store.process_steps(rowid_of("proc2")).unwrap();
+    let view: Vec<_> = steps.iter().map(|s| (s.id.as_str(), s.step)).collect();
+    assert_eq!(view, vec![("a", Some(1)), ("b", None)]);
+
+    // 不存在的流程 → 空。
+    assert!(store.process_steps(9999).unwrap().is_empty());
+}
+
+#[test]
+fn step_survives_persisted_roundtrip() {
+    let path = temp_db("process-roundtrip");
+    {
+        let mut store = GraphStore::create(&path).unwrap();
+        let nodes = vec![
+            node("fn1", "Function", json!({"name": "one"})),
+            node("p1", "Process", json!({"name": "proc", "processType": "call-chain", "stepCount": 1})),
+        ];
+        store
+            .ingest(nodes.into_iter(), vec![step_edge("fn1", "p1", 1)].into_iter())
+            .unwrap();
+    }
+    let store = GraphStore::open(&path).unwrap();
+    let p1 = store.node_by_id("p1").unwrap().unwrap();
+    let steps = store.process_steps(p1.rowid).unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].id, "fn1");
+    assert_eq!(steps[0].step, Some(1));
+}
+
+#[test]
+fn layout_groups_processes_into_own_cluster() {
+    let mut store = GraphStore::open_in_memory().unwrap();
+    let nodes = vec![
+        node("x1", "Function", json!({"name": "x1", "filePath": "core/a.rs"})),
+        node("x2", "Function", json!({"name": "x2", "filePath": "core/b.rs"})),
+        node("z1", "Function", json!({"name": "z1", "filePath": "root.rs"})),
+        node("p1", "Process", json!({"name": "proc-one", "processType": "call-chain"})),
+        node("p2", "Process", json!({"name": "proc-two", "processType": "call-chain"})),
+    ];
+    let edges = vec![
+        edge("x1", "x2", "CALLS"),
+        step_edge("x1", "p1", 1),
+        step_edge("x2", "p1", 2),
+    ];
+    store.ingest(nodes.into_iter(), edges.into_iter()).unwrap();
+    let adj = Adjacency::build(&store).unwrap();
+    compute_layout(&store, &adj).unwrap();
+
+    // Process 不再混进 "(root)"：单独 "Processes" 簇，根级文件仍归 (root)。
+    let cg = store.cluster_graph().unwrap();
+    let mut summary: Vec<(String, u32)> =
+        cg.nodes.iter().map(|c| (c.label.clone(), c.count)).collect();
+    summary.sort();
+    assert_eq!(
+        summary,
+        vec![
+            ("(root)".to_string(), 1),
+            ("Processes".to_string(), 2),
+            ("core".to_string(), 2)
+        ]
+    );
+
+    let positions = store.positions().unwrap();
+    let cluster_of = |id: &str| {
+        let rowid = store.node_by_id(id).unwrap().unwrap().rowid;
+        positions.iter().find(|p| p.node == rowid).unwrap().cluster
+    };
+    let proc_cluster = cluster_of("p1");
+    assert_eq!(cluster_of("p2"), proc_cluster);
+    assert_eq!(cg.nodes[proc_cluster as usize].label, "Processes");
+    assert_ne!(cluster_of("z1"), proc_cluster, "根级文件不应混进 Processes 簇");
+
+    // 确定性：重跑坐标逐位一致。
+    compute_layout(&store, &adj).unwrap();
+    assert_eq!(store.positions().unwrap(), positions);
 }
 
 // ── LOD ──────────────────────────────────────────────────────────

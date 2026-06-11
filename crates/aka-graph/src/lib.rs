@@ -14,6 +14,7 @@ pub mod ego;
 pub mod error;
 pub mod layout;
 pub mod lod;
+pub mod process;
 pub mod store;
 
 pub use adjacency::{Adjacency, Neighbor, CALLS_TYPE, IMPACT_EDGE_TYPES};
@@ -21,4 +22,5 @@ pub use ego::EGO_RING_STEP;
 pub use error::{GraphError, Result};
 pub use layout::compute_layout;
 pub use lod::{ClusterEdge, ClusterGraph, ClusterNode, LodBinary, LodGraph, LodNode};
+pub use process::{ProcessMembership, ProcessStepRow};
 pub use store::{GraphStore, IngestStats, NodeRow, PositionRow};

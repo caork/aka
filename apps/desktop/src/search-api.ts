@@ -21,6 +21,7 @@ const KNOWN_LABELS = new Set([
   "Method",
   "Interface",
   "File",
+  "Process",
 ]);
 
 function stripBold(s: string): string {

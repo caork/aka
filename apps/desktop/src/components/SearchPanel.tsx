@@ -51,7 +51,10 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
             animate={{ opacity: 1, x: 0 }}
             transition={{ ...spring, delay: idx * 0.015 }}
             onClick={() =>
-              openCode({ repo: repoId, path: r.file, line: r.line })
+              /* 无源码位置的合成节点(Process 等)走详情面板,openCode 只会 404 */
+              r.file
+                ? openCode({ repo: repoId, path: r.file, line: r.line })
+                : openDetail({ id: r.id, name: r.name, label: r.label, file: r.file, line: r.line })
             }
             className="focus-ring group mb-0.5 flex w-full flex-col gap-0.5 rounded-[8px] px-2 py-2 text-left transition-colors hover:bg-[rgba(15,23,42,0.05)]"
             data-testid="search-result"
@@ -63,7 +66,7 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
               <span className={`badge ${r.label} flex-none text-[10px]`}>{r.label}</span>
             </div>
             <span className="mono truncate text-[10.5px] text-ink-3">
-              {r.file}:{r.line}
+              {r.file ? `${r.file}:${r.line}` : "执行流"}
             </span>
           </motion.button>
         ))}
@@ -106,7 +109,8 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
             transition={{ ...spring, delay: idx * 0.02 }}
             onClick={() => {
               openDetail({ id: r.id, name: r.name, label: r.label, file: r.file, line: r.line });
-              openCode({ repo: repoId, path: r.file, line: r.line });
+              /* 合成节点无源码文件,源码 modal 只会 404 */
+              if (r.file) openCode({ repo: repoId, path: r.file, line: r.line });
             }}
             className="focus-ring glass group mb-2.5 block w-full px-4 py-3 text-left transition-shadow duration-150 ease-out hover:shadow-[inset_0_0_0_0.5px_rgba(15,23,42,0.06),0_0_0_1px_rgba(255,255,255,0.65),0_2px_6px_rgba(16,24,40,.05),0_16px_40px_-12px_rgba(16,24,40,.14)]"
             data-testid="search-result"
@@ -117,7 +121,7 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
               </span>
               <span className={`badge ${r.label}`}>{r.label}</span>
               <span className="mono tabular ml-auto truncate pl-3 text-[11.5px] text-ink-3">
-                {r.file}:{r.line}
+                {r.file ? `${r.file}:${r.line}` : "执行流"}
               </span>
             </div>
             <div className="mono mt-2 truncate rounded-[8px] bg-[rgba(15,23,42,0.035)] px-3 py-1.5 text-[11.5px] leading-relaxed text-ink-2">

@@ -4,6 +4,8 @@ import {
   fetchNodeDetail,
   fetchSource,
   type NodeDetail,
+  type ProcessMembership,
+  type ProcessStep,
   type SourceResult,
 } from "../repo-api";
 import {
@@ -156,9 +158,27 @@ function PanelBody({
     };
   }, [repoId, target.id, target.name]);
 
-  /* 源码片段：文件/行号优先用 /api/node 的精确值，回退点击来源自带的 */
-  const file = detail?.file || target.file;
-  const line = detail?.line || target.line;
+  const label = detail?.label || target.label || "Node";
+
+  /* Process 合成流程节点：没有自身源码位置，源码区改用流程入口符号的位置。
+     旧后端无 process 字段 → entry 为 null → 完全回退现状展示。 */
+  const isProcess = label === "Process";
+  const proc = (isProcess ? detail?.process : null) ?? null;
+  const entry = proc?.entry ?? null;
+  /** step 升序的流程步骤；空数组按无步骤处理（回退 refs 现状逻辑） */
+  const steps =
+    proc && proc.steps?.length
+      ? [...proc.steps].sort((a, b) => a.step - b.step)
+      : null;
+  /** 该符号参与的流程（普通节点；空数组不渲染） */
+  const memberships = detail?.processes?.length ? detail.processes : null;
+
+  /* 源码片段：文件/行号优先用 /api/node 的精确值，回退点击来源自带的；
+     Process 节点自身无位置时回退流程入口的位置。 */
+  const ownFile = detail?.file || target.file;
+  const ownLine = detail?.line || target.line;
+  const file = ownFile || (entry?.file ?? "");
+  const line = ownFile ? ownLine : (entry?.line ?? 0);
   const endLine = Math.max(detail?.end_line ?? 0, line);
 
   useEffect(() => {
@@ -182,7 +202,6 @@ function PanelBody({
     };
   }, [repoId, file, line]);
 
-  const label = detail?.label || target.label || "Node";
   const absPath = source?.state === "ok" ? source.source.abs_path : null;
   const copyText = absPath || file;
 
@@ -226,6 +245,28 @@ function PanelBody({
       label: r.label,
       file: r.file,
       line: r.line,
+    });
+  };
+
+  /* 流程步骤行 → 选中该符号节点（与 refs 行为一致） */
+  const pickStep = (s: ProcessStep) => {
+    openDetail({
+      id: s.id,
+      name: s.name,
+      label: s.label,
+      file: s.file,
+      line: s.line,
+    });
+  };
+
+  /* 参与流程行 → 选中该 Process 节点（process_id 即节点 id） */
+  const pickProcess = (m: ProcessMembership) => {
+    openDetail({
+      id: m.process_id,
+      name: m.name,
+      label: "Process",
+      file: "",
+      line: 0,
     });
   };
 
@@ -301,14 +342,14 @@ function PanelBody({
             </span>
             <span className={`badge ${label}`}>{label}</span>
           </div>
-          {(file || line > 0) && (
+          {(ownFile || ownLine > 0) && (
             <div
               className="mono mt-1 truncate text-[11px] text-ink-3"
-              title={file}
+              title={ownFile}
             >
-              {file}
-              {line > 0 ? `:${line}` : ""}
-              {endLine > line ? `–${endLine}` : ""}
+              {ownFile}
+              {ownLine > 0 ? `:${ownLine}` : ""}
+              {endLine > ownLine ? `–${endLine}` : ""}
             </div>
           )}
         </div>
@@ -324,6 +365,21 @@ function PanelBody({
 
       {/* ---- 内容（滚动区） ---- */}
       <div className="scroll-area min-h-0 flex-1 px-4 pb-3">
+        {/* 流程元信息（Process 合成节点） */}
+        {proc && (
+          <div
+            className="mb-3 flex items-center gap-2"
+            data-testid="process-meta"
+          >
+            <span className="badge Process">
+              {processTypeText(proc.process_type)}
+            </span>
+            <span className="tabular text-[11px] text-ink-3">
+              {proc.step_count} 步
+            </span>
+          </div>
+        )}
+
         {/* 源码预览 */}
         <div className="mb-1.5 flex items-baseline justify-between">
           <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
@@ -340,6 +396,18 @@ function PanelBody({
             </button>
           )}
         </div>
+        {entry && !ownFile && (
+          <div
+            className="mono mb-1.5 flex items-baseline gap-2 px-0.5 text-[11px]"
+            data-testid="process-entry"
+          >
+            <span className="truncate text-ink-2" title={entry.file}>
+              {entry.file}
+              {entry.line > 0 ? `:${entry.line}` : ""}
+            </span>
+            <span className="flex-none text-[10px] text-ink-3">流程入口</span>
+          </div>
+        )}
         <SourcePreview
           source={source}
           hasFile={Boolean(file)}
@@ -347,41 +415,84 @@ function PanelBody({
           file={file}
           focusStart={line}
           focusEnd={endLine}
+          missingNote={
+            isProcess
+              ? "合成流程节点，无单一源码位置"
+              : "该节点没有关联的源码位置"
+          }
         />
 
-        {/* 关系 */}
-        <SectionTitle className="mt-4">Relations</SectionTitle>
-        <div className="mb-2 grid grid-cols-3 gap-1.5">
-          <CountStat label="callers" value={counts.callers} pending={relationsPending} />
-          <CountStat label="callees" value={counts.callees} pending={relationsPending} />
-          <CountStat label="refs" value={counts.refs} pending={relationsPending} />
-        </div>
-        {ctx ? (
+        {steps ? (
           <>
-            <RelationGroup
-              title="Callers"
-              rows={ctx.callers}
-              onPick={pickRelation}
-            />
-            <RelationGroup
-              title="Callees"
-              rows={ctx.callees}
-              onPick={pickRelation}
-            />
-            <RelationGroup title="Refs" rows={ctx.refs} onPick={pickRelation} />
+            {/* 流程步骤时间线（替代对 Process 无意义的 callers/callees/refs） */}
+            <SectionTitle className="mt-4">流程步骤</SectionTitle>
+            <ProcessStepList steps={steps} onPick={pickStep} />
           </>
         ) : (
-          ctxDone &&
-          detailDone &&
-          !detail && (
-            <div
-              className="rounded-[10px] px-3 py-2 text-[11.5px]"
-              style={{ background: "rgba(246,166,35,0.1)", color: "#8a5a10" }}
-              data-testid="detail-degraded"
-            >
-              关系数据不可用——aka serve 离线或后端版本过旧
+          <>
+            {/* 关系 */}
+            <SectionTitle className="mt-4">Relations</SectionTitle>
+            <div className="mb-2 grid grid-cols-3 gap-1.5">
+              <CountStat label="callers" value={counts.callers} pending={relationsPending} />
+              <CountStat label="callees" value={counts.callees} pending={relationsPending} />
+              <CountStat label="refs" value={counts.refs} pending={relationsPending} />
             </div>
-          )
+            {ctx ? (
+              <>
+                <RelationGroup
+                  title="Callers"
+                  rows={ctx.callers}
+                  onPick={pickRelation}
+                />
+                <RelationGroup
+                  title="Callees"
+                  rows={ctx.callees}
+                  onPick={pickRelation}
+                />
+                <RelationGroup title="Refs" rows={ctx.refs} onPick={pickRelation} />
+              </>
+            ) : (
+              ctxDone &&
+              detailDone &&
+              !detail && (
+                <div
+                  className="rounded-[10px] px-3 py-2 text-[11.5px]"
+                  style={{ background: "rgba(246,166,35,0.1)", color: "#8a5a10" }}
+                  data-testid="detail-degraded"
+                >
+                  关系数据不可用——aka serve 离线或后端版本过旧
+                </div>
+              )
+            )}
+          </>
+        )}
+
+        {/* 参与流程（普通符号节点；空数组不渲染） */}
+        {memberships && (
+          <>
+            <SectionTitle className="mt-4">参与流程</SectionTitle>
+            <div className="mb-2">
+              {memberships.map((m, i) => (
+                <button
+                  key={`${m.process_id}-${i}`}
+                  onClick={() => pickProcess(m)}
+                  className="focus-ring mb-0.5 flex w-full items-center gap-2 rounded-[9px] px-2 py-1.5 text-left transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)]"
+                  data-testid="process-membership-row"
+                >
+                  <span
+                    className="h-[7px] w-[7px] flex-none rounded-full"
+                    style={{ background: "rgba(52,199,89,0.55)" }}
+                  />
+                  <span className="mono truncate text-[12px] text-ink">
+                    {m.name}
+                  </span>
+                  <span className="tabular ml-auto flex-none text-[10.5px] text-ink-3">
+                    第 {m.step}/共 {m.step_count} 步
+                  </span>
+                </button>
+              ))}
+            </div>
+          </>
         )}
       </div>
 
@@ -508,6 +619,53 @@ function RelationGroup({
   );
 }
 
+/** process_type → 中文徽章文案（未知类型回退通用文案） */
+function processTypeText(t: string): string {
+  if (t === "cross_community") return "跨社区流程";
+  if (t === "intra_community") return "社区内流程";
+  return "流程";
+}
+
+/** Process 节点的步骤时间线：步号 + 符号名 + 文件短名:行，点击选中该节点。 */
+function ProcessStepList({
+  steps,
+  onPick,
+}: {
+  steps: ProcessStep[];
+  onPick(s: ProcessStep): void;
+}) {
+  return (
+    <div className="mb-2" data-testid="process-steps">
+      {steps.map((s, i) => (
+        <button
+          key={`${s.id}-${s.step}-${i}`}
+          onClick={() => onPick(s)}
+          className="focus-ring mb-0.5 flex w-full items-center gap-2 rounded-[9px] px-2 py-1.5 text-left transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)]"
+          data-testid="process-step-row"
+        >
+          <span
+            className="tabular flex h-[18px] min-w-[18px] flex-none items-center justify-center rounded-full px-1 text-[10px] font-semibold text-ink-3"
+            style={{
+              background: "rgba(15,23,42,0.05)",
+              boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.08)",
+            }}
+            aria-hidden
+          >
+            {s.step}
+          </span>
+          <span className="mono truncate text-[12px] text-ink">{s.name}</span>
+          {s.file && (
+            <span className="mono tabular ml-auto flex-none text-[10.5px] text-ink-3">
+              {s.file.split("/").pop()}
+              {s.line > 0 ? `:${s.line}` : ""}
+            </span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ActionButton({
   onClick,
   disabled,
@@ -575,6 +733,7 @@ function SourcePreview({
   file,
   focusStart,
   focusEnd,
+  missingNote,
 }: {
   source: SourceResult | null;
   hasFile: boolean;
@@ -583,13 +742,11 @@ function SourcePreview({
   file: string;
   focusStart: number;
   focusEnd: number;
+  /** 无源码位置时的提示文案（Process 合成节点用专属文案） */
+  missingNote: string;
 }) {
   if (!hasFile) {
-    return resolving ? (
-      <SourceSkeleton />
-    ) : (
-      <SourceUnavailable note="该节点没有关联的源码位置" />
-    );
+    return resolving ? <SourceSkeleton /> : <SourceUnavailable note={missingNote} />;
   }
   if (source === null) return <SourceSkeleton />;
   if (source.state === "unsupported") {

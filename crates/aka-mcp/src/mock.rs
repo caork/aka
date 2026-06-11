@@ -8,11 +8,15 @@
 //!                       └─CALLS──▶ write_output
 //! ```
 //!
-//! 另有 repo `beta`（1 个孤立函数），用于验证 repo 过滤。
+//! 两条执行流程（Process 合成节点的归属数据，验证流程相关字段）：
+//! `main → read_file`（main/handle_request/parse_config/read_file，步号 1–4）、
+//! `main → write_output`（main/handle_request/write_output，步号 1–3）。
+//!
+//! 另有 repo `beta`（1 个孤立函数，无流程归属），用于验证 repo 过滤与字段省略。
 
 use std::collections::{HashSet, VecDeque};
 
-use crate::backend::{Backend, RepoInfo, SearchHit, SymbolRef};
+use crate::backend::{Backend, ProcessHit, RepoInfo, SearchHit, SymbolRef};
 
 #[derive(Debug, Clone)]
 struct MockNode {
@@ -41,6 +45,30 @@ const EDGES: &[MockEdge] = &[
     (1, 2, "CALLS"), // handle_request -> parse_config
     (1, 4, "CALLS"), // handle_request -> write_output
     (2, 3, "CALLS"), // parse_config -> read_file
+];
+
+/// Process 合成节点的归属数据（`符号-[STEP_IN_PROCESS]->Process` 的 mock 版）。
+struct MockProcess {
+    id: &'static str,
+    name: &'static str,
+    process_type: &'static str,
+    /// (NODES 下标, 步号)，按步号升序。
+    steps: &'static [(usize, u32)],
+}
+
+const PROCESSES: &[MockProcess] = &[
+    MockProcess {
+        id: "demo:proc:request-flow",
+        name: "main → read_file",
+        process_type: "call_chain",
+        steps: &[(0, 1), (1, 2), (2, 3), (3, 4)],
+    },
+    MockProcess {
+        id: "demo:proc:output-flow",
+        name: "main → write_output",
+        process_type: "call_chain",
+        steps: &[(0, 1), (1, 2), (4, 3)],
+    },
 ];
 
 /// 内存假数据 Backend。`MockBackend::demo()` 即可用。
@@ -225,6 +253,28 @@ impl Backend for MockBackend {
             "mock analyze: queued indexing for {repo_path} (nodes=5 edges=4, no-op)"
         ))
     }
+
+    fn processes_of(&self, repo: Option<&str>, node_id: &str) -> anyhow::Result<Vec<ProcessHit>> {
+        // 按节点 id（非符号名）查归属；未知节点 / repo 不匹配 → 空 Vec 而非错误。
+        let Some(idx) = NODES
+            .iter()
+            .position(|n| n.id == node_id && Self::node_in_repo(n, repo))
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(PROCESSES
+            .iter()
+            .filter_map(|p| {
+                p.steps.iter().find(|(i, _)| *i == idx).map(|&(_, step)| ProcessHit {
+                    process_id: p.id.to_string(),
+                    name: p.name.to_string(),
+                    process_type: p.process_type.to_string(),
+                    step: Some(step),
+                    step_count: Some(p.steps.len() as u32),
+                })
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -250,5 +300,25 @@ mod tests {
         let b = MockBackend::demo();
         assert!(b.search(Some("beta"), "main", 10).unwrap().len() == 1);
         assert!(b.find_definition(Some("beta"), "main").unwrap().is_empty());
+    }
+
+    #[test]
+    fn processes_of_membership() {
+        let b = MockBackend::demo();
+        let hits = b.processes_of(None, "demo:fn:handle_request").unwrap();
+        assert_eq!(hits.len(), 2, "handle_request 在两条执行流里");
+        assert_eq!(hits[0].process_id, "demo:proc:request-flow");
+        assert_eq!(hits[0].process_type, "call_chain");
+        assert_eq!(hits[0].step, Some(2));
+        assert_eq!(hits[0].step_count, Some(4));
+        assert_eq!(hits[1].process_id, "demo:proc:output-flow");
+        assert_eq!(hits[1].step_count, Some(3));
+
+        // repo 过滤：beta 仓库里没有 demo 的节点。
+        assert!(b.processes_of(Some("beta"), "demo:fn:handle_request").unwrap().is_empty());
+        // 未知节点 → 空 Vec 而非错误（合同：查不到不是错误）。
+        assert!(b.processes_of(None, "nope").unwrap().is_empty());
+        // 不在任何流程里的节点 → 空 Vec。
+        assert!(b.processes_of(None, "beta:fn:beta_main").unwrap().is_empty());
     }
 }

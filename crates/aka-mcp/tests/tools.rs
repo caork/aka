@@ -69,6 +69,31 @@ async fn query_shape() {
     assert_eq!(hit["line"], 12);
     assert!(hit["score"].as_f64().unwrap() > 0.0);
     assert!(hit["snip"].as_str().unwrap().contains("handle_request"));
+    // 流程归属：有归属时给流程名数组（最多 3 个）。
+    let procs: Vec<&str> = hit["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert_eq!(procs, ["main → read_file", "main → write_output"]);
+}
+
+#[tokio::test]
+async fn query_omits_processes_when_empty() {
+    // beta_main 不在任何流程里 → processes 字段整个省略（token 友好）。
+    let res = server()
+        .query(Parameters(QueryParams {
+            repo: Some("beta".into()),
+            query: "beta_main".into(),
+            limit: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    let hits = v["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].get("processes").is_none());
 }
 
 #[tokio::test]
@@ -88,6 +113,15 @@ async fn context_shape() {
     let callees: Vec<_> = v["callees"].as_array().unwrap().iter().map(|r| &r["name"]).collect();
     assert_eq!(callees, [&Value::from("parse_config"), &Value::from("write_output")]);
     assert_eq!(v["refs"].as_array().unwrap()[0]["edge"], "CALLS");
+    // 流程归属：ProcessHit 原样序列化（process_id/name/process_type/step/step_count）。
+    let procs = v["processes"].as_array().unwrap();
+    assert_eq!(procs.len(), 2);
+    assert_eq!(procs[0]["process_id"], "demo:proc:request-flow");
+    assert_eq!(procs[0]["name"], "main → read_file");
+    assert_eq!(procs[0]["process_type"], "call_chain");
+    assert_eq!(procs[0]["step"], 2);
+    assert_eq!(procs[0]["step_count"], 4);
+    assert_eq!(procs[1]["process_id"], "demo:proc:output-flow");
 }
 
 #[tokio::test]
@@ -149,6 +183,36 @@ async fn impact_shape() {
     assert_eq!(impacted[0]["depth"], 1);
     assert_eq!(impacted[1]["name"], "handle_request");
     assert_eq!(impacted[1]["depth"], 2);
+
+    // 流程视角：受影响集合 = read_file(4) + parse_config(3) + handle_request(2)。
+    // request-flow 三个符号受波及、最早断在第 2 步；output-flow 只波及 handle_request。
+    let procs = v["affected_processes"].as_array().unwrap();
+    assert_eq!(procs.len(), 2);
+    assert_eq!(procs[0]["process_id"], "demo:proc:request-flow");
+    assert_eq!(procs[0]["name"], "main → read_file");
+    assert_eq!(procs[0]["process_type"], "call_chain");
+    assert_eq!(procs[0]["step_count"], 4);
+    assert_eq!(procs[0]["first_affected_step"], 2);
+    assert_eq!(procs[0]["affected_symbols"], 3);
+    assert_eq!(procs[1]["process_id"], "demo:proc:output-flow");
+    assert_eq!(procs[1]["affected_symbols"], 1);
+    assert_eq!(procs[1]["first_affected_step"], 2);
+}
+
+#[tokio::test]
+async fn impact_affected_processes_empty_without_membership() {
+    // beta_main 没有流程数据 → affected_processes 为空数组（字段始终存在）。
+    let res = server()
+        .impact(Parameters(ImpactParams {
+            repo: Some("beta".into()),
+            symbol: "beta_main".into(),
+            depth: None,
+            limit: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert!(v["affected_processes"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

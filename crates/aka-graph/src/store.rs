@@ -1,5 +1,6 @@
 //! SQLite 持久层 — nodes/edges/edge_types/meta/positions/clusters 表，
 //! 单事务批量摄取（prepared statement，悬空边跳过计数）+ 基本查询。
+//! 打开时做轻量列迁移（`migrate`，目前只有 edges.step），旧库无需重建。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,7 +25,8 @@ CREATE TABLE IF NOT EXISTS edges (
     target     INTEGER NOT NULL,
     type_id    INTEGER NOT NULL,
     confidence REAL NOT NULL DEFAULT 0,
-    reason     TEXT NOT NULL DEFAULT ''
+    reason     TEXT NOT NULL DEFAULT '',
+    step       INTEGER
 );
 CREATE TABLE IF NOT EXISTS edge_types (
     type_id INTEGER PRIMARY KEY,
@@ -147,7 +149,30 @@ impl GraphStore {
         let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch(SCHEMA)?;
+        Self::migrate(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// 轻量迁移。`CREATE TABLE IF NOT EXISTS` 不会改动已存在的表，
+    /// 旧库要在这里补列；create/open 都走可写连接，ALTER 安全。
+    fn migrate(conn: &Connection) -> Result<()> {
+        // edges.step：流程步号（`符号 -[STEP_IN_PROCESS]-> Process` 的 1-based 序）。
+        let has_step = {
+            let mut stmt = conn.prepare("PRAGMA table_info(edges)")?;
+            let mut rows = stmt.query([])?;
+            let mut found = false;
+            while let Some(row) = rows.next()? {
+                if row.get::<_, String>(1)? == "step" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_step {
+            conn.execute_batch("ALTER TABLE edges ADD COLUMN step INTEGER")?;
+        }
+        Ok(())
     }
 
     pub(crate) fn conn(&self) -> &Connection {
@@ -209,8 +234,8 @@ impl GraphStore {
             let mut ins_type =
                 tx.prepare_cached("INSERT INTO edge_types (type_id, name) VALUES (?1, ?2)")?;
             let mut ins_edge = tx.prepare_cached(
-                "INSERT INTO edges (source, target, type_id, confidence, reason) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO edges (source, target, type_id, confidence, reason, step) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
 
             let mut resolve = |id: &str, map: &mut HashMap<String, i64>| -> Result<Option<i64>> {
@@ -247,7 +272,7 @@ impl GraphStore {
                         tid
                     }
                 };
-                ins_edge.execute(params![src, dst, tid, e.confidence, e.reason])?;
+                ins_edge.execute(params![src, dst, tid, e.confidence, e.reason, e.step])?;
                 stats.edges += 1;
             }
         }
@@ -356,4 +381,96 @@ fn escape_like(s: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("aka-graph-store-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = format!("{name}-{}", std::process::id());
+        for suffix in ["db", "db-wal", "db-shm"] {
+            let _ = std::fs::remove_file(dir.join(format!("{base}.{suffix}")));
+        }
+        dir.join(format!("{base}.db"))
+    }
+
+    /// 旧库（edges 建表早于 step 列）打开时自动 ALTER 补列，且补列后可正常摄取步号。
+    #[test]
+    fn open_migrates_legacy_edges_table() {
+        let path = temp_db("legacy-schema");
+        {
+            // 手造旧 schema：edges 无 step 列。
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE nodes (
+                     id TEXT NOT NULL UNIQUE, label TEXT NOT NULL, name TEXT,
+                     file_path TEXT, start_line INTEGER, end_line INTEGER,
+                     props TEXT NOT NULL
+                 );
+                 CREATE TABLE edges (
+                     source INTEGER NOT NULL, target INTEGER NOT NULL,
+                     type_id INTEGER NOT NULL,
+                     confidence REAL NOT NULL DEFAULT 0,
+                     reason TEXT NOT NULL DEFAULT ''
+                 );",
+            )
+            .unwrap();
+        }
+
+        let mut store = GraphStore::open(&path).unwrap();
+        let has_step = {
+            let mut stmt = store.conn().prepare("PRAGMA table_info(edges)").unwrap();
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            cols.contains(&"step".to_string())
+        };
+        assert!(has_step, "open legacy db must add edges.step");
+
+        // 迁移后的库能摄取带步号的边，并通过 process 查询读回。
+        let nodes = vec![
+            NodeRec {
+                id: "fn1".into(),
+                label: "Function".into(),
+                properties: json!({"name": "one"}).as_object().unwrap().clone(),
+            },
+            NodeRec {
+                id: "p1".into(),
+                label: "Process".into(),
+                properties: json!({"name": "proc", "processType": "call-chain", "stepCount": 1})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            },
+        ];
+        let edges = vec![EdgeRec {
+            id: "e1".into(),
+            source_id: "fn1".into(),
+            target_id: "p1".into(),
+            edge_type: "STEP_IN_PROCESS".into(),
+            confidence: 1.0,
+            reason: String::new(),
+            step: Some(1),
+            evidence: None,
+        }];
+        let stats = store.ingest(nodes.into_iter(), edges.into_iter()).unwrap();
+        assert_eq!(stats.edges, 1);
+
+        let p1 = store.node_by_id("p1").unwrap().unwrap();
+        let steps = store.process_steps(p1.rowid).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].id, "fn1");
+        assert_eq!(steps[0].step, Some(1));
+
+        // 再次打开：迁移幂等，不会重复 ALTER 报错。
+        drop(store);
+        let store = GraphStore::open(&path).unwrap();
+        assert_eq!(store.edge_count().unwrap(), 1);
+    }
 }

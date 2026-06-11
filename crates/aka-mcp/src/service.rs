@@ -135,7 +135,7 @@ impl AkaMcpServer {
     }
 
     #[tool(
-        description = "Search the code knowledge graph for symbols (functions, classes, files) matching a query. Returns compact JSON hits with id, name, label, file, line, score, and an optional snippet."
+        description = "Search the code knowledge graph for symbols (functions, classes, files) matching a query. Returns compact JSON hits with id, name, label, file, line, score, and an optional snippet. Hits that belong to known execution flows also carry a 'processes' array of flow names."
     )]
     pub async fn query(
         &self,
@@ -147,7 +147,7 @@ impl AkaMcpServer {
     }
 
     #[tool(
-        description = "Get the 360-degree context of a symbol in one call: its definition(s), direct callers, direct callees, and incoming references. Prefer this over separate lookups when exploring an unfamiliar symbol."
+        description = "Get the 360-degree context of a symbol in one call: its definition(s), direct callers, direct callees, incoming references, and the execution flows (processes) it belongs to. Prefer this over separate lookups when exploring an unfamiliar symbol."
     )]
     pub async fn context(
         &self,
@@ -181,7 +181,7 @@ impl AkaMcpServer {
     }
 
     #[tool(
-        description = "Estimate the blast radius of changing a symbol: all transitive reverse dependencies up to a depth. Each result carries the hop distance ('depth')."
+        description = "Estimate the blast radius of changing a symbol: all transitive reverse dependencies up to a depth. Each result carries the hop distance ('depth'). Also reports 'affected_processes' — which execution flows would break, at which step they break first, and how many symbols in each flow are affected."
     )]
     pub async fn impact(
         &self,

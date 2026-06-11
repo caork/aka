@@ -3,7 +3,7 @@
 export interface SearchResult {
   id: string;
   name: string;
-  label: "Function" | "Class" | "Method" | "Interface" | "File";
+  label: "Function" | "Class" | "Method" | "Interface" | "File" | "Process";
   file: string;
   line: number;
   snippet: string;

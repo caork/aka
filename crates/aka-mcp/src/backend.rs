@@ -40,6 +40,19 @@ pub struct SymbolRef {
     pub depth: u32,
 }
 
+/// 符号所属的执行流程（图里 label = `Process` 的合成节点，调用链「入口→终点」）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcessHit {
+    pub process_id: String,
+    pub name: String,
+    /// 流程类型（来自 Process 节点 props 的 processType）。
+    pub process_type: String,
+    /// 该符号在流程内的步号（STEP_IN_PROCESS 边携带）；缺失 = 边上没有步号。
+    pub step: Option<u32>,
+    /// 流程总步数（Process 节点 props 的 stepCount）。
+    pub step_count: Option<u32>,
+}
+
 /// 已注册仓库的概要信息。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoInfo {
@@ -99,6 +112,14 @@ pub trait Backend: Send + Sync + 'static {
     /// 改动影响面：可达的反向依赖集合，截断到 `limit`。
     fn impact(&self, repo: Option<&str>, symbol: &str, depth: u32, limit: usize)
         -> anyhow::Result<Vec<SymbolRef>>;
+
+    /// 节点所属的执行流程（沿 `符号-[STEP_IN_PROCESS]->Process` 边查归属）。
+    /// `node_id` 是图谱节点 id（不是符号名）；节点不存在或没有流程数据
+    /// 一律返回空 Vec（合同只增不改，默认空实现保 mock / 测试不破）。
+    fn processes_of(&self, repo: Option<&str>, node_id: &str) -> anyhow::Result<Vec<ProcessHit>> {
+        let _ = (repo, node_id);
+        Ok(Vec::new())
+    }
 
     /// 触发（重新）分析一个仓库，返回任务描述 / 结果摘要。
     fn analyze(&self, repo_path: &str) -> anyhow::Result<String>;

@@ -3,9 +3,11 @@
 //! MCP 工具和 aka-server 的 HTTP API 共用这里的 DTO / 聚合函数，
 //! 保证两个面输出一致。
 
+use std::collections::{BTreeMap, HashSet};
+
 use serde::Serialize;
 
-use crate::backend::{Backend, RepoInfo, SearchHit, SymbolRef};
+use crate::backend::{Backend, ProcessHit, RepoInfo, SearchHit, SymbolRef};
 
 /// 检索命中（短字段名版）。
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -21,6 +23,10 @@ pub struct HitOut {
     pub score: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snip: Option<String>,
+    /// 命中符号所属的流程名（最多 [`MAX_HIT_PROCESS_NAMES`] 个）；
+    /// 没有流程归属时整个字段省略（token 友好）。只有 query 填它。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processes: Option<Vec<String>>,
 }
 
 impl From<SearchHit> for HitOut {
@@ -34,6 +40,7 @@ impl From<SearchHit> for HitOut {
             line: h.start_line,
             score: (h.score * 1000.0).round() / 1000.0,
             snip: h.snippet,
+            processes: None,
         }
     }
 }
@@ -130,10 +137,47 @@ pub struct RefsOut {
     pub refs: Vec<RefOut>,
 }
 
+/// 符号所属执行流程（线上形状与 [`ProcessHit`] 一一对应，字段名原样）。
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProcessOut {
+    pub process_id: String,
+    pub name: String,
+    pub process_type: String,
+    pub step: Option<u32>,
+    pub step_count: Option<u32>,
+}
+
+impl From<ProcessHit> for ProcessOut {
+    fn from(p: ProcessHit) -> Self {
+        Self {
+            process_id: p.process_id,
+            name: p.name,
+            process_type: p.process_type,
+            step: p.step,
+            step_count: p.step_count,
+        }
+    }
+}
+
+/// impact 的流程视角聚合：哪条执行流会断、断在第几步、波及几个符号。
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct AffectedProcessOut {
+    pub process_id: String,
+    pub name: String,
+    pub process_type: String,
+    pub step_count: Option<u32>,
+    /// 流程内所有受影响符号步号的最小值——执行流最早断在这一步。
+    pub first_affected_step: Option<u32>,
+    /// 该流程内受影响符号数（含目标符号自身）。
+    pub affected_symbols: usize,
+}
+
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ImpactOut {
     pub impacted: Vec<RefOut>,
     pub count: usize,
+    /// 按 affected_symbols 降序；同数按 process_id 升序保证确定性。
+    pub affected_processes: Vec<AffectedProcessOut>,
 }
 
 /// 一个符号的 360° 上下文。
@@ -144,6 +188,8 @@ pub struct ContextOut {
     pub callers: Vec<RefOut>,
     pub callees: Vec<RefOut>,
     pub refs: Vec<RefOut>,
+    /// 目标符号的流程归属（多定义聚合，按 process_id 去重）。
+    pub processes: Vec<ProcessOut>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -170,6 +216,8 @@ pub const DEFAULT_IMPACT_DEPTH: u32 = 2;
 pub const DEFAULT_IMPACT_LIMIT: usize = 50;
 pub const CONTEXT_NEIGHBOR_DEPTH: u32 = 1;
 pub const AUGMENT_TOP_K: usize = 3;
+/// query 每条命中最多带几个流程名（再多就靠 context / node 详情看全量）。
+pub const MAX_HIT_PROCESS_NAMES: usize = 3;
 
 pub fn list_repos(b: &dyn Backend) -> anyhow::Result<ReposOut> {
     Ok(ReposOut {
@@ -183,9 +231,22 @@ pub fn query(
     query: &str,
     limit: usize,
 ) -> anyhow::Result<QueryOut> {
-    Ok(QueryOut {
-        hits: b.search(repo, query, limit)?.into_iter().map(Into::into).collect(),
-    })
+    let mut hits = Vec::new();
+    for h in b.search(repo, query, limit)? {
+        let procs = b.processes_of(repo, &h.node_id)?;
+        let mut hit = HitOut::from(h);
+        if !procs.is_empty() {
+            hit.processes = Some(
+                procs
+                    .into_iter()
+                    .take(MAX_HIT_PROCESS_NAMES)
+                    .map(|p| p.name)
+                    .collect(),
+            );
+        }
+        hits.push(hit);
+    }
+    Ok(QueryOut { hits })
 }
 
 pub fn find_definition(
@@ -216,17 +277,67 @@ pub fn impact(
     depth: u32,
     limit: usize,
 ) -> anyhow::Result<ImpactOut> {
-    let impacted: Vec<RefOut> =
-        b.impact(repo, symbol, depth, limit)?.into_iter().map(Into::into).collect();
+    let refs = b.impact(repo, symbol, depth, limit)?;
+    // 受影响节点集合 = 目标符号自身（所有定义）+ 影响面内全部符号，去重后再
+    // 做流程聚合，避免同一符号在某流程里被数两次。
+    let mut node_ids: Vec<String> = b
+        .find_definition(repo, symbol)?
+        .into_iter()
+        .map(|h| h.node_id)
+        .collect();
+    node_ids.extend(refs.iter().map(|r| r.node_id.clone()));
+    node_ids.sort();
+    node_ids.dedup();
+
+    // BTreeMap 按 process_id 有序，聚合结果与输入顺序无关（确定性输出）。
+    let mut agg: BTreeMap<String, AffectedProcessOut> = BTreeMap::new();
+    for id in &node_ids {
+        for p in b.processes_of(repo, id)? {
+            let entry = agg.entry(p.process_id.clone()).or_insert(AffectedProcessOut {
+                process_id: p.process_id,
+                name: p.name,
+                process_type: p.process_type,
+                step_count: p.step_count,
+                first_affected_step: None,
+                affected_symbols: 0,
+            });
+            entry.affected_symbols += 1;
+            // 最早断点 = 所有受影响符号步号的最小值（无步号的符号不参与）。
+            entry.first_affected_step = match (entry.first_affected_step, p.step) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+    }
+    let mut affected_processes: Vec<AffectedProcessOut> = agg.into_values().collect();
+    affected_processes.sort_by(|a, b| {
+        b.affected_symbols
+            .cmp(&a.affected_symbols)
+            .then_with(|| a.process_id.cmp(&b.process_id))
+    });
+
+    let impacted: Vec<RefOut> = refs.into_iter().map(Into::into).collect();
     let count = impacted.len();
-    Ok(ImpactOut { impacted, count })
+    Ok(ImpactOut { impacted, count, affected_processes })
 }
 
 /// definition + callers + callees + references 拼成一个结构化结果。
 pub fn context(b: &dyn Backend, repo: Option<&str>, symbol: &str) -> anyhow::Result<ContextOut> {
+    let defs: Vec<HitOut> =
+        b.find_definition(repo, symbol)?.into_iter().map(Into::into).collect();
+    // 流程归属：符号可能重名多定义，全部聚合后按 process_id 去重。
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut processes: Vec<ProcessOut> = Vec::new();
+    for d in &defs {
+        for p in b.processes_of(repo, &d.id)? {
+            if seen.insert(p.process_id.clone()) {
+                processes.push(p.into());
+            }
+        }
+    }
     Ok(ContextOut {
         symbol: symbol.to_string(),
-        defs: b.find_definition(repo, symbol)?.into_iter().map(Into::into).collect(),
+        defs,
         callers: b
             .callers(repo, symbol, CONTEXT_NEIGHBOR_DEPTH)?
             .into_iter()
@@ -242,6 +353,7 @@ pub fn context(b: &dyn Backend, repo: Option<&str>, symbol: &str) -> anyhow::Res
             .into_iter()
             .map(Into::into)
             .collect(),
+        processes,
     })
 }
 

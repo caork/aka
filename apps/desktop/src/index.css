@@ -247,6 +247,10 @@ body {
   color: #5b6b80;
   background: rgba(100, 116, 139, 0.1);
 }
+.badge.Process {
+  color: #1f8a4c;
+  background: rgba(52, 199, 89, 0.12);
+}
 
 mark {
   background: rgba(46, 124, 246, 0.16);

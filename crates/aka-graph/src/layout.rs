@@ -1,7 +1,9 @@
 //! 确定性静态布局 — 两级 phyllotaxis（葵花籽螺旋）。
 //!
 //! 1. 聚类：优先用图里现成的 Community 节点（MEMBER_OF 边）；
-//!    不在任何社区的节点按 file_path 顶层目录聚，无路径的归 "(root)"。
+//!    不在任何社区的节点按 file_path 顶层目录聚，无路径的归 "(root)"；
+//!    其中 label='Process' 的合成流程节点单独归 "Processes" 簇
+//!    （它们无 file_path，否则会和根级文件挤在一起）。
 //! 2. 簇中心按权重（成员数）降序做 phyllotaxis，簇间距随累计面积增长，
 //!    与簇半径成正比避免重叠；簇内成员按度数降序再做局部 phyllotaxis，
 //!    度数高的靠簇心。
@@ -95,18 +97,35 @@ pub fn compute_layout(store: &GraphStore, adj: &Adjacency) -> Result<()> {
             }
         }
     }
+    // 落单的 Process 节点（合成流程节点，无 file_path）单独成簇，
+    // 复用 dir_groups 的 BTreeMap 以 "Processes" 作 key，排序确定性不变。
+    let mut process_set: HashSet<u32> = HashSet::new();
+    {
+        let mut stmt = conn.prepare("SELECT id FROM nodes WHERE label = 'Process'")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            if let Some(dense) = adj.index_of_id(&id) {
+                process_set.insert(dense);
+            }
+        }
+    }
     let mut dir_groups: BTreeMap<String, Vec<u32>> = BTreeMap::new();
     let mut comm_members: Vec<Vec<u32>> = vec![Vec::new(); communities.len()];
     for u in 0..n as u32 {
         match assign[u as usize] {
             Some(ci) => comm_members[ci as usize].push(u),
             None => {
-                let key = file_paths[u as usize]
-                    .as_deref()
-                    .map(top_dir)
-                    .filter(|d| !d.is_empty())
-                    .unwrap_or("(root)")
-                    .to_owned();
+                let key = if process_set.contains(&u) {
+                    "Processes"
+                } else {
+                    file_paths[u as usize]
+                        .as_deref()
+                        .map(top_dir)
+                        .filter(|d| !d.is_empty())
+                        .unwrap_or("(root)")
+                }
+                .to_owned();
                 dir_groups.entry(key).or_default().push(u);
             }
         }
