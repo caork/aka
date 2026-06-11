@@ -98,11 +98,7 @@ export default function ImportRepoModal({
     <Modal open={open} onClose={close} title="Add repository">
       {/* source kind switcher */}
       <div
-        className="mb-4 flex items-center gap-0.5 rounded-[10px] p-0.5"
-        style={{
-          background: "rgba(15,23,42,0.05)",
-          boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.06)",
-        }}
+        className="segmented mb-4 flex items-center gap-0.5 rounded-[10px] p-0.5"
         role="tablist"
         data-testid="import-kind-switcher"
       >
@@ -118,17 +114,13 @@ export default function ImportRepoModal({
                 setError(null);
               }}
               className="focus-ring relative flex-1 rounded-[8px] px-3 py-1.5 text-[12.5px] font-medium transition-colors duration-150 ease-out"
-              style={{ color: active ? "#0f172a" : "#475569" }}
+              style={{ color: active ? "var(--ink)" : "var(--ink-2)" }}
             >
               {active && (
                 <motion.span
                   layoutId="import-kind-thumb"
                   transition={{ type: "spring", stiffness: 400, damping: 32 }}
-                  className="absolute inset-0 rounded-[8px] bg-white"
-                  style={{
-                    boxShadow:
-                      "0 1px 2px rgba(16,24,40,.06), 0 2px 6px rgba(16,24,40,.06), inset 0 0 0 0.5px rgba(15,23,42,.04)",
-                  }}
+                  className="segmented-thumb absolute inset-0 rounded-[8px]"
                 />
               )}
               <span className="relative z-10">{k.label}</span>
@@ -192,11 +184,11 @@ export default function ImportRepoModal({
             className="focus-ring mb-3 flex w-full flex-col items-center justify-center gap-1.5 rounded-[12px] px-4 py-6 text-center transition-colors duration-150 ease-out"
             style={{
               background: dragOver
-                ? "rgba(46,124,246,0.07)"
-                : "rgba(255,255,255,0.5)",
+                ? "var(--accent-fill)"
+                : "var(--cmd-bg)",
               boxShadow: dragOver
                 ? "inset 0 0 0 1.5px rgba(46,124,246,0.45)"
-                : "inset 0 0 0 1px rgba(15,23,42,0.1)",
+                : "inset 0 0 0 1px var(--hairline-strong)",
             }}
             data-testid="import-zip-drop"
           >
@@ -248,7 +240,7 @@ export default function ImportRepoModal({
         <button
           onClick={close}
           disabled={busy}
-          className="focus-ring rounded-[10px] px-3.5 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)]"
+          className="themed-hover focus-ring rounded-[10px] px-3.5 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out"
         >
           取消
         </button>

@@ -358,7 +358,7 @@ function PanelBody({
         <button
           onClick={closeDetail}
           aria-label="关闭详情面板"
-          className="focus-ring -mr-1 flex h-6 w-6 flex-none items-center justify-center rounded-[7px] text-[15px] leading-none text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink"
+          className="themed-hover focus-ring -mr-1 flex h-6 w-6 flex-none items-center justify-center rounded-[7px] text-[15px] leading-none text-ink-3 transition-colors duration-150 ease-out hover:text-ink"
           data-testid="detail-close"
         >
           ×
@@ -529,7 +529,7 @@ function PanelBody({
       </div>
 
       {/* ---- 操作 ---- */}
-      <div className="grid grid-cols-2 gap-1.5 border-t border-[rgba(15,23,42,0.06)] px-4 py-3">
+      <div className="themed-divider grid grid-cols-2 gap-1.5 border-t px-4 py-3">
         <ActionLink
           href={
             absPath
@@ -595,7 +595,7 @@ function CountStat({
   return (
     <div
       className="tabular flex flex-col items-center rounded-[10px] px-2 py-1.5"
-      style={{ background: "rgba(15,23,42,0.04)" }}
+      style={{ background: "var(--subtle-fill-2)" }}
     >
       <span className="text-[14px] font-semibold text-ink">
         {value !== null ? formatCount(value) : pending ? "…" : "—"}
@@ -626,13 +626,16 @@ function RelationGroup({
         <button
           key={`${r.id}-${i}`}
           onClick={() => onPick(r)}
-          className="focus-ring mb-0.5 flex w-full items-center gap-2 rounded-[9px] px-2 py-1.5 text-left transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)]"
+          className="focus-ring mb-0.5 flex w-full items-center gap-2 rounded-[9px] px-2 py-1.5 text-left transition-colors duration-150 ease-out hover:bg-[var(--accent-fill)]"
           data-testid="relation-row"
         >
           <span
             className="h-[7px] w-[7px] flex-none rounded-full"
             style={{
-              background: r.depth <= 1 ? "#2E7CF6" : "rgba(46,124,246,0.35)",
+              background:
+                r.depth <= 1
+                  ? "var(--accent)"
+                  : "color-mix(in srgb, var(--accent) 42%, transparent)",
             }}
           />
           <span className="mono truncate text-[12px] text-ink">{r.name}</span>
@@ -671,14 +674,14 @@ function ProcessStepList({
         <button
           key={`${s.id}-${s.step}-${i}`}
           onClick={() => onPick(s)}
-          className="focus-ring mb-0.5 flex w-full items-center gap-2 rounded-[9px] px-2 py-1.5 text-left transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)]"
+          className="focus-ring mb-0.5 flex w-full items-center gap-2 rounded-[9px] px-2 py-1.5 text-left transition-colors duration-150 ease-out hover:bg-[var(--accent-fill)]"
           data-testid="process-step-row"
         >
           <span
             className="tabular flex h-[18px] min-w-[18px] flex-none items-center justify-center rounded-full px-1 text-[10px] font-semibold text-ink-3"
             style={{
-              background: "rgba(15,23,42,0.05)",
-              boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.08)",
+              background: "var(--subtle-fill)",
+              boxShadow: "inset 0 0 0 0.5px var(--hairline)",
             }}
             aria-hidden
           >
@@ -712,8 +715,8 @@ function ActionButton({
     <button
       onClick={onClick}
       disabled={disabled}
-      className="focus-ring rounded-[10px] px-3 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-ink-2"
-      style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.1)" }}
+      className="themed-hover focus-ring rounded-[10px] px-3 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-ink disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-ink-2"
+      style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }}
       data-testid={testId}
     >
       {children}
@@ -735,7 +738,7 @@ function ActionLink({
     return (
       <span
         className="cursor-not-allowed rounded-[10px] px-3 py-2 text-center text-[12.5px] font-medium text-ink-3 opacity-60"
-        style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.08)" }}
+        style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
         title="源码路径不可用（需 aka serve 在线）"
         data-testid={testId}
       >
@@ -746,8 +749,8 @@ function ActionLink({
   return (
     <a
       href={href}
-      className="focus-ring rounded-[10px] px-3 py-2 text-center text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink"
-      style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.1)" }}
+      className="themed-hover focus-ring rounded-[10px] px-3 py-2 text-center text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
+      style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }}
       data-testid={testId}
     >
       {children}
@@ -796,16 +799,12 @@ function SourcePreview({
      横向滚动时 sticky 钉在左缘，不透明背景盖住滚过的代码（GitHub 做法）。 */
   const digits = Math.max(3, String(start + lines.length - 1).length);
   const gutterWidth = `calc(${digits}ch + 22px)`;
-  /* sticky 行号背景需不透明（面板是毛玻璃）：取代码区底色在画布上的实色近似 */
-  const gutterBg = "rgb(246,247,249)";
-  const gutterBgFocused = "rgb(229,237,250)";
-
   return (
     <div
       className="overflow-hidden rounded-[10px]"
       style={{
-        background: "rgba(15,23,42,0.025)",
-        boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.07)",
+        background: "var(--code-bg)",
+        boxShadow: "inset 0 0 0 0.5px var(--hairline)",
       }}
       data-testid="source-preview"
     >
@@ -819,7 +818,7 @@ function SourcePreview({
               className="mono flex w-max min-w-full text-[11px] leading-[1.65]"
               style={
                 focused
-                  ? { background: "rgba(46,124,246,0.08)" }
+                  ? { background: "var(--code-line-focus)" }
                   : undefined
               }
             >
@@ -829,7 +828,9 @@ function SourcePreview({
                   width: gutterWidth,
                   paddingLeft: 10,
                   paddingRight: 12,
-                  background: focused ? gutterBgFocused : gutterBg,
+                  background: focused
+                    ? "var(--code-gutter-focus)"
+                    : "var(--code-gutter)",
                   boxShadow: focused
                     ? "inset 2px 0 0 rgba(46,124,246,0.55)"
                     : undefined,
@@ -846,7 +847,7 @@ function SourcePreview({
         })}
       </div>
       {(truncated || total_lines > 0) && (
-        <div className="border-t border-[rgba(15,23,42,0.05)] px-2.5 py-1 text-[10px] text-ink-3">
+        <div className="themed-divider border-t px-2.5 py-1 text-[10px] text-ink-3">
           {truncated ? "片段已截断 · " : ""}全文件 {total_lines} 行
         </div>
       )}
@@ -860,8 +861,8 @@ function SourceSkeleton() {
     <div
       className="space-y-2 rounded-[10px] px-3 py-3"
       style={{
-        background: "rgba(15,23,42,0.025)",
-        boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.07)",
+        background: "var(--code-bg)",
+        boxShadow: "inset 0 0 0 0.5px var(--hairline)",
       }}
       data-testid="source-skeleton"
     >
@@ -869,7 +870,7 @@ function SourceSkeleton() {
         <div
           key={i}
           className="h-[10px] animate-pulse rounded-[4px]"
-          style={{ width: w, background: "rgba(15,23,42,0.06)" }}
+          style={{ width: w, background: "var(--subtle-fill)" }}
         />
       ))}
     </div>
@@ -880,7 +881,7 @@ function SourceUnavailable({ note }: { note: string }) {
   return (
     <div
       className="rounded-[10px] px-3 py-2.5 text-[11.5px] text-ink-3"
-      style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.07)" }}
+      style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
       data-testid="source-unavailable"
     >
       {note}
@@ -907,9 +908,9 @@ type TokenClass = "comment" | "string" | "number" | "keyword" | "plain";
 const TOKEN_COLORS: Record<Exclude<TokenClass, "plain">, React.CSSProperties> =
   {
     comment: { color: "var(--ink-3)", fontStyle: "italic" },
-    string: { color: "#9d5b25" },
-    number: { color: "#7c4fc9" },
-    keyword: { color: "#2563c9" },
+    string: { color: "var(--syntax-string)" },
+    number: { color: "var(--syntax-number)" },
+    keyword: { color: "var(--syntax-keyword)" },
   };
 
 const TOKEN_RE =

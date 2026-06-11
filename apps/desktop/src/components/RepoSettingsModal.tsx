@@ -172,7 +172,7 @@ export default function RepoSettingsModal({
           <span className="truncate">{repo.name}</span>
           <span
             className="rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-2"
-            style={{ background: "rgba(15,23,42,0.05)" }}
+            style={{ background: "var(--subtle-fill)" }}
           >
             {repo.source.kind}
           </span>
@@ -183,7 +183,10 @@ export default function RepoSettingsModal({
       {notice && (
         <div
           className="mb-3 rounded-[10px] px-3 py-2 text-[12px]"
-          style={{ background: "rgba(52,199,89,0.1)", color: "#1f7a39" }}
+          style={{
+            background: "var(--success-fill)",
+            color: "var(--success-ink)",
+          }}
           data-testid="settings-notice"
         >
           {notice}
@@ -193,7 +196,7 @@ export default function RepoSettingsModal({
       {/* source info */}
       <div
         className="mono mb-4 truncate rounded-[10px] px-3 py-2 text-[11.5px] text-ink-3"
-        style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.08)" }}
+        style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
         title={sourceText}
         data-testid="settings-source"
       >
@@ -216,7 +219,7 @@ export default function RepoSettingsModal({
       </div>
 
       {/* render budget */}
-      <div className="mb-4 border-t border-[rgba(15,23,42,0.06)] pt-4">
+      <div className="themed-divider mb-4 border-t pt-4">
         <div className="text-[13px] font-medium text-ink">图渲染节点上限</div>
         <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
           默认 {RENDER_MAX_DEFAULT.toLocaleString()} · 架构上限{" "}
@@ -231,7 +234,7 @@ export default function RepoSettingsModal({
           onChange={(e) => setRenderDraft(Number(e.target.value))}
           disabled={busy === "render"}
           className="mt-3 w-full"
-          style={{ accentColor: "#2e7cf6" }}
+          style={{ accentColor: "var(--accent)" }}
           aria-label="图渲染节点上限"
           data-testid="render-max-slider"
         />
@@ -255,7 +258,7 @@ export default function RepoSettingsModal({
             <button
               onClick={() => void saveRenderMax(null)}
               disabled={busy !== ""}
-              className="focus-ring rounded-[8px] px-2 py-1 text-[11.5px] text-ink-3 transition-colors duration-150 ease-out hover:text-[#2e7cf6]"
+              className="focus-ring rounded-[8px] px-2 py-1 text-[11.5px] text-ink-3 transition-colors duration-150 ease-out hover:text-[var(--accent)]"
               data-testid="render-max-reset"
             >
               恢复默认
@@ -272,7 +275,7 @@ export default function RepoSettingsModal({
             style={
               renderDirty
                 ? undefined
-                : { boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.1)" }
+                : { boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }
             }
             data-testid="render-max-save"
           >
@@ -282,14 +285,14 @@ export default function RepoSettingsModal({
       </div>
 
       {/* actions */}
-      <div className="mb-4 border-t border-[rgba(15,23,42,0.06)] pt-4">
+      <div className="themed-divider mb-4 border-t pt-4">
         {repo.source.kind === "zip" ? (
           <>
             <button
               onClick={() => zipRef.current?.click()}
               disabled={busy !== ""}
-              className="focus-ring w-full rounded-[10px] px-3 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink"
-              style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.1)" }}
+              className="themed-hover focus-ring w-full rounded-[10px] px-3 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
+              style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }}
               data-testid="settings-update-zip"
             >
               {busy === "zip" ? "上传中…" : "上传新 zip 更新"}
@@ -309,8 +312,8 @@ export default function RepoSettingsModal({
           <button
             onClick={() => void runUpdate()}
             disabled={busy !== ""}
-            className="focus-ring w-full rounded-[10px] px-3 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink"
-            style={{ boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.1)" }}
+            className="themed-hover focus-ring w-full rounded-[10px] px-3 py-2 text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
+            style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }}
             data-testid="settings-update"
           >
             {busy === "update" ? "请求中…" : "检查更新并重建索引"}
@@ -319,7 +322,7 @@ export default function RepoSettingsModal({
       </div>
 
       {/* danger zone */}
-      <div className="border-t border-[rgba(15,23,42,0.06)] pt-4">
+      <div className="themed-divider border-t pt-4">
         <button
           onClick={() => void runDelete()}
           disabled={busy !== "" && busy !== "delete"}
@@ -327,13 +330,13 @@ export default function RepoSettingsModal({
           style={
             confirmDelete
               ? {
-                  background: "#ff3b30",
-                  color: "#fff",
+                  background: "var(--danger)",
+                  color: "white",
                   boxShadow:
                     "0 0 0 1px rgba(255,59,48,.3), 0 0 18px rgba(255,59,48,.18)",
                 }
               : {
-                  color: "#b3261e",
+                  color: "var(--danger-ink)",
                   boxShadow: "inset 0 0 0 0.5px rgba(255,59,48,0.35)",
                 }
           }
@@ -376,17 +379,20 @@ function GlassSwitch({
       onClick={onToggle}
       className="focus-ring relative mt-0.5 h-[24px] w-[40px] flex-none rounded-full transition-colors duration-150 ease-out"
       style={{
-        background: on ? "#2e7cf6" : "rgba(15,23,42,0.12)",
+        background: on ? "var(--accent)" : "var(--subtle-fill)",
         boxShadow: on
           ? "0 0 0 1px rgba(46,124,246,.28), 0 0 20px rgba(46,124,246,.18)"
-          : "inset 0 0 0 0.5px rgba(15,23,42,0.08)",
+          : "inset 0 0 0 0.5px var(--hairline)",
         opacity: disabled ? 0.6 : 1,
       }}
       data-testid="embeddings-switch"
     >
       <motion.span
-        className="absolute top-[2px] h-[20px] w-[20px] rounded-full bg-white"
-        style={{ boxShadow: "0 1px 3px rgba(16,24,40,.25)" }}
+        className="absolute top-[2px] h-[20px] w-[20px] rounded-full"
+        style={{
+          background: "color-mix(in srgb, white 92%, var(--canvas))",
+          boxShadow: "0 1px 3px rgba(16,24,40,.25)",
+        }}
         animate={{ left: on ? 18 : 2 }}
         transition={{ type: "spring", stiffness: 400, damping: 32 }}
       />

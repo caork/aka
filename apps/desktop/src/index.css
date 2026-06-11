@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 /* ---------------------------------------------------------------------------
-   aka design system — light · macOS liquid glass
+   aka design system · macOS liquid glass
    --------------------------------------------------------------------------- */
 
 :root {
@@ -10,12 +10,54 @@
   --ink-2: #475569;
   --ink-3: #94a3b8;
   --accent: #2e7cf6;
+  --accent-ink: #2563c9;
   --beacon: #f6a623;
+  --success: #34c759;
+  --success-ink: #1f7a39;
+  --danger: #ff3b30;
+  --danger-ink: #b3261e;
+  --warning-ink: #b25c0e;
 
   --glass-bg: rgba(255, 255, 255, 0.62);
   --glass-bg-strong: rgba(255, 255, 255, 0.68);
   --glass-border: rgba(255, 255, 255, 0.65);
   --glass-inner: rgba(15, 23, 42, 0.06);
+  --main-surface: rgba(255, 255, 255, 0.38);
+  --main-divider: rgba(15, 23, 42, 0.06);
+  --modal-overlay: rgba(15, 23, 42, 0.22);
+
+  --hairline: rgba(15, 23, 42, 0.07);
+  --hairline-strong: rgba(15, 23, 42, 0.1);
+  --subtle-fill: rgba(15, 23, 42, 0.05);
+  --subtle-fill-2: rgba(15, 23, 42, 0.035);
+  --hover-fill: rgba(15, 23, 42, 0.05);
+  --hover-fill-strong: rgba(15, 23, 42, 0.06);
+  --accent-fill: rgba(46, 124, 246, 0.09);
+  --accent-fill-strong: rgba(46, 124, 246, 0.16);
+  --warning-fill: rgba(246, 166, 35, 0.12);
+  --success-fill: rgba(52, 199, 89, 0.1);
+  --danger-fill: rgba(255, 59, 48, 0.09);
+  --danger-border: rgba(255, 59, 48, 0.22);
+
+  --cmd-bg: rgba(255, 255, 255, 0.55);
+  --cmd-border: rgba(15, 23, 42, 0.08);
+  --control-bg: rgba(15, 23, 42, 0.05);
+  --control-border: rgba(15, 23, 42, 0.06);
+  --segment-thumb: #ffffff;
+  --segment-thumb-shadow:
+    0 1px 2px rgba(16, 24, 40, 0.06),
+    0 2px 6px rgba(16, 24, 40, 0.06),
+    inset 0 0 0 0.5px rgba(15, 23, 42, 0.04);
+
+  --code-bg: #fbfcfe;
+  --code-gutter: #f4f6fa;
+  --code-gutter-focus: #e9f1fe;
+  --code-line-focus: rgba(46, 124, 246, 0.07);
+  --syntax-string: #9d5b25;
+  --syntax-number: #7c4fc9;
+  --syntax-keyword: #2563c9;
+  --graph-bg-rgb: 246 248 251;
+  --graph-edge-rgb: 70 90 120;
 
   --shadow-float:
     0 1px 2px rgba(16, 24, 40, 0.05),
@@ -33,6 +75,72 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+html[data-theme="dark"] {
+  --canvas: #10151d;
+  --ink: #eef4fb;
+  --ink-2: #b8c4d5;
+  --ink-3: #718095;
+  --accent: #5f9cff;
+  --accent-ink: #8bb7ff;
+  --beacon: #f2b84b;
+  --success: #42d778;
+  --success-ink: #82e4a5;
+  --danger: #ff5c52;
+  --danger-ink: #ff8c84;
+  --warning-ink: #f0c16a;
+
+  --glass-bg: rgba(24, 31, 43, 0.62);
+  --glass-bg-strong: rgba(26, 34, 47, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-inner: rgba(255, 255, 255, 0.07);
+  --main-surface: rgba(16, 21, 29, 0.42);
+  --main-divider: rgba(255, 255, 255, 0.07);
+  --modal-overlay: rgba(3, 7, 18, 0.48);
+
+  --hairline: rgba(255, 255, 255, 0.08);
+  --hairline-strong: rgba(255, 255, 255, 0.13);
+  --subtle-fill: rgba(255, 255, 255, 0.07);
+  --subtle-fill-2: rgba(255, 255, 255, 0.045);
+  --hover-fill: rgba(255, 255, 255, 0.07);
+  --hover-fill-strong: rgba(255, 255, 255, 0.1);
+  --accent-fill: rgba(95, 156, 255, 0.14);
+  --accent-fill-strong: rgba(95, 156, 255, 0.22);
+  --warning-fill: rgba(242, 184, 75, 0.16);
+  --success-fill: rgba(66, 215, 120, 0.13);
+  --danger-fill: rgba(255, 92, 82, 0.13);
+  --danger-border: rgba(255, 92, 82, 0.28);
+
+  --cmd-bg: rgba(25, 34, 48, 0.68);
+  --cmd-border: rgba(255, 255, 255, 0.1);
+  --control-bg: rgba(255, 255, 255, 0.075);
+  --control-border: rgba(255, 255, 255, 0.08);
+  --segment-thumb: rgba(238, 244, 251, 0.12);
+  --segment-thumb-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.26),
+    0 2px 8px rgba(0, 0, 0, 0.22),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.1);
+
+  --code-bg: #101722;
+  --code-gutter: #141c28;
+  --code-gutter-focus: #182b47;
+  --code-line-focus: rgba(95, 156, 255, 0.12);
+  --syntax-string: #d6a170;
+  --syntax-number: #c3a6ff;
+  --syntax-keyword: #8bb7ff;
+  --graph-bg-rgb: 16 21 29;
+  --graph-edge-rgb: 116 135 160;
+
+  --shadow-float:
+    0 1px 2px rgba(0, 0, 0, 0.22),
+    0 6px 16px rgba(0, 0, 0, 0.2);
+  --shadow-panel:
+    0 2px 8px rgba(0, 0, 0, 0.22),
+    0 18px 48px -14px rgba(0, 0, 0, 0.55);
+  --glow-accent:
+    0 0 0 1px rgba(95, 156, 255, 0.34),
+    0 0 22px rgba(95, 156, 255, 0.2);
 }
 
 html,
@@ -57,12 +165,12 @@ body {
   background:
     radial-gradient(
       620px 480px at 22% 8%,
-      rgba(46, 124, 246, 0.04),
+      color-mix(in srgb, var(--accent) 8%, transparent),
       transparent 70%
     ),
     radial-gradient(
       560px 460px at 86% 88%,
-      rgba(246, 166, 35, 0.03),
+      color-mix(in srgb, var(--beacon) 6%, transparent),
       transparent 70%
     );
   filter: blur(120px);
@@ -121,9 +229,18 @@ body {
   box-shadow: var(--glow-accent);
 }
 
+.app-logo {
+  transition: filter 150ms ease-out, opacity 150ms ease-out;
+}
+
+html[data-theme="dark"] .app-logo {
+  filter: invert(1) hue-rotate(180deg) saturate(0.65) brightness(1.25);
+  opacity: 0.86;
+}
+
 .btn-primary {
   background: var(--accent);
-  color: #fff;
+  color: white;
   border-radius: 10px;
   box-shadow: var(--glow-accent);
   transition: filter 150ms ease-out;
@@ -140,7 +257,7 @@ body {
   flex: none;
 }
 .beacon.ready {
-  background: #34c759;
+  background: var(--success);
   box-shadow: 0 0 0 2.5px rgba(52, 199, 89, 0.14);
 }
 .beacon.indexing {
@@ -149,10 +266,10 @@ body {
   animation: beacon-pulse 1.6s ease-in-out infinite;
 }
 .beacon.idle {
-  background: #c3ccd9;
+  background: var(--ink-3);
 }
 .beacon.failed {
-  background: #ff3b30;
+  background: var(--danger);
   box-shadow: 0 0 0 2.5px rgba(255, 59, 48, 0.14);
 }
 
@@ -170,13 +287,13 @@ body {
 .scroll-area {
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(15, 23, 42, 0.14) transparent;
+  scrollbar-color: var(--hairline-strong) transparent;
 }
 .scroll-area::-webkit-scrollbar {
   width: 8px;
 }
 .scroll-area::-webkit-scrollbar-thumb {
-  background: rgba(15, 23, 42, 0.14);
+  background: var(--hairline-strong);
   border-radius: 4px;
 }
 .scroll-area::-webkit-scrollbar-track {
@@ -185,16 +302,16 @@ body {
 
 /* search input */
 .cmd-input {
-  background: rgba(255, 255, 255, 0.55);
+  background: var(--cmd-bg);
   border-radius: 10px;
   box-shadow:
-    inset 0 0 0 0.5px rgba(15, 23, 42, 0.08),
+    inset 0 0 0 0.5px var(--cmd-border),
     0 1px 2px rgba(16, 24, 40, 0.04);
   transition: box-shadow 150ms ease-out;
 }
 .cmd-input:focus-within {
   box-shadow:
-    inset 0 0 0 0.5px rgba(15, 23, 42, 0.04),
+    inset 0 0 0 0.5px var(--cmd-border),
     var(--glow-accent);
 }
 .cmd-input input {
@@ -214,8 +331,30 @@ body {
   padding: 3px 5px;
   border-radius: 5px;
   color: var(--ink-3);
-  background: rgba(15, 23, 42, 0.05);
-  box-shadow: inset 0 0 0 0.5px rgba(15, 23, 42, 0.07);
+  background: var(--subtle-fill);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+}
+
+.segmented {
+  background: var(--control-bg);
+  box-shadow: inset 0 0 0 0.5px var(--control-border);
+}
+
+.segmented-thumb {
+  background: var(--segment-thumb);
+  box-shadow: var(--segment-thumb-shadow);
+}
+
+.themed-hover:hover {
+  background: var(--hover-fill);
+}
+
+.themed-border {
+  border-color: var(--hairline);
+}
+
+.themed-divider {
+  border-color: var(--main-divider);
 }
 
 /* label badge per node class */
@@ -228,32 +367,32 @@ body {
   border-radius: 6px;
 }
 .badge.Function {
-  color: #2563c9;
-  background: rgba(46, 124, 246, 0.1);
+  color: var(--accent-ink);
+  background: var(--accent-fill);
 }
 .badge.Class {
-  color: #7c4fc9;
-  background: rgba(139, 92, 246, 0.1);
+  color: color-mix(in srgb, #a78bdb 82%, var(--ink));
+  background: rgba(139, 92, 246, 0.13);
 }
 .badge.Method {
-  color: #0d8a8a;
+  color: color-mix(in srgb, #14b8a6 74%, var(--ink));
   background: rgba(20, 184, 166, 0.1);
 }
 .badge.Interface {
-  color: #b25c0e;
-  background: rgba(246, 166, 35, 0.12);
+  color: var(--warning-ink);
+  background: var(--warning-fill);
 }
 .badge.File {
-  color: #5b6b80;
+  color: var(--ink-2);
   background: rgba(100, 116, 139, 0.1);
 }
 .badge.Process {
-  color: #1f8a4c;
-  background: rgba(52, 199, 89, 0.12);
+  color: var(--success-ink);
+  background: var(--success-fill);
 }
 
 mark {
-  background: rgba(46, 124, 246, 0.16);
+  background: var(--accent-fill-strong);
   color: inherit;
   border-radius: 3px;
   padding: 0 1px;

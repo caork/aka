@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
+import { useEffect } from "react";
 import CodeWorkspace from "./components/CodeWorkspace";
 import DetailPanel from "./components/DetailPanel";
 import GraphView from "./components/GraphView";
@@ -10,6 +11,15 @@ import { useAppStore } from "./store";
 export default function App() {
   const view = useAppStore((s) => s.view);
   const setView = useAppStore((s) => s.setView);
+  const syncSystemTheme = useAppStore((s) => s.syncSystemTheme);
+
+  useEffect(() => {
+    syncSystemTheme();
+    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!media) return;
+    media.addEventListener("change", syncSystemTheme);
+    return () => media.removeEventListener("change", syncSystemTheme);
+  }, [syncSystemTheme]);
 
   return (
     <div className="flex h-full">
@@ -17,9 +27,10 @@ export default function App() {
       <main
         className="relative min-h-0 flex-1 overflow-hidden"
         style={{
-          background: "rgba(255,255,255,0.38)",
+          background: "var(--main-surface)",
           backdropFilter: "blur(24px) saturate(180%)",
           WebkitBackdropFilter: "blur(24px) saturate(180%)",
+          boxShadow: "inset 1px 0 0 var(--main-divider)",
         }}
       >
         {/* Logo + Search bubble — top-left, laid out in a row so search expands rightward */}

@@ -1,4 +1,12 @@
 import { create } from "zustand";
+import {
+  applyTheme,
+  persistThemeMode,
+  readThemeMode,
+  resolveThemeMode,
+  type ResolvedTheme,
+  type ThemeMode,
+} from "./theme";
 
 export type ViewId = "code" | "graph";
 
@@ -63,6 +71,11 @@ export interface FocusRequest {
 }
 
 interface AppState {
+  themeMode: ThemeMode;
+  resolvedTheme: ResolvedTheme;
+  setThemeMode(themeMode: ThemeMode): void;
+  syncSystemTheme(): void;
+
   view: ViewId;
   setView(view: ViewId): void;
 
@@ -101,6 +114,8 @@ interface AppState {
 
 const SERVER = "http://127.0.0.1:4111";
 const SELECTED_KEY = "aka.selectedRepo";
+const INITIAL_THEME_MODE = readThemeMode();
+const INITIAL_RESOLVED_THEME = resolveThemeMode(INITIAL_THEME_MODE);
 
 interface RepoOut {
   name: string;
@@ -253,6 +268,21 @@ const MOCK_REPOS: Repo[] = [
 
 
 export const useAppStore = create<AppState>((set) => ({
+  themeMode: INITIAL_THEME_MODE,
+  resolvedTheme: INITIAL_RESOLVED_THEME,
+  setThemeMode: (themeMode) => {
+    persistThemeMode(themeMode);
+    const resolvedTheme = resolveThemeMode(themeMode);
+    applyTheme(themeMode, resolvedTheme);
+    set({ themeMode, resolvedTheme });
+  },
+  syncSystemTheme: () => {
+    const themeMode = useAppStore.getState().themeMode;
+    const resolvedTheme = resolveThemeMode(themeMode);
+    applyTheme(themeMode, resolvedTheme);
+    set({ resolvedTheme });
+  },
+
   view: "code",
   setView: (view) => set({ view }),
 

@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useRef, useState } from "react";
 import { useAppStore } from "../store";
+import AppSettingsModal from "./AppSettingsModal";
 import ImportRepoModal from "./ImportRepoModal";
 import RepoSettingsModal from "./RepoSettingsModal";
 
@@ -12,6 +13,7 @@ export default function RepoDropdown() {
   const selectRepo = useAppStore((s) => s.selectRepo);
   const [open, setOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const [settingsRepoId, setSettingsRepoId] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -31,22 +33,37 @@ export default function RepoDropdown() {
     <div className="relative" onMouseEnter={enter} onMouseLeave={leave}>
       {/* Logo button */}
       <motion.div
-        className="flex h-9 w-9 cursor-default items-center justify-center rounded-[10px]"
+        role="button"
+        tabIndex={0}
+        aria-label="Open settings"
+        data-testid="app-settings"
+        onClick={() => {
+          setAppSettingsOpen(true);
+          setOpen(false);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setAppSettingsOpen(true);
+            setOpen(false);
+          }
+        }}
+        className="focus-ring flex h-9 w-9 cursor-pointer items-center justify-center rounded-[10px]"
         animate={{
-          background: open ? "rgba(46,124,246,0.1)" : "rgba(255,255,255,0.55)",
+          background: open ? "var(--accent-fill)" : "var(--glass-bg)",
         }}
         transition={{ duration: 0.15 }}
         style={{
           backdropFilter: "blur(8px)",
           WebkitBackdropFilter: "blur(8px)",
           boxShadow:
-            "inset 0 0 0 0.5px rgba(15,23,42,0.07), 0 1px 3px rgba(16,24,40,.06)",
+            "inset 0 0 0 0.5px var(--glass-inner), var(--shadow-float)",
         }}
       >
         <motion.img
           src="/logo.png"
           alt="aka"
-          className="h-[18px] w-[18px]"
+          className="app-logo h-[18px] w-[18px]"
           draggable={false}
           animate={{ scale: open ? 1.08 : 1 }}
           transition={spring}
@@ -63,11 +80,11 @@ export default function RepoDropdown() {
             transition={spring}
             className="absolute left-0 top-[calc(100%+6px)] z-50 w-[220px] overflow-hidden rounded-[14px]"
             style={{
-              background: "rgba(255,255,255,0.84)",
+              background: "var(--glass-bg-strong)",
               backdropFilter: "blur(28px) saturate(190%)",
               WebkitBackdropFilter: "blur(28px) saturate(190%)",
               boxShadow:
-                "0 8px 32px rgba(16,24,40,.12), inset 0 1px 0 rgba(255,255,255,0.8), inset 0 0 0 0.5px rgba(15,23,42,0.07)",
+                "inset 0 0 0 0.5px var(--glass-inner), 0 0 0 1px var(--glass-border), var(--shadow-panel)",
             }}
             onMouseEnter={enter}
             onMouseLeave={leave}
@@ -94,9 +111,9 @@ export default function RepoDropdown() {
                         setOpen(false);
                       }
                     }}
-                    className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-[10px] px-3 py-2 text-left transition-colors duration-100 hover:bg-[rgba(15,23,42,0.04)]"
+                    className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-[10px] px-3 py-2 text-left transition-colors duration-100 hover:bg-[var(--hover-fill)]"
                     style={{
-                      background: active ? "rgba(46,124,246,0.09)" : undefined,
+                      background: active ? "var(--accent-fill)" : undefined,
                     }}
                     data-testid={`repo-dropdown-${repo.id}`}
                   >
@@ -104,7 +121,7 @@ export default function RepoDropdown() {
                     <span className="min-w-0 flex-1">
                       <span
                         className={`block truncate text-[13px] font-medium ${
-                          active ? "text-[#2e7cf6]" : "text-ink"
+                          active ? "text-[var(--accent)]" : "text-ink"
                         }`}
                       >
                         {repo.name}
@@ -130,8 +147,8 @@ export default function RepoDropdown() {
                         setSettingsRepoId(repo.id);
                         setOpen(false);
                       }}
-                      className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[7px] text-ink-3 opacity-0 transition-all duration-150 hover:bg-[rgba(15,23,42,0.06)] hover:text-ink group-hover:opacity-100"
-                      style={{ background: "rgba(255,255,255,0.7)" }}
+                      className="focus-ring absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[7px] text-ink-3 opacity-0 transition-all duration-150 hover:bg-[var(--hover-fill-strong)] hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+                      style={{ background: "var(--glass-bg-strong)" }}
                     >
                       <GearIcon size={13} />
                     </button>
@@ -139,13 +156,13 @@ export default function RepoDropdown() {
                 );
               })}
             </nav>
-            <div className="border-t border-[rgba(15,23,42,0.06)] p-1.5">
+            <div className="border-t border-[var(--hairline)] p-1.5">
               <button
                 onClick={() => {
                   setImportOpen(true);
                   setOpen(false);
                 }}
-                className="flex w-full items-center gap-2 rounded-[10px] px-3 py-2 text-[13px] font-medium text-ink-2 transition-colors duration-100 hover:bg-[rgba(15,23,42,0.05)] hover:text-[#2e7cf6]"
+                className="focus-ring flex w-full items-center gap-2 rounded-[10px] px-3 py-2 text-[13px] font-medium text-ink-2 transition-colors duration-100 hover:bg-[var(--hover-fill)] hover:text-[var(--accent)]"
                 data-testid="repo-dropdown-add"
               >
                 <PlusIcon />
@@ -157,6 +174,10 @@ export default function RepoDropdown() {
       </AnimatePresence>
 
       <ImportRepoModal open={importOpen} onClose={() => setImportOpen(false)} />
+      <AppSettingsModal
+        open={appSettingsOpen}
+        onClose={() => setAppSettingsOpen(false)}
+      />
       <RepoSettingsModal repo={settingsRepo} onClose={() => setSettingsRepoId(null)} />
     </div>
   );

@@ -56,7 +56,7 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
                 ? openCode({ repo: repoId, path: r.file, line: r.line })
                 : openDetail({ id: r.id, name: r.name, label: r.label, file: r.file, line: r.line })
             }
-            className="focus-ring group mb-0.5 flex w-full flex-col gap-0.5 rounded-[8px] px-2 py-2 text-left transition-colors hover:bg-[rgba(15,23,42,0.05)]"
+            className="themed-hover focus-ring group mb-0.5 flex w-full flex-col gap-0.5 rounded-[8px] px-2 py-2 text-left transition-colors"
             data-testid="search-result"
           >
             <div className="flex min-w-0 items-center gap-1.5">
@@ -112,7 +112,7 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
               /* 合成节点无源码文件,源码 modal 只会 404 */
               if (r.file) openCode({ repo: repoId, path: r.file, line: r.line });
             }}
-            className="focus-ring glass group mb-2.5 block w-full px-4 py-3 text-left transition-shadow duration-150 ease-out hover:shadow-[inset_0_0_0_0.5px_rgba(15,23,42,0.06),0_0_0_1px_rgba(255,255,255,0.65),0_2px_6px_rgba(16,24,40,.05),0_16px_40px_-12px_rgba(16,24,40,.14)]"
+            className="focus-ring glass group mb-2.5 block w-full px-4 py-3 text-left transition-shadow duration-150 ease-out hover:shadow-[var(--shadow-panel)]"
             data-testid="search-result"
           >
             <div className="flex items-center gap-2.5">
@@ -124,7 +124,10 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
                 {r.file ? `${r.file}:${r.line}` : "执行流"}
               </span>
             </div>
-            <div className="mono mt-2 truncate rounded-[8px] bg-[rgba(15,23,42,0.035)] px-3 py-1.5 text-[11.5px] leading-relaxed text-ink-2">
+            <div
+              className="mono mt-2 truncate rounded-[8px] px-3 py-1.5 text-[11.5px] leading-relaxed text-ink-2"
+              style={{ background: "var(--subtle-fill-2)" }}
+            >
               <Highlight text={r.snippet} query={query} />
             </div>
           </motion.button>
