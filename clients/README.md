@@ -21,13 +21,13 @@ clients/install.sh --client opencode             # 需要 jq
 |---|---|---|---|
 | **Claude Code** | 插件（`.claude-plugin/plugin.json` + `.mcp.json`）或 `claude mcp add` | 插件可捆绑 MCP server + skills；marketplace 经仓库根 `.claude-plugin/marketplace.json` 分发 | `claude mcp list` / `claude plugin list` |
 | **Codex CLI** | `~/.codex/config.toml` | `[mcp_servers.aka]` 表，`command` + `args` 字段 | `codex mcp list`，TUI 里 `/mcp` |
-| **OpenCode** | `~/.config/opencode/opencode.json` 或项目根 `opencode.json` | `mcp.aka` 对象，`type: "local"`，**`command` 是数组** | TUI 会话里触发 `aka_list_repos` |
+| **OpenCode** | `~/.config/opencode/opencode.json` 或项目根 `opencode.json`；插件在 `~/.config/opencode/plugins/` 或 `.opencode/plugins/` | `mcp.aka` 对象，`type: "local"`，**`command` 是数组**；本地 plugin 是 JS/TS module | TUI 会话里触发 `aka_list_repos` |
 
 各目录详情：
 
 - [claude-code/](./claude-code/) — 完整插件（MCP server + `aka-code-graph` skill），可 `claude plugin marketplace add` 本仓库后 `claude plugin install aka@aka`
 - [codex/](./codex/) — TOML 片段 + `codex mcp add` 用法
-- [opencode/](./opencode/) — JSON 片段 + 使用策略（原生 skill 推荐，AGENTS-aka.md 备选），发布包 `aka-opencode-<ver>.zip` 即此目录
+- [opencode/](./opencode/) — JSON 片段 + OpenCode 本地 plugin + 使用策略（原生 skill 推荐，AGENTS-aka.md 备选），发布包 `aka-opencode-plugin-<ver>.zip` 即此目录
 
 ## 通用前置
 

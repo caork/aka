@@ -48,6 +48,12 @@ cargo build -p aka-cli
 cd apps/desktop && npm run dev        # 桌面 UI（自动连 serve，离线回退 demo）
 ```
 
+发行版使用：
+
+- 想要图形界面：下载 `aka-desktop-<ver>-<platform>`，macOS 解压后双击 `aka.app`，Windows 运行 `aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe`。
+- 想要真实仓库数据：先启动后端 `aka serve`（默认 `http://127.0.0.1:4111`），GUI 会自动连接；没有后端时 GUI 只显示 demo/mock 数据。
+- 想要命令行、MCP 或 HTTP server：下载 `aka-<ver>-<platform>`，这是 CLI/server 包，不是 GUI。
+
 实测截图见 [docs/assets/](docs/assets/)。
 
 ## Docker 部署
@@ -71,6 +77,24 @@ clients/install.sh --client opencode      # OpenCode（opencode.json）
 ```
 
 Claude Code 也可直接装插件（捆绑 MCP server + 使用策略 skill）：`claude plugin marketplace add <本仓库>` → `claude plugin install aka@aka`。设计文档（能力矩阵、远程模式演进）见 [docs/clients.md](docs/clients.md)。
+
+## Release 产物
+
+推送 `v*` tag 会生成：
+
+- `aka-<ver>-x86_64-unknown-linux-gnu.tar.gz` — Linux CLI/server 二进制（`aka serve`）
+- `aka-<ver>-aarch64-apple-darwin.tar.gz` — macOS CLI/server 二进制（`aka serve`）
+- `aka-<ver>-x86_64-pc-windows-msvc.zip` — Windows CLI/server 二进制（`aka.exe serve`）
+- `aka-desktop-<ver>-aarch64-apple-darwin.app.zip` — macOS GUI（zip 内是 `aka.app`）
+- `aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe` — Windows GUI 安装包
+- `aka-desktop-<ver>-x86_64-pc-windows-msvc-portable.zip` — Windows GUI 免安装包
+- `aka-claude-code-plugin-<ver>.zip` — Claude Code 插件包
+- `aka-opencode-plugin-<ver>.zip` — OpenCode 本地 plugin + MCP/skill 配置包
+- `aka-clients-<ver>.tar.gz` — 全量客户端接入文件
+- `aka-<ver>-linux-amd64.docker.tar.gz` — Docker 镜像离线包
+- `SHA256SUMS`
+
+注意：`aka-<ver>-...` 裸二进制是 CLI/server，不会打开桌面窗口；桌面窗口请用 `aka-desktop-<ver>-...`。裸二进制可直接启动 `serve`/`mcp`/查询既有索引；`analyze` 仍需要可用的 `engine/` 与 Node/`npx` 环境，开箱完整分析建议用 Docker 镜像或源码目录。
 
 ## 相关仓库
 

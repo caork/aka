@@ -38,13 +38,13 @@ aka mcp ──读──▶ ~/.aka/                   aka serve :4111 (Docker @ J
 |---|---|---|---|
 | 本地 stdio MCP | ✅ `claude mcp add` / 插件 `.mcp.json` | ✅ `[mcp_servers.x]` command/args | ✅ `mcp.x` type:"local"，command 为数组 |
 | 远程 HTTP MCP | ✅ `--transport http` | ✅ `url` + `bearer_token_env_var` | ✅ type:"remote" + OAuth |
-| 插件/捆绑分发 | ✅ 插件体系（marketplace + plugin.json，可捆绑 MCP+skills+hooks+agents） | ❌ 无插件体系，只有 config.toml | ❌ 无插件体系，只有 opencode.json（可入 git 随项目分发） |
-| 用法指导（何时用哪个工具） | ✅ skill（`skills/aka-code-graph/`） | ⚠️ 仅靠工具 description / AGENTS.md | ⚠️ 仅靠工具 description / 项目规则文件 |
+| 插件/捆绑分发 | ✅ 插件体系（marketplace + plugin.json，可捆绑 MCP+skills+hooks+agents） | ❌ 无插件体系，只有 config.toml | ✅ 本地/ npm plugin（JS/TS）；MCP 仍写 opencode.json |
+| 用法指导（何时用哪个工具） | ✅ skill（`skills/aka-code-graph/`） | ⚠️ 仅靠工具 description / AGENTS.md | ✅ 原生 skill；AGENTS/instructions 备选 |
 | 配置 CLI | `claude mcp add`、`claude plugin install` | `codex mcp add` | 无（手编 JSON / install.sh 用 jq 合并） |
 | 工具级开关 | 权限系统 | `enabled_tools` / `disabled_tools` / 审批模式 | `enabled: false` 整 server 粒度 |
 | 配置作用域 | user / project / local | `~/.codex/` + 受信任项目 `.codex/` | 全局 + 项目根（向上找 git 根） |
 
-落差的补偿：Codex/OpenCode 没有 skill 机制，aka 的工具 description 已写成自带使用策略（"Call this first"、"Prefer this over separate lookups"、"Use 'impact' for the transitive blast radius"），让无 skill 客户端也能选对工具；需要更强引导时，用户可把 `clients/claude-code/skills/aka-code-graph/SKILL.md` 的正文贴进 AGENTS.md / 项目规则。
+落差的补偿：Codex 没有 skill/plugin 机制，aka 的工具 description 已写成自带使用策略（"Call this first"、"Prefer this over separate lookups"、"Use 'impact' for the transitive blast radius"），让无 skill 客户端也能选对工具；需要更强引导时，用户可把 `clients/claude-code/skills/aka-code-graph/SKILL.md` 的正文贴进 AGENTS.md / 项目规则。
 
 ## 4. 各客户端格式要点（含来源）
 
@@ -64,17 +64,19 @@ aka mcp ──读──▶ ~/.aka/                   aka serve :4111 (Docker @ J
 ### OpenCode（[clients/opencode/](../clients/opencode/)）
 
 - `opencode.json`（全局 `~/.config/opencode/` 或项目根）`mcp` 键；本地 `type:"local"` 且 **`command` 是数组**，`environment` 传 env，`enabled` 开关；远程 `type:"remote"` + `url`。
-- 来源：[opencode.ai/docs/mcp-servers](https://opencode.ai/docs/mcp-servers/)、[opencode.ai/docs/config](https://opencode.ai/docs/config/)。
+- 本地 plugin 放 `~/.config/opencode/plugins/` 或 `.opencode/plugins/`，是导出 plugin 函数的 JS/TS module。aka 的 `plugins/aka.js` 只做集成加载自检；真正工具面仍由 `mcp.aka` 启动 `aka mcp`。
+- 使用策略优先走 `skills/aka-code-graph/SKILL.md`；旧版/常驻场景用 `AGENTS-aka.md` 或 `instructions` 数组。
+- 来源：[opencode.ai/docs/mcp-servers](https://opencode.ai/docs/mcp-servers/)、[opencode.ai/docs/config](https://opencode.ai/docs/config/)、[opencode.ai/docs/plugins](https://opencode.ai/docs/plugins/)、[opencode.ai/docs/skills](https://opencode.ai/docs/skills/)。
 
 ## 5. 版本兼容策略
 
 - **MCP 工具面即合同**：八工具的名称、参数、输出字段视同 `docs/contracts/artifacts.md` 的同级合同——**只增不改不删**。新能力 = 新工具或新可选参数；废弃工具先在 description 标注 deprecated 一个版本周期再移除。三个客户端都直接消费工具 schema，没有中间适配层可以吸收破坏性变更。
 - **插件版本**：`plugin.json` 的 `version` 跟随 aka 二进制的 minor 版本手动 bump（不 bump 用户就不会收到更新）；插件只含配置和 markdown，与二进制弱耦合，唯一硬依赖是「二进制支持 `aka mcp` 子命令」（M2 起恒真）。
 - **客户端版本下限**：Claude Code 用到的特性（plugin.json + .mcp.json + skills + marketplace）为 2025 年底已稳定的核心集，刻意不用新版才有的字段（`displayName` 需 ≥2.1.143、`defaultEnabled` 需 ≥2.1.154、`userConfig` 等），保证老版本可装。Codex/OpenCode 片段同样只用各自文档标注的稳定字段。
-- **格式漂移的防线**：三家配置格式仍在演进，`clients/` 各 README 标注「2026-06 核实」与来源 URL；install.sh 优先走官方 CLI（`claude mcp add`、`codex mcp add`），格式变更由官方 CLI 吸收，手写文件仅作 fallback（OpenCode 无 CLI，用 jq 合并而非整文件覆盖）。
+- **格式漂移的防线**：三家配置格式仍在演进，`clients/` 各 README 标注「2026-06 核实」与来源 URL；install.sh 优先走官方 CLI（`claude mcp add`、`codex mcp add`），格式变更由官方 CLI 吸收，手写文件仅作 fallback（OpenCode MCP 配置用 jq 合并而非整文件覆盖，本地 plugin 用发现目录安装）。
 
 ## 6. 已知限制 / 待办
 
 - 插件方式要求 aka 在 PATH（插件清单无法在安装时探测路径）；install.sh 已给出 symlink/改 `.mcp.json` 两条出路。`userConfig`（enable 时弹窗让用户填二进制路径，`${user_config.aka_bin}` 替换进 command）是更优解，等用户群 Claude Code 版本普遍支持后再启用。
-- Codex/OpenCode 的「装好验证」依赖 TUI 交互，没有 `claude mcp list` 这样的一行命令式探针（codex 有 `codex mcp list`，OpenCode 暂无）。
+- OpenCode 的「装好验证」主要依赖 TUI 交互，没有 `claude mcp list` 这样的一行命令式探针；plugin 会写一条加载日志，但 MCP 是否可用仍以会话里触发 `aka_list_repos` 为准。
 - 远程模式（M4）落地时：aka-server 挂 rmcp Streamable HTTP、加 token 认证、Docker 镜像；届时在 clients/ 各 README 补远程配置片段。

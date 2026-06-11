@@ -2,9 +2,9 @@ import { AnimatePresence, motion } from "framer-motion";
 import CodeWorkspace from "./components/CodeWorkspace";
 import DetailPanel from "./components/DetailPanel";
 import GraphView from "./components/GraphView";
+import RepoDropdown from "./components/RepoDropdown";
 import SearchBubble from "./components/SearchBubble";
 import SegmentedControl from "./components/SegmentedControl";
-import Sidebar from "./components/Sidebar";
 import { useAppStore } from "./store";
 
 export default function App() {
@@ -14,18 +14,17 @@ export default function App() {
   return (
     <div className="flex h-full">
       <div className="app-backdrop" />
-      <Sidebar />
       <main
         className="relative min-h-0 flex-1 overflow-hidden"
         style={{
           background: "rgba(255,255,255,0.38)",
           backdropFilter: "blur(24px) saturate(180%)",
           WebkitBackdropFilter: "blur(24px) saturate(180%)",
-          boxShadow: "inset 1px 0 0 rgba(15,23,42,0.06)",
         }}
       >
-        {/* Search bubble — top-left corner */}
-        <div className="absolute left-3 top-3 z-20">
+        {/* Logo + Search bubble — top-left, laid out in a row so search expands rightward */}
+        <div className="absolute left-3 top-3 z-20 flex items-center gap-2">
+          <RepoDropdown />
           <SearchBubble />
         </div>
 

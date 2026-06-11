@@ -1,9 +1,10 @@
 # aka × OpenCode
 
-接入分两步：**① MCP 配置**（让 OpenCode 能调 aka 的八个工具）+ **② 使用策略**（让 agent 知道什么时候用哪个工具）。本目录就是发布包 `aka-opencode-<ver>.zip` 的内容，解压即用。
+接入分两步：**① MCP 配置**（让 OpenCode 能调 aka 的八个工具）+ **② 插件/使用策略**（让 agent 知道什么时候用哪个工具，并给 OpenCode 一个原生 plugin 入口）。本目录就是发布包 `aka-opencode-plugin-<ver>.zip` 的内容，解压即用。
 
 ```
 opencode.json.snippet              ① MCP 配置片段
+plugins/aka.js                     ② OpenCode 原生本地 plugin（加载自检/日志）
 skills/aka-code-graph/SKILL.md     ② 使用策略（推荐载体：原生 skill，按需加载）
 AGENTS-aka.md                      ② 备选载体：常驻指令（instructions 数组 / AGENTS.md）
 ```
@@ -37,7 +38,23 @@ OpenCode 的 MCP 配置写在 `opencode.json` 的 `mcp` 键下：全局 `~/.conf
 
 也可直接跑仓库脚本：`clients/install.sh --client opencode`（自动探测二进制路径、幂等合并，需要 `jq`；会顺带安装下面的 skill）。
 
-## ② 使用策略
+## ② 插件与使用策略
+
+### OpenCode 原生 plugin
+
+把 `plugins/aka.js` 拷到任一 OpenCode plugin 发现路径：
+
+```bash
+# 全局（所有项目可用）
+mkdir -p ~/.config/opencode/plugins
+cp plugins/aka.js ~/.config/opencode/plugins/
+
+# 或项目级（仅该仓库）
+mkdir -p <project>/.opencode/plugins
+cp plugins/aka.js <project>/.opencode/plugins/
+```
+
+这个 plugin 不替代 MCP 配置；它只是 OpenCode 原生插件入口，用于确认 aka 集成包已加载。真正的工具调用仍由上面的 `mcp.aka` 配置启动 `aka mcp`。
 
 只配 MCP 时 agent 看得到工具但不懂用法（决策表/输出解读/反模式）。三种载体选一种，**别同时启用 skill 和 AGENTS 版**（内容相同，重复浪费上下文）：
 
@@ -85,5 +102,6 @@ opencode                 # 启动 TUI
 格式参考（2026-06 核实）：
 - https://opencode.ai/docs/mcp-servers/
 - https://opencode.ai/docs/config/
+- https://opencode.ai/docs/plugins/ — 本地插件放 `.opencode/plugins/` 或 `~/.config/opencode/plugins/`
 - https://opencode.ai/docs/skills/ — 原生 Agent Skills，frontmatter 必需 `name`（小写字母数字+连字符，须与目录名一致）+ `description`（1–1024 字符）
 - https://opencode.ai/docs/rules/ — AGENTS.md 与 `instructions` 数组

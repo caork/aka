@@ -539,28 +539,7 @@ export default function GraphView() {
         className="pointer-events-none absolute inset-0 h-full w-full"
       />
 
-      {/* repo chip — top left */}
-      <motion.div
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ ...spring, delay: 0.05 }}
-        className="glass absolute left-4 top-4 z-10 flex items-center gap-2 px-3.5 py-2"
-        data-graph-ui
-        data-testid="graph-repo-chip"
-      >
-        <span className="text-[12.5px] font-semibold text-ink">{repoId}</span>
-        <span
-          className="rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-          style={{
-            color: live ? "#2563c9" : "#b25c0e",
-            background: live
-              ? "rgba(46,124,246,0.1)"
-              : "rgba(246,166,35,0.12)",
-          }}
-        >
-          {live ? "live" : "demo"}
-        </span>
-      </motion.div>
+
 
       {/* ego breadcrumb — top center */}
       <AnimatePresence>
@@ -749,6 +728,16 @@ export default function GraphView() {
           data-testid="lod-level"
         >
           {LOD_NAMES[stats.lod]}
+        </span>
+        <span
+          className="rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+          style={{
+            color: live ? "#2563c9" : "#b25c0e",
+            background: live ? "rgba(46,124,246,0.1)" : "rgba(246,166,35,0.12)",
+          }}
+          data-testid="graph-live-badge"
+        >
+          {live ? "live" : "demo"}
         </span>
       </motion.div>
     </div>
