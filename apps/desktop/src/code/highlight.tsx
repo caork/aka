@@ -20,9 +20,9 @@ type TokenClass = "comment" | "string" | "number" | "keyword" | "plain";
 
 const TOKEN_COLORS: Record<Exclude<TokenClass, "plain">, CSSProperties> = {
   comment: { color: "var(--ink-3)", fontStyle: "italic" },
-  string: { color: "#9d5b25" },
-  number: { color: "#7c4fc9" },
-  keyword: { color: "#2563c9" },
+  string: { color: "var(--syntax-string)" },
+  number: { color: "var(--syntax-number)" },
+  keyword: { color: "var(--syntax-keyword)" },
 };
 
 const TOKEN_RE =

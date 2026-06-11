@@ -14,12 +14,30 @@ import type { Camera } from "./camera";
 import type { GraphData } from "./format";
 import type { SpatialGrid } from "./grid";
 import type { LodParams } from "./renderer";
+import type { ResolvedTheme } from "../theme";
 
 const MAX_NODE_LABELS = 200;
 const FONT =
   '-apple-system, "SF Pro Text", Inter, sans-serif';
 const FADE_IN_SPEED  = 1 / 120; // alpha/ms → 120 ms full fade-in
 const FADE_OUT_SPEED = 1 / 200; // alpha/ms → 200 ms full fade-out
+
+const LABEL_THEME = {
+  light: {
+    cluster: [71, 85, 105] as const,
+    clusterShadow: [246, 248, 251] as const,
+    pill: [255, 255, 255] as const,
+    pillStroke: [15, 23, 42] as const,
+    text: [15, 23, 42] as const,
+  },
+  dark: {
+    cluster: [184, 196, 213] as const,
+    clusterShadow: [16, 21, 29] as const,
+    pill: [24, 31, 43] as const,
+    pillStroke: [255, 255, 255] as const,
+    text: [238, 244, 251] as const,
+  },
+};
 
 interface Candidate {
   i: number;
@@ -59,6 +77,7 @@ export class LabelOverlay {
     data: GraphData,
     grid: SpatialGrid,
     dpr: number,
+    theme: ResolvedTheme = "light",
   ) {
     const now = performance.now();
     const dt  = this.prevTime === 0 ? 16 : Math.min(now - this.prevTime, 50);
@@ -71,14 +90,14 @@ export class LabelOverlay {
     const clusterZoomAlpha =
       smoothstep(3, 4.5, lod.z) * (1 - smoothstep(14, 20, lod.z));
     if (clusterZoomAlpha > 0.01) {
-      this.drawClusterLabels(camera, data, clusterZoomAlpha, dt);
+      this.drawClusterLabels(camera, data, clusterZoomAlpha, dt, theme);
     } else {
       this.clusterFade.clear();
     }
 
     const nodeZoomAlpha = smoothstep(12, 16, lod.z);
     if (nodeZoomAlpha > 0.01) {
-      this.drawNodeLabels(camera, lod, data, grid, nodeZoomAlpha, dt);
+      this.drawNodeLabels(camera, lod, data, grid, nodeZoomAlpha, dt, theme);
     } else {
       this.nodeFade.clear();
       this.prevNodeSel.clear();
@@ -90,8 +109,10 @@ export class LabelOverlay {
     data: GraphData,
     zoomAlpha: number,
     dt: number,
+    theme: ResolvedTheme,
   ) {
     const ctx = this.ctx;
+    const colors = LABEL_THEME[theme];
     const pad = 60;
 
     /* Which clusters are visible and in the top-24 by weight */
@@ -135,8 +156,8 @@ export class LabelOverlay {
       const m  = data.clusterMeta[idx];
       const sx = camera.worldToScreenX(m.x);
       const sy = camera.worldToScreenY(m.y);
-      ctx.fillStyle   = `rgba(71, 85, 105, ${0.78 * a})`;
-      ctx.shadowColor = `rgba(246, 248, 251, ${0.9  * a})`;
+      ctx.fillStyle   = rgba(colors.cluster, 0.78 * a);
+      ctx.shadowColor = rgba(colors.clusterShadow, 0.9 * a);
       ctx.shadowBlur  = 6;
       ctx.fillText(m.name, sx, sy);
     }
@@ -150,8 +171,10 @@ export class LabelOverlay {
     grid: SpatialGrid,
     zoomAlpha: number,
     dt: number,
+    theme: ResolvedTheme,
   ) {
     const ctx  = this.ctx;
+    const colors = LABEL_THEME[theme];
     const minX = camera.screenToWorldX(-20);
     const maxX = camera.screenToWorldX(camera.width  + 20);
     const minY = camera.screenToWorldY(-20);
@@ -262,16 +285,20 @@ export class LabelOverlay {
 
       /* glass pill */
       const pw = tw + 12;
-      ctx.fillStyle   = `rgba(255, 255, 255, ${0.72 * a})`;
-      ctx.strokeStyle = `rgba(15, 23, 42,   ${0.05 * a})`;
+      ctx.fillStyle   = rgba(colors.pill, (theme === "dark" ? 0.78 : 0.72) * a);
+      ctx.strokeStyle = rgba(colors.pillStroke, (theme === "dark" ? 0.1 : 0.05) * a);
       ctx.lineWidth   = 1;
       roundRect(ctx, lx - 6, ly - ph / 2, pw, ph, 6);
       ctx.fill();
       ctx.stroke();
-      ctx.fillStyle = `rgba(15, 23, 42, ${0.78 * a})`;
+      ctx.fillStyle = rgba(colors.text, 0.82 * a);
       ctx.fillText(label, lx, ly + 0.5);
     }
   }
+}
+
+function rgba(rgb: readonly [number, number, number], alpha: number): string {
+  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
 }
 
 function roundRect(

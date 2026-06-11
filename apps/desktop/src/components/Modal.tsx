@@ -37,7 +37,7 @@ export default function Modal({
           transition={{ duration: 0.15, ease: "easeOut" }}
           className="fixed inset-0 z-50 flex items-center justify-center p-6"
           style={{
-            background: "rgba(15,23,42,0.22)",
+            background: "var(--modal-overlay)",
             backdropFilter: "blur(6px)",
             WebkitBackdropFilter: "blur(6px)",
           }}
@@ -63,7 +63,7 @@ export default function Modal({
               <button
                 onClick={onClose}
                 aria-label="Close dialog"
-                className="focus-ring -mr-1 flex h-6 w-6 flex-none items-center justify-center rounded-[7px] text-[15px] leading-none text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink"
+                className="themed-hover focus-ring -mr-1 flex h-6 w-6 flex-none items-center justify-center rounded-[7px] text-[15px] leading-none text-ink-3 transition-colors duration-150 ease-out hover:text-ink"
               >
                 ×
               </button>
@@ -86,13 +86,16 @@ export function ErrorBar({ message }: { message: string }) {
       transition={{ duration: 0.15, ease: "easeOut" }}
       className="mb-3 flex items-start gap-2 rounded-[10px] px-3 py-2 text-[12px]"
       style={{
-        background: "rgba(255,59,48,0.09)",
-        boxShadow: "inset 0 0 0 0.5px rgba(255,59,48,0.22)",
-        color: "#b3261e",
+        background: "var(--danger-fill)",
+        boxShadow: "inset 0 0 0 0.5px var(--danger-border)",
+        color: "var(--danger-ink)",
       }}
       data-testid="modal-error"
     >
-      <span className="mt-[3px] h-1.5 w-1.5 flex-none rounded-full bg-[#ff3b30]" />
+      <span
+        className="mt-[3px] h-1.5 w-1.5 flex-none rounded-full"
+        style={{ background: "var(--danger)" }}
+      />
       <span className="min-w-0 break-words">{message}</span>
     </motion.div>
   );

@@ -230,7 +230,7 @@ export default function FileTree() {
       </div>
 
       {load.phase === "ok" && !load.live && (
-        <div className="border-t border-[rgba(15,23,42,0.06)] px-3 py-1.5 text-[10px] text-ink-3">
+        <div className="themed-divider border-t px-3 py-1.5 text-[10px] text-ink-3">
           演示文件树 · 连接 aka serve 后显示真实数据
         </div>
       )}
@@ -263,7 +263,7 @@ function TreeRow({
       <div>
         <button
           onClick={() => onToggle(node.path)}
-          className="focus-ring group flex w-full items-center gap-1 rounded-[7px] py-[5px] pr-2 text-left transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.045)]"
+          className="themed-hover focus-ring group flex w-full items-center gap-1 rounded-[7px] py-[5px] pr-2 text-left transition-colors duration-150 ease-out"
           style={{ paddingLeft: pad }}
           data-testid="tree-dir"
         >
@@ -296,7 +296,7 @@ function TreeRow({
       className="focus-ring group flex w-full items-center gap-1.5 rounded-[7px] py-[5px] pr-2 text-left transition-colors duration-150 ease-out"
       style={{
         paddingLeft: pad + 4,
-        background: active ? "rgba(46,124,246,0.09)" : undefined,
+        background: active ? "var(--accent-fill)" : undefined,
       }}
       data-testid="tree-file"
       aria-current={active ? "true" : undefined}
@@ -305,7 +305,7 @@ function TreeRow({
       <FileIcon />
       <span
         className={`min-w-0 flex-1 truncate text-[12.5px] ${
-          active ? "font-semibold text-[#2e7cf6]" : "text-ink"
+          active ? "font-semibold text-[var(--accent)]" : "text-ink"
         }`}
       >
         {node.name}
@@ -352,14 +352,14 @@ function FolderIcon({ open }: { open: boolean }) {
       fill="none"
       aria-hidden
       className="flex-none"
-      style={{ color: open ? "#2e7cf6" : "#94a3b8" }}
+      style={{ color: open ? "var(--accent)" : "var(--ink-3)" }}
     >
       <path
         d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"
         stroke="currentColor"
         strokeWidth="1.8"
         strokeLinejoin="round"
-        fill={open ? "rgba(46,124,246,0.08)" : "none"}
+        fill={open ? "var(--accent-fill)" : "none"}
       />
     </svg>
   );
@@ -406,7 +406,7 @@ function TreeSkeleton() {
           style={{
             width: r.w,
             marginLeft: r.d * 13,
-            background: "rgba(15,23,42,0.06)",
+            background: "var(--subtle-fill)",
           }}
         />
       ))}

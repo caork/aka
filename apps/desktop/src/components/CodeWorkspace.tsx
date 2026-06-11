@@ -22,8 +22,7 @@ export default function CodeWorkspace() {
     <div className="flex h-full overflow-hidden">
       {/* 左栏：文件树 / 搜索结果 */}
       <div
-        className="flex h-full w-[256px] flex-none flex-col border-r"
-        style={{ borderColor: "rgba(15,23,42,0.07)" }}
+        className="themed-border flex h-full w-[256px] flex-none flex-col border-r"
         data-testid="code-rail"
       >
         {searching ? <SearchPanel compact /> : <FileTree />}

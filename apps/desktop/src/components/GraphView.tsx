@@ -82,6 +82,7 @@ export default function GraphView() {
   const clearEgoRequest = useAppStore((s) => s.clearEgoRequest);
   const focusRequest = useAppStore((s) => s.focusRequest);
   const clearFocusRequest = useAppStore((s) => s.clearFocusRequest);
+  useAppStore((s) => s.resolvedTheme);
 
   const [stats, setStats] = useState<Stats>({ fps: 0, lod: 0, nodes: 0, edges: 0 });
   const [hover, setHover] = useState<HoverInfo | null>(null);
@@ -338,7 +339,7 @@ export default function GraphView() {
         overlay.push({ i: rig.hoverIndex, color: ACCENT_RGB, intensity: 0.65 });
       }
 
-      renderer.render(camera, lod, overlay);
+      renderer.render(camera, lod, overlay, useAppStore.getState().resolvedTheme);
       if (rig.data && rig.grid) {
         labels.render(
           camera,
@@ -346,6 +347,7 @@ export default function GraphView() {
           rig.data,
           rig.grid,
           Math.min(window.devicePixelRatio || 1, 2),
+          useAppStore.getState().resolvedTheme,
         );
       }
 
@@ -544,7 +546,7 @@ export default function GraphView() {
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ ...spring, delay: 0.05 }}
-        className="glass absolute left-4 top-4 z-10 flex items-center gap-2 px-3.5 py-2"
+        className="glass absolute left-[58px] top-4 z-10 flex items-center gap-2 px-3.5 py-2"
         data-graph-ui
         data-testid="graph-repo-chip"
       >
@@ -552,10 +554,8 @@ export default function GraphView() {
         <span
           className="rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
           style={{
-            color: live ? "#2563c9" : "#b25c0e",
-            background: live
-              ? "rgba(46,124,246,0.1)"
-              : "rgba(246,166,35,0.12)",
+            color: live ? "var(--accent-ink)" : "var(--warning-ink)",
+            background: live ? "var(--accent-fill)" : "var(--warning-fill)",
           }}
         >
           {live ? "live" : "demo"}
@@ -579,11 +579,14 @@ export default function GraphView() {
                 setEgoError(null);
                 setEgo(null);
               }}
-              className="focus-ring flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[12px] font-medium text-[#2e7cf6] transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.08)]"
+              className="focus-ring flex items-center gap-1.5 rounded-[8px] px-2.5 py-1 text-[12px] font-medium text-[var(--accent)] transition-colors duration-150 ease-out hover:bg-[var(--accent-fill)]"
             >
               <span aria-hidden>←</span> 返回全图
             </button>
-            <span className="h-3.5 w-px bg-[rgba(15,23,42,0.1)]" />
+            <span
+              className="h-3.5 w-px"
+              style={{ background: "var(--hairline-strong)" }}
+            />
             <span className="text-[12px] text-ink-2">
               以{" "}
               <span className="mono font-semibold text-ink">{ego.name}</span>{" "}
@@ -605,7 +608,10 @@ export default function GraphView() {
             data-graph-ui
             data-testid="ego-error"
           >
-            <span className="h-1.5 w-1.5 flex-none rounded-full bg-[#ff3b30]" />
+            <span
+              className="h-1.5 w-1.5 flex-none rounded-full"
+              style={{ background: "var(--danger)" }}
+            />
             <span className="text-[12px] text-ink-2">{egoError}</span>
             <button
               onClick={() => setEgoError(null)}
@@ -631,7 +637,7 @@ export default function GraphView() {
           >
             <span
               className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[rgba(46,124,246,0.25)]"
-              style={{ borderTopColor: "#2e7cf6" }}
+              style={{ borderTopColor: "var(--accent)" }}
             />
             <span className="text-[13px] font-medium text-ink-2">
               {ego ? (
@@ -713,7 +719,8 @@ export default function GraphView() {
           <span
             className="h-1.5 w-1.5 rounded-full"
             style={{
-              background: stats.fps >= 50 || loading ? "#34c759" : "#f6a623",
+              background:
+                stats.fps >= 50 || loading ? "var(--success)" : "var(--beacon)",
             }}
           />
           <span className="font-semibold text-ink" data-testid="fps-value">
@@ -745,7 +752,7 @@ export default function GraphView() {
         </span>
         <span
           className="rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-ink-2"
-          style={{ background: "rgba(15,23,42,0.05)" }}
+          style={{ background: "var(--subtle-fill)" }}
           data-testid="lod-level"
         >
           {LOD_NAMES[stats.lod]}
@@ -798,7 +805,7 @@ function CtrlButton({
       aria-label={label}
       title={label}
       onClick={onClick}
-      className="focus-ring flex h-9 w-9 items-center justify-center text-ink-2 transition-colors duration-150 ease-out hover:bg-[rgba(15,23,42,0.05)] hover:text-ink"
+      className="themed-hover focus-ring flex h-9 w-9 items-center justify-center text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
     >
       {children}
     </button>
@@ -806,7 +813,7 @@ function CtrlButton({
 }
 
 function Divider() {
-  return <div className="mx-1.5 h-px bg-[rgba(15,23,42,0.07)]" />;
+  return <div className="mx-1.5 h-px" style={{ background: "var(--hairline)" }} />;
 }
 
 function PlusIcon() {

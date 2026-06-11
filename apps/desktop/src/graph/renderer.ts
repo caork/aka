@@ -16,6 +16,7 @@
 
 import type { Camera } from "./camera";
 import type { GraphData } from "./format";
+import type { ResolvedTheme } from "../theme";
 
 /* ---- palette (light theme, low saturation) ---- */
 
@@ -39,6 +40,17 @@ export const BEACON = "#f6a623";
 const MAX_PALETTE = 16;
 const MAX_OVERLAY = 64;
 const OVERLAY_STRIDE = 7; /* x, y, rPx, r, g, b, intensity */
+
+const THEME_COLORS = {
+  light: {
+    bg: [246 / 255, 248 / 255, 251 / 255] as const,
+    edge: [70 / 255, 90 / 255, 120 / 255] as const,
+  },
+  dark: {
+    bg: [16 / 255, 21 / 255, 29 / 255] as const,
+    edge: [116 / 255, 135 / 255, 160 / 255] as const,
+  },
+};
 
 /* ---- shaders ---- */
 
@@ -357,12 +369,17 @@ export class GraphRenderer {
     }
   }
 
-  render(camera: Camera, lod: LodParams, overlay: OverlayItem[]) {
+  render(
+    camera: Camera,
+    lod: LodParams,
+    overlay: OverlayItem[],
+    theme: ResolvedTheme = "light",
+  ) {
     const gl = this.gl;
     const data = this.data;
+    const themeColors = THEME_COLORS[theme];
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    /* #F6F8FB */
-    gl.clearColor(0.9647, 0.9725, 0.9843, 1);
+    gl.clearColor(themeColors.bg[0], themeColors.bg[1], themeColors.bg[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     if (!data) return;
 
@@ -376,8 +393,13 @@ export class GraphRenderer {
       gl.uniform2f(u.uViewport, vw, vh);
       gl.uniform1f(u.uScale, camera.k);
       gl.uniform2f(u.uTranslate, camera.tx, camera.ty);
-      /* rgba(70, 90, 120, alpha) */
-      gl.uniform4f(u.uColor, 70 / 255, 90 / 255, 120 / 255, lod.edgeAlpha);
+      gl.uniform4f(
+        u.uColor,
+        themeColors.edge[0],
+        themeColors.edge[1],
+        themeColors.edge[2],
+        theme === "dark" ? lod.edgeAlpha * 0.72 : lod.edgeAlpha,
+      );
       gl.bindVertexArray(this.edgeVao);
       const drawnEdges = Math.min(
         data.edgeCount,

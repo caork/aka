@@ -33,8 +33,8 @@ const CHALF_Y = 15;
 const NHALF_X = 40;
 const NHALF_Y = 13;
 
-const BLUE = "#2E7CF6";
-const GRAY = "rgba(15,23,42,0.22)";
+const BLUE = "var(--accent)";
+const GRAY = "var(--hairline-strong)";
 
 export default function EgoMiniGraph({
   centerName,
@@ -85,8 +85,8 @@ export default function EgoMiniGraph({
     <div
       className="overflow-hidden rounded-[10px]"
       style={{
-        background: "rgba(15,23,42,0.02)",
-        boxShadow: "inset 0 0 0 0.5px rgba(15,23,42,0.07)",
+        background: "var(--subtle-fill-2)",
+        boxShadow: "inset 0 0 0 0.5px var(--hairline)",
       }}
       data-testid="ego-mini-graph"
     >
@@ -115,8 +115,8 @@ export default function EgoMiniGraph({
             <style>{`
               .ego-chip { cursor: pointer; }
               .ego-chip rect { transition: fill .15s ease, stroke .15s ease; }
-              .ego-chip:hover rect { fill: rgba(46,124,246,0.12); stroke: ${BLUE}; }
-              .ego-chip:hover text { fill: #2563c9; }
+              .ego-chip:hover rect { fill: var(--accent-fill); stroke: var(--accent); }
+              .ego-chip:hover text { fill: var(--accent-ink); }
             `}</style>
           </defs>
 
@@ -168,15 +168,15 @@ export default function EgoMiniGraph({
                 width={NHALF_X * 2}
                 height={NHALF_Y * 2}
                 rx={6}
-                fill="#ffffff"
-                stroke="rgba(15,23,42,0.14)"
+                fill="var(--glass-bg-strong)"
+                stroke="var(--hairline-strong)"
                 strokeWidth={1}
               />
               <circle
                 cx={p.x - NHALF_X + 9}
                 cy={p.y}
                 r={2.6}
-                fill={p.group === "ref" ? "rgba(15,23,42,0.3)" : BLUE}
+                fill={p.group === "ref" ? "var(--ink-3)" : BLUE}
               />
               <text
                 x={p.x + 2}
@@ -184,7 +184,7 @@ export default function EgoMiniGraph({
                 textAnchor="middle"
                 className="mono"
                 fontSize="9.5"
-                fill="#0f172a"
+                fill="var(--ink)"
               >
                 {truncate(p.ref.name, 9)}
               </text>
@@ -217,7 +217,7 @@ export default function EgoMiniGraph({
       )}
 
       {!loading && (
-        <div className="flex items-center justify-between border-t border-[rgba(15,23,42,0.05)] px-2.5 py-1.5">
+        <div className="themed-divider flex items-center justify-between border-t px-2.5 py-1.5">
           <div className="flex items-center gap-3 text-[10px] text-ink-3">
             <span className="flex items-center gap-1">
               <span
@@ -231,7 +231,7 @@ export default function EgoMiniGraph({
                 className="inline-block h-[2px] w-3 rounded"
                 style={{
                   background:
-                    "repeating-linear-gradient(90deg,rgba(15,23,42,0.3) 0 2px,transparent 2px 4px)",
+                    "repeating-linear-gradient(90deg,var(--ink-3) 0 2px,transparent 2px 4px)",
                 }}
               />
               引用
@@ -265,7 +265,7 @@ function EgoSkeleton() {
     >
       <div
         className="h-9 w-24 animate-pulse rounded-[8px]"
-        style={{ background: "rgba(15,23,42,0.06)" }}
+        style={{ background: "var(--subtle-fill)" }}
       />
     </div>
   );

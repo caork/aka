@@ -126,14 +126,16 @@ export default function SymbolView() {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ ...spring, delay: i * 0.02 }}
                   onClick={() => pick(r)}
-                  className="focus-ring mb-1 flex w-full items-center gap-3 rounded-[10px] px-2 py-2 text-left transition-colors duration-150 hover:bg-[rgba(15,23,42,0.035)]"
+                  className="themed-hover focus-ring mb-1 flex w-full items-center gap-3 rounded-[10px] px-2 py-2 text-left transition-colors duration-150"
                   data-testid="symbol-relation-row"
                 >
                   <span
                     className="h-[8px] w-[8px] flex-none rounded-full"
                     style={{
                       background:
-                        r.depth <= 1 ? "#2E7CF6" : "rgba(46,124,246,0.35)",
+                        r.depth <= 1
+                          ? "var(--accent)"
+                          : "color-mix(in srgb, var(--accent) 42%, transparent)",
                     }}
                   />
                   <span className="mono truncate text-[12.5px] text-ink">
@@ -163,7 +165,7 @@ export default function SymbolView() {
                 <button
                   key={`${r.id}-${i}`}
                   onClick={() => pick(r)}
-                  className="focus-ring flex w-full items-center gap-2.5 rounded-[10px] px-2 py-1.5 text-left transition-colors duration-150 hover:bg-[rgba(15,23,42,0.035)]"
+                  className="themed-hover focus-ring flex w-full items-center gap-2.5 rounded-[10px] px-2 py-1.5 text-left transition-colors duration-150"
                   data-testid="symbol-ref-row"
                 >
                   <span className="badge Function flex-none text-[10px]">
