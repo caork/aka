@@ -58,7 +58,11 @@
   --syntax-keyword: #2563c9;
   --graph-bg-rgb: 246 248 251;
   --graph-edge-rgb: 70 90 120;
-  --titlebar-leading-safe: 12px;
+  --titlebar-height: 52px;
+  --titlebar-leading-safe: 86px;
+  --code-marker: rgba(255, 237, 102, 0.62);
+  --code-marker-strong: rgba(255, 223, 45, 0.78);
+  --code-marker-shadow: rgba(246, 166, 35, 0.24);
 
   --shadow-float:
     0 1px 2px rgba(16, 24, 40, 0.05),
@@ -132,6 +136,9 @@ html[data-theme="dark"] {
   --syntax-keyword: #8bb7ff;
   --graph-bg-rgb: 16 21 29;
   --graph-edge-rgb: 116 135 160;
+  --code-marker: rgba(255, 221, 82, 0.34);
+  --code-marker-strong: rgba(255, 206, 58, 0.48);
+  --code-marker-shadow: rgba(246, 166, 35, 0.18);
 
   --shadow-float:
     0 1px 2px rgba(0, 0, 0, 0.22),
@@ -238,8 +245,27 @@ body {
   left: var(--titlebar-leading-safe);
 }
 
-.titlebar-safe {
-  --titlebar-leading-safe: 96px;
+.window-drag-region {
+  display: none;
+  height: var(--titlebar-height);
+  -webkit-app-region: drag;
+}
+
+.app-content {
+  box-sizing: border-box;
+  position: relative;
+}
+
+html[data-platform="macos"] .window-drag-region {
+  display: block;
+}
+
+html[data-platform="macos"] .app-content {
+  padding-top: var(--titlebar-height);
+}
+
+html[data-platform="macos"] .app-content > * {
+  height: 100%;
 }
 
 html[data-theme="dark"] .app-logo {
@@ -331,6 +357,28 @@ html[data-theme="dark"] .app-logo {
 }
 .cmd-input input::placeholder {
   color: var(--ink-3);
+}
+
+.code-symbol-mark {
+  color: var(--ink);
+  background:
+    linear-gradient(104deg, transparent 0 3%, var(--code-marker) 3% 96%, transparent 96% 100%),
+    linear-gradient(180deg, transparent 0 42%, var(--code-marker-strong) 42% 92%, transparent 92% 100%);
+  box-shadow:
+    inset 0 -0.52em 0 var(--code-marker),
+    0 0.08em 0.35em var(--code-marker-shadow);
+  text-decoration: none;
+}
+
+.code-symbol-mark:hover,
+.code-symbol-mark[data-selected="true"] {
+  color: var(--accent-ink);
+  background:
+    linear-gradient(104deg, transparent 0 3%, rgba(167, 209, 255, 0.66) 3% 96%, transparent 96% 100%),
+    linear-gradient(180deg, transparent 0 40%, rgba(46, 124, 246, 0.2) 40% 92%, transparent 92% 100%);
+  box-shadow:
+    inset 0 -0.52em 0 rgba(46, 124, 246, 0.18),
+    0 0.08em 0.38em rgba(46, 124, 246, 0.16);
 }
 
 /* keyboard hint chip */
