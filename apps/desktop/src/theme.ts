@@ -2,6 +2,7 @@ export type ThemeMode = "light" | "dark" | "auto";
 export type ResolvedTheme = "light" | "dark";
 
 export const THEME_STORAGE_KEY = "aka.themeMode";
+export const DEFAULT_THEME_MODE: ThemeMode = "light";
 
 const THEME_MODES: readonly ThemeMode[] = ["light", "dark", "auto"];
 
@@ -26,9 +27,9 @@ export function resolveThemeMode(mode: ThemeMode): ResolvedTheme {
 export function readThemeMode(): ThemeMode {
   try {
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-    return isThemeMode(stored) ? stored : "auto";
+    return isThemeMode(stored) ? stored : DEFAULT_THEME_MODE;
   } catch {
-    return "auto";
+    return DEFAULT_THEME_MODE;
   }
 }
 
