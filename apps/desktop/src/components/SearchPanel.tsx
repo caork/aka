@@ -32,7 +32,7 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
 
   if (compact) {
     return (
-      <div className="scroll-area h-full px-2 py-3" data-testid="search-panel-compact">
+      <div className="scroll-area h-full px-2 pb-3 pt-14" data-testid="search-panel-compact">
         <div className="mb-2 flex items-center justify-between px-2">
           <span className="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">
             {query ? "Results" : "Top symbols"}
@@ -73,7 +73,7 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
 
   /* full-width layout */
   return (
-    <div className="scroll-area h-full px-6 py-5" data-testid="search-view">
+    <div className="scroll-area h-full px-6 pb-5 pt-14" data-testid="search-view">
       <div className="mx-auto max-w-[760px]">
         <div className="mb-3 flex items-baseline justify-between">
           <h2 className="text-[13px] font-semibold text-ink-2">

@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import DetailPanel from "./components/DetailPanel";
 import DocView from "./components/DocView";
 import GraphView from "./components/GraphView";
+import SearchBubble from "./components/SearchBubble";
 import SegmentedControl from "./components/SegmentedControl";
 import Sidebar from "./components/Sidebar";
 import { useAppStore } from "./store";
@@ -24,6 +25,11 @@ export default function App() {
             "inset 0 0 0 0.5px rgba(15,23,42,0.06), 0 0 0 1px rgba(255,255,255,0.65), 0 2px 6px rgba(16,24,40,.05), 0 16px 40px -12px rgba(16,24,40,.14)",
         }}
       >
+        {/* Search bubble — top-left corner */}
+        <div className="absolute left-3 top-3 z-20">
+          <SearchBubble />
+        </div>
+
         {/* Doc / Graph switcher — top-right corner */}
         <div className="absolute right-3 top-3 z-20">
           <SegmentedControl value={view} onChange={setView} />
