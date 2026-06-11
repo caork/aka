@@ -16,13 +16,12 @@ export default function App() {
       <div className="app-backdrop" />
       <Sidebar />
       <main
-        className="relative m-3 min-h-0 flex-1 overflow-hidden rounded-[18px]"
+        className="relative min-h-0 flex-1 overflow-hidden"
         style={{
           background: "rgba(255,255,255,0.38)",
           backdropFilter: "blur(24px) saturate(180%)",
           WebkitBackdropFilter: "blur(24px) saturate(180%)",
-          boxShadow:
-            "inset 0 0 0 0.5px rgba(15,23,42,0.06), 0 0 0 1px rgba(255,255,255,0.65), 0 2px 6px rgba(16,24,40,.05), 0 16px 40px -12px rgba(16,24,40,.14)",
+          boxShadow: "inset 1px 0 0 rgba(15,23,42,0.06)",
         }}
       >
         {/* Search bubble — top-left corner */}

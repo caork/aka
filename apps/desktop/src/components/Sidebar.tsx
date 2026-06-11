@@ -22,7 +22,8 @@ export default function Sidebar() {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={spring}
-      className="glass-panel m-3 mr-0 flex w-[220px] flex-none flex-col"
+      className="glass-panel flex w-[220px] flex-none flex-col rounded-none"
+      style={{ borderRadius: 0 }}
       data-testid="sidebar"
     >
       {/* logo */}

@@ -34,6 +34,8 @@ export class LabelOverlay {
   /** Per-label current alpha [0, 1] tracked across frames. */
   private nodeFade    = new Map<number, number>();
   private clusterFade = new Map<number, number>();
+  /** Node labels selected last frame — drives placement hysteresis. */
+  private prevNodeSel = new Set<number>();
   private prevTime    = 0;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -79,6 +81,7 @@ export class LabelOverlay {
       this.drawNodeLabels(camera, lod, data, grid, nodeZoomAlpha, dt);
     } else {
       this.nodeFade.clear();
+      this.prevNodeSel.clear();
     }
   }
 
@@ -163,48 +166,66 @@ export class LabelOverlay {
     });
     if (!ok) {
       this.nodeFade.clear();
+      this.prevNodeSel.clear();
       return; /* viewport too wide for per-node labels */
     }
 
-    this.candidates.sort((a, b) => b.priority - a.priority);
+    /* Importance order. The index tie-break makes the ordering depend only on
+       node identity, not on the grid's scan order — without it, ties resolve by
+       spatial sweep direction, which made one screen edge (the bottom) win the
+       de-overlap and reveal its labels first. */
+    this.candidates.sort((a, b) => b.priority - a.priority || a.i - b.i);
     const n = Math.min(this.candidates.length, MAX_NODE_LABELS);
 
     ctx.font = `500 11px ${FONT}`;
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
 
-    /* --- Selection pass: same de-overlap as before, result is `selected` --- */
+    /* --- De-overlap selection ---
+     * Reserve the label's real pill box (≈2 rows tall) in a uniform screen
+     * grid, then place candidates greedily. Placement runs in two passes:
+     * labels shown last frame claim their slots first, so a steady pan/zoom
+     * keeps them put instead of flip-flopping selected/unselected every frame
+     * (the source of the flicker). New labels then fill whatever gaps remain. */
     const cell     = 14;
-    const cols     = Math.ceil(camera.width / cell);
+    const cols     = Math.ceil(camera.width / cell) + 1;
+    const ph       = 17; /* pill height, matches the render pass */
     const occupied = new Set<number>();
     const selected = new Set<number>();
 
-    for (let j = 0; j < n; j++) {
-      const i  = this.candidates[j].i;
+    const tryPlace = (i: number): void => {
       const sx = camera.worldToScreenX(data.positions[i * 2]);
       const sy = camera.worldToScreenY(data.positions[i * 2 + 1]);
       const rPx = Math.min(
         Math.max(data.sizes[i] * camera.k * 0.5, lod.minPx),
         lod.maxPx,
       );
+      const tw = ctx.measureText(data.name(i)).width;
+      const lx = sx + rPx + 6;
+      const ly = sy;
+      if (lx + tw > camera.width + 8 || ly < -8 || ly > camera.height + 8) return;
 
-      const label = data.name(i);
-      const tw    = ctx.measureText(label).width;
-      const lx    = sx + rPx + 6;
-      const ly    = sy;
-      if (lx + tw > camera.width + 8 || ly < -8 || ly > camera.height + 8) continue;
-
-      const row = Math.floor(ly / cell);
-      const c0  = Math.max(0, Math.floor(lx / cell));
-      const c1  = Math.min(cols - 1, Math.floor((lx + tw + 10) / cell));
-      let clash  = false;
-      for (let cc = c0; cc <= c1 && !clash; cc++) {
-        if (occupied.has(row * cols + cc)) clash = true;
-      }
-      if (clash) continue;
-      for (let cc = c0; cc <= c1; cc++) occupied.add(row * cols + cc);
+      const r0 = Math.floor((ly - ph / 2) / cell);
+      const r1 = Math.floor((ly + ph / 2) / cell);
+      const c0 = Math.max(0, Math.floor(lx / cell));
+      const c1 = Math.min(cols - 1, Math.floor((lx + tw + 8) / cell));
+      for (let r = r0; r <= r1; r++)
+        for (let c = c0; c <= c1; c++)
+          if (occupied.has(r * cols + c)) return;
+      for (let r = r0; r <= r1; r++)
+        for (let c = c0; c <= c1; c++) occupied.add(r * cols + c);
       selected.add(i);
+    };
+
+    for (let j = 0; j < n; j++) {
+      const i = this.candidates[j].i;
+      if (this.prevNodeSel.has(i)) tryPlace(i);
     }
+    for (let j = 0; j < n; j++) {
+      const i = this.candidates[j].i;
+      if (!this.prevNodeSel.has(i)) tryPlace(i);
+    }
+    this.prevNodeSel = selected;
 
     /* --- Advance per-node alphas toward their targets --- */
     for (const i of selected) {
@@ -240,7 +261,6 @@ export class LabelOverlay {
       const ly    = sy;
 
       /* glass pill */
-      const ph = 17;
       const pw = tw + 12;
       ctx.fillStyle   = `rgba(255, 255, 255, ${0.72 * a})`;
       ctx.strokeStyle = `rgba(15, 23, 42,   ${0.05 * a})`;
