@@ -246,7 +246,7 @@ function PanelBody({
       animate={{ x: 0, opacity: 1 }}
       exit={{ x: 56, opacity: 0 }}
       transition={spring}
-      className="glass-panel absolute bottom-3 right-3 top-3 z-40 flex flex-col overflow-hidden"
+      className="glass-panel absolute bottom-3 right-3 top-14 z-40 flex flex-col overflow-hidden"
       style={{
         width,
         minWidth: MIN_WIDTH,
