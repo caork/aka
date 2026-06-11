@@ -1,8 +1,12 @@
-import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
+const collapsedRadius = 18;
+const expandedRadius = 10;
+const collapsedWidth = 36;
+const expandedWidth = 232;
 
 export default function SearchBubble() {
   const query = useAppStore((s) => s.query);
@@ -40,55 +44,66 @@ export default function SearchBubble() {
   };
 
   return (
-    <LayoutGroup>
-      <motion.div
-        layout
-        transition={spring}
-        onClick={searchExpanded ? undefined : openSearch}
-        style={{ borderRadius: searchExpanded ? 10 : 18 }}
-        className={[
-          "cmd-input relative flex h-9 shrink-0 items-center overflow-hidden",
-          searchExpanded
-            ? "w-[260px] cursor-text gap-2.5 px-3"
-            : "w-9 cursor-pointer justify-center",
-        ].join(" ")}
-        data-testid="sidebar-search-bubble"
-      >
+    <motion.div
+      initial={false}
+      animate={{
+        width: searchExpanded ? expandedWidth : collapsedWidth,
+        borderRadius: searchExpanded ? expandedRadius : collapsedRadius,
+      }}
+      transition={
+        searchExpanded
+          ? spring
+          : { ...spring, delay: 0.06 }
+      }
+      role={searchExpanded ? "search" : "button"}
+      tabIndex={searchExpanded ? -1 : 0}
+      aria-label={searchExpanded ? "Search symbols" : "Open symbol search"}
+      aria-expanded={searchExpanded}
+      onClick={searchExpanded ? undefined : openSearch}
+      onKeyDown={(e) => {
+        if (searchExpanded) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openSearch();
+        }
+      }}
+      style={{ transformOrigin: "left center" }}
+      className={[
+        "cmd-input relative flex h-9 max-w-[calc(100vw-24px)] shrink-0 items-center overflow-hidden",
+        searchExpanded ? "cursor-text" : "cursor-pointer",
+      ].join(" ")}
+      data-testid="sidebar-search-bubble"
+    >
+      <span className="grid h-9 w-9 flex-none place-items-center">
         <SearchIcon />
-        <AnimatePresence>
-          {searchExpanded && (
-            <motion.input
-              key="input"
+      </span>
+      <AnimatePresence initial={false}>
+        {searchExpanded && (
+          <motion.div
+            key="search-content"
+            initial={{ opacity: 0, x: -4 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -4 }}
+            transition={{ duration: 0.12, ease: "easeOut" }}
+            className="absolute bottom-0 left-9 top-0 flex w-[196px] items-center gap-2 pr-3"
+          >
+            <input
               ref={inputRef}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.12 }}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onBlur={collapseSearch}
               placeholder="Search symbols…"
               className="h-full min-w-0 flex-1 text-[13px]"
+              aria-label="Search symbols"
               data-testid="global-search"
             />
-          )}
-        </AnimatePresence>
-        <AnimatePresence>
-          {searchExpanded && (
-            <motion.span
-              key="kbd"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.1 }}
-              className="kbd flex-none text-[10px]"
-            >
+            <span className="kbd flex-none whitespace-nowrap text-[10px]">
               ⌘K
-            </motion.span>
-          )}
-        </AnimatePresence>
-      </motion.div>
-    </LayoutGroup>
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
   );
 }
 
