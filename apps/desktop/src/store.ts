@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type ViewId = "search" | "graph" | "symbol" | "code";
+export type ViewId = "doc" | "graph";
 
 export type RepoStatus = "ready" | "indexing" | "failed" | "idle";
 
@@ -251,11 +251,9 @@ const MOCK_REPOS: Repo[] = [
   },
 ];
 
-/** openCode 之前所在的视图，closeCode 用于返回。 */
-let codeReturnView: ViewId = "search";
 
-export const useAppStore = create<AppState>((set, get) => ({
-  view: "search",
+export const useAppStore = create<AppState>((set) => ({
+  view: "doc",
   setView: (view) => set({ view }),
 
   repos: MOCK_REPOS,
@@ -263,13 +261,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   selectedRepoId: readPersistedSelection() ?? "aka",
   selectRepo: (selectedRepoId) => {
     persistSelection(selectedRepoId);
-    /* 换仓库时关闭详情面板与 Code 视图，避免跨仓库的陈旧目标 */
-    set((s) => ({
-      selectedRepoId,
-      detailTarget: null,
-      codeTarget: null,
-      view: s.view === "code" ? "search" : s.view,
-    }));
+    set({ selectedRepoId, detailTarget: null, codeTarget: null });
   },
 
   query: "",
@@ -286,11 +278,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   codeTarget: null,
   openCode: (codeTarget) => {
-    const current = get().view;
-    if (current !== "code") codeReturnView = current;
-    set({ codeTarget, view: "code", detailTarget: null });
+    set({ codeTarget, view: "doc", detailTarget: null });
   },
-  closeCode: () => set({ codeTarget: null, view: codeReturnView }),
+  closeCode: () => set({ codeTarget: null }),
 
   focusRequest: null,
   requestFocus: (id, name) =>

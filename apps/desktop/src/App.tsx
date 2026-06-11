@@ -1,11 +1,9 @@
 import { AnimatePresence, motion } from "framer-motion";
-import CodeView from "./components/CodeView";
 import CommandBar from "./components/CommandBar";
 import DetailPanel from "./components/DetailPanel";
+import DocView from "./components/DocView";
 import GraphView from "./components/GraphView";
-import SearchView from "./components/SearchView";
 import Sidebar from "./components/Sidebar";
-import SymbolView from "./components/SymbolView";
 import { useAppStore } from "./store";
 
 export default function App() {
@@ -27,13 +25,10 @@ export default function App() {
               transition={{ type: "spring", stiffness: 300, damping: 30 }}
               className="h-full"
             >
-              {view === "search" && <SearchView />}
+              {view === "doc" && <DocView />}
               {view === "graph" && <GraphView />}
-              {view === "symbol" && <SymbolView />}
-              {view === "code" && <CodeView />}
             </motion.div>
           </AnimatePresence>
-          {/* 三视图共用的右侧详情面板（在 main 内，不遮 toolbar/侧栏） */}
           <DetailPanel />
         </main>
       </div>

@@ -2,9 +2,8 @@ import { motion } from "framer-motion";
 import type { ViewId } from "../store";
 
 const VIEWS: { id: ViewId; label: string }[] = [
-  { id: "search", label: "Search" },
+  { id: "doc", label: "Doc" },
   { id: "graph", label: "Graph" },
-  { id: "symbol", label: "Symbol" },
 ];
 
 export default function SegmentedControl({

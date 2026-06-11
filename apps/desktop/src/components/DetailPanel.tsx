@@ -202,7 +202,7 @@ function PanelBody({
   const open360 = () => {
     if (!target.name) return;
     setQuery(target.name);
-    setView("symbol");
+    setView("doc");
     closeDetail();
   };
 
