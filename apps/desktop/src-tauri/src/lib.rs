@@ -9,7 +9,7 @@ use aka_cli::AkaBackend;
 use aka_mcp::{clamp_render_nodes, ops, Backend, RepoSettingsUpdate, MAX_RENDER_NODES};
 use serde::Deserialize;
 use serde_json::json;
-use tauri::State;
+use tauri::{Manager, State};
 
 type BackendState = Arc<AkaBackend>;
 
@@ -66,6 +66,28 @@ fn copy_zip_to_temp(path: &str) -> anyhow::Result<std::path::PathBuf> {
         )
     })?;
     Ok(tmp)
+}
+
+fn configure_desktop_runtime(app: &tauri::App) -> anyhow::Result<()> {
+    let data_dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&data_dir)?;
+    std::env::set_var("AKA_HOME", &data_dir);
+
+    let resource_dir = app.path().resource_dir()?;
+    let engine_dir = resource_dir.join("engine");
+    if engine_dir.join("gitnexus/package.json").exists() {
+        std::env::set_var("AKA_ENGINE_DIR", &engine_dir);
+    }
+
+    let node = if cfg!(windows) {
+        resource_dir.join("node/node.exe")
+    } else {
+        resource_dir.join("node/bin/node")
+    };
+    if node.exists() {
+        std::env::set_var("AKA_NODE", &node);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -280,7 +302,13 @@ async fn delete_repo(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(Arc::new(AkaBackend::new()))
+        .setup(|app| {
+            configure_desktop_runtime(app).map_err(|e| {
+                Box::<dyn std::error::Error>::from(format!("configure desktop runtime: {e:#}"))
+            })?;
+            app.manage(Arc::new(AkaBackend::new()));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_repos,
             query,

@@ -13,8 +13,10 @@
 #   dist/aka-clients-<ver>.tar.gz           整个 clients/ 目录
 #   dist/aka-<ver>-<host-triple>.tar.gz     strip 后的 release 二进制（tar 内单文件 aka）
 #   dist/aka-<ver>-<host-triple>.zip        Windows release 二进制（zip 内单文件 aka.exe）
+#   dist/aka-desktop-<ver>-<host-triple>.dmg
+#                                             macOS Tauri GUI app DMG
 #   dist/aka-desktop-<ver>-<host-triple>.app.zip
-#                                             macOS Tauri GUI app（zip 内 aka.app）
+#                                             macOS Tauri GUI app（zip 内 AKA.app）
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe
 #                                             Windows Tauri GUI NSIS installer
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-portable.zip
@@ -411,7 +413,7 @@ prepare_desktop_resources() {
 }
 
 package_desktop() {
-  local host_os host_arch desktop_triple app_path desktop_zip
+  local host_os host_arch desktop_triple app_path desktop_dmg desktop_zip
   host_os="$(uname -s)"
   host_arch="$(uname -m)"
 
@@ -429,8 +431,13 @@ package_desktop() {
         (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- build --bundles app --ci --no-sign)
       fi
 
-      app_path="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/macos/aka.app"
+      app_path="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/macos/AKA.app"
       [[ -d "${app_path}" ]] || { echo "error: 找不到 ${app_path}（先去掉 --skip-build 构建一次）" >&2; return 1; }
+
+      desktop_dmg="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.dmg"
+      rm -f "${desktop_dmg}"
+      hdiutil create -volname "AKA" -srcfolder "${app_path}" -ov -format UDZO "${desktop_dmg}"
+      echo "==> ${desktop_dmg}"
 
       desktop_zip="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.app.zip"
       rm -f "${desktop_zip}"
@@ -461,7 +468,7 @@ package_windows_desktop() {
     (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
   fi
 
-  exe_path="${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/aka-desktop.exe"
+  exe_path="${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/AKA.exe"
   [[ -f "${exe_path}" ]] || { echo "error: 找不到 ${exe_path}（先去掉 --skip-build 构建一次）" >&2; return 1; }
 
   setup_src="$(find "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/bundle/nsis" -maxdepth 1 -type f -name '*setup.exe' | sort | tail -n 1 || true)"
@@ -475,14 +482,14 @@ package_windows_desktop() {
   portable_zip="${DIST_DIR}/aka-desktop-${VERSION}-${win_triple}-portable.zip"
   rm -f "${portable_zip}"
   stage="$(mktemp -d)"
-  cp "${exe_path}" "${stage}/aka-desktop.exe"
+  cp "${exe_path}" "${stage}/AKA.exe"
   engine_src="${TAURI_RESOURCES_DIR}/engine"
   node_src="${TAURI_RESOURCES_DIR}/node"
   [[ -d "${engine_src}/gitnexus" ]] || { echo "error: 找不到 Windows portable 所需 engine 资源: ${engine_src}" >&2; return 1; }
   [[ -f "${node_src}/node.exe" ]] || { echo "error: 找不到 Windows portable 所需 Node runtime: ${node_src}" >&2; return 1; }
   cp -R "${engine_src}" "${stage}/engine"
   cp -R "${node_src}" "${stage}/node"
-  (cd "${stage}" && zip -q -X -r "${portable_zip}" aka-desktop.exe engine node)
+  (cd "${stage}" && zip -q -X -r "${portable_zip}" AKA.exe engine node)
   rm -rf "${stage}"
   echo "==> ${portable_zip}"
 }
@@ -507,7 +514,7 @@ if [[ "${DESKTOP_ONLY}" -eq 1 ]]; then
   package_desktop
   echo
   echo "==> 完成桌面 GUI 包。校验和请最后单独跑: scripts/package-release.sh --checksums-only"
-  ls -lh "${DIST_DIR}/aka-desktop-${VERSION}-"*.app.zip
+  ls -lh "${DIST_DIR}/aka-desktop-${VERSION}-"*.dmg "${DIST_DIR}/aka-desktop-${VERSION}-"*.app.zip
   exit 0
 fi
 
@@ -640,6 +647,6 @@ echo
 echo "==> 完成。校验和请最后单独跑: scripts/package-release.sh --checksums-only"
 ls_args=("${PLUGIN_ZIP}" "${OPENCODE_ZIP}" "${CLIENTS_TAR}" "${BIN_ARCHIVE}")
 if [[ "${DESKTOP}" -eq 1 ]]; then
-  ls_args+=("${DIST_DIR}/aka-desktop-${VERSION}-"*.app.zip)
+  ls_args+=("${DIST_DIR}/aka-desktop-${VERSION}-"*.dmg "${DIST_DIR}/aka-desktop-${VERSION}-"*.app.zip)
 fi
 ls -lh "${ls_args[@]}"

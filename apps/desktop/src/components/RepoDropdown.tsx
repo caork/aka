@@ -62,7 +62,7 @@ export default function RepoDropdown() {
       >
         <motion.img
           src="/logo.png"
-          alt="aka"
+          alt="AKA"
           className="app-logo h-[18px] w-[18px]"
           draggable={false}
           animate={{ scale: open ? 1.08 : 1 }}

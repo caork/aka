@@ -30,7 +30,7 @@ pub enum EngineError {
 }
 
 /// 引擎安装形态：开发期 = engine 源码目录（经 npx tsx 运行），
-/// 发布期 = 编译后的单二进制 sidecar。
+/// 发布期 = 随包 Node runtime + 已编译的 dist/export/emit-cli.js。
 pub struct EngineRunner {
     engine_dir: PathBuf,
 }
@@ -85,10 +85,19 @@ impl EngineRunner {
         mut on_event: impl FnMut(&EngineEvent),
     ) -> Result<ArtifactStats, EngineError> {
         let pkg_dir = self.engine_dir.join("gitnexus");
-        let mut cmd = Command::new("npx");
-        cmd.arg("tsx")
-            .arg("src/export/emit-cli.ts")
-            .arg("--repo")
+        let compiled_entry = pkg_dir.join("dist/export/emit-cli.js");
+        let packaged_node = std::env::var_os("AKA_NODE").map(PathBuf::from);
+        let mut cmd = if compiled_entry.exists() {
+            let node = packaged_node.unwrap_or_else(|| PathBuf::from("node"));
+            let mut cmd = Command::new(&node);
+            cmd.arg(&compiled_entry);
+            cmd
+        } else {
+            let mut cmd = Command::new("npx");
+            cmd.arg("tsx").arg("src/export/emit-cli.ts");
+            cmd
+        };
+        cmd.arg("--repo")
             .arg(repo)
             .arg("--out")
             .arg(out_dir)
@@ -100,7 +109,7 @@ impl EngineRunner {
         }
 
         let mut child = cmd.spawn().map_err(|source| EngineError::Spawn {
-            cmd: format!("npx tsx src/export/emit-cli.ts (cwd {})", pkg_dir.display()),
+            cmd: format!("emit-cli (cwd {})", pkg_dir.display()),
             source,
         })?;
 
