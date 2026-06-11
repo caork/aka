@@ -12,6 +12,7 @@ import {
   type SymbolContext,
 } from "../search-api";
 import { useAppStore, type DetailTarget } from "../store";
+import EgoMiniGraph from "./EgoMiniGraph";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 /** 源码预览：目标行前后各取多少行上下文 */
@@ -325,30 +326,60 @@ function PanelBody({
 
       {/* ---- 内容（滚动区） ---- */}
       <div className="scroll-area min-h-0 flex-1 px-4 pb-3">
-        {/* 源码预览 */}
-        <div className="mb-1.5 flex items-baseline justify-between">
-          <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
-            Source
-          </span>
-          {file && (
-            <button
-              onClick={openFullFile}
-              className="focus-ring -my-0.5 rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-medium text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)] hover:text-[#2E7CF6]"
-              title={`在 Code 视图打开 ${file}`}
-              data-testid="open-full-file"
-            >
-              查看完整文件 ↗
-            </button>
-          )}
-        </div>
-        <SourcePreview
-          source={source}
-          hasFile={Boolean(file)}
-          resolving={!detailDone}
-          file={file}
-          focusStart={line}
-          focusEnd={endLine}
-        />
+        {/* 顶部互补视图：Code 模式 = ego 图谱；Graph 模式 = 源码预览 */}
+        {view === "code" ? (
+          <>
+            <div className="mb-1.5 flex items-baseline justify-between">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+                Graph
+              </span>
+              {file && (
+                <button
+                  onClick={openFullFile}
+                  className="focus-ring -my-0.5 rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-medium text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)] hover:text-[#2E7CF6]"
+                  title={`跳到 ${file} 的定义`}
+                  data-testid="open-full-file"
+                >
+                  跳到定义 ↗
+                </button>
+              )}
+            </div>
+            <EgoMiniGraph
+              centerName={target.name || target.id}
+              callers={ctx?.callers ?? []}
+              callees={ctx?.callees ?? []}
+              refs={ctx?.refs ?? []}
+              loading={relationsPending}
+              onPick={pickRelation}
+            />
+          </>
+        ) : (
+          <>
+            <div className="mb-1.5 flex items-baseline justify-between">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+                Source
+              </span>
+              {file && (
+                <button
+                  onClick={openFullFile}
+                  className="focus-ring -my-0.5 rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-medium text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)] hover:text-[#2E7CF6]"
+                  title={`在 Code 视图打开 ${file}`}
+                  data-testid="open-full-file"
+                >
+                  查看完整文件 ↗
+                </button>
+              )}
+            </div>
+            <SourcePreview
+              source={source}
+              hasFile={Boolean(file)}
+              resolving={!detailDone}
+              file={file}
+              focusStart={line}
+              focusEnd={endLine}
+            />
+          </>
+        )}
 
         {/* 关系 */}
         <SectionTitle className="mt-4">Relations</SectionTitle>
