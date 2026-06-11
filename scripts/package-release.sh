@@ -28,6 +28,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${REPO_ROOT}/dist"
+TAURI_DIR="${REPO_ROOT}/apps/desktop/src-tauri"
+TAURI_RESOURCES_DIR="${TAURI_DIR}/resources"
+NODE_VERSION="${AKA_NODE_VERSION:-v24.16.0}"
 
 VERSION=""
 TARGET=""
@@ -77,6 +80,336 @@ fi
 
 mkdir -p "${DIST_DIR}"
 
+platform_from_triple() {
+  case "$1" in
+    aarch64-apple-darwin) echo "darwin-arm64" ;;
+    x86_64-apple-darwin) echo "darwin-x64" ;;
+    x86_64-pc-windows-msvc) echo "win-x64" ;;
+    *) echo "error: 不支持的桌面资源平台 $1" >&2; return 1 ;;
+  esac
+}
+
+native_platform_from_resource_platform() {
+  case "$1" in
+    darwin-arm64) echo "darwin-arm64" ;;
+    darwin-x64) echo "darwin-x64" ;;
+    win-x64) echo "win32-x64" ;;
+    *) echo "error: 不支持的 native 平台 $1" >&2; return 1 ;;
+  esac
+}
+
+onnx_platform_from_resource_platform() {
+  case "$1" in
+    darwin-arm64) echo "darwin/arm64" ;;
+    darwin-x64) echo "darwin/x64" ;;
+    win-x64) echo "win32/x64" ;;
+    *) echo "error: 不支持的 ONNX 平台 $1" >&2; return 1 ;;
+  esac
+}
+
+slim_node_resource() {
+  local platform dst
+  platform="$1"
+  dst="${TAURI_RESOURCES_DIR}/node"
+
+  case "${platform}" in
+    darwin-*)
+      [[ -x "${dst}/bin/node" ]] || { echo "error: Node runtime 缺少 bin/node" >&2; return 1; }
+      find "${dst}/bin" -mindepth 1 -maxdepth 1 ! -name node -exec rm -rf {} +
+      rm -rf "${dst}/include" "${dst}/lib" "${dst}/share"
+      ;;
+    win-x64)
+      [[ -f "${dst}/node.exe" ]] || { echo "error: Node runtime 缺少 node.exe" >&2; return 1; }
+      find "${dst}" -mindepth 1 -maxdepth 1 \
+        ! -name node.exe \
+        ! -name LICENSE \
+        -exec rm -rf {} +
+      ;;
+  esac
+}
+
+slim_tree_sitter_package() {
+  local pkg_dir native_platform package_name
+  pkg_dir="$1"
+  native_platform="$2"
+  [[ -d "${pkg_dir}" ]] || return 0
+  package_name="$(basename "${pkg_dir}")"
+
+  if [[ -d "${pkg_dir}/prebuilds" ]]; then
+    find "${pkg_dir}/prebuilds" -mindepth 1 -maxdepth 1 -type d ! -name "${native_platform}" -exec rm -rf {} +
+  fi
+
+  if [[ "${package_name}" = "tree-sitter" ]]; then
+    # The core runtime package resolves through package.json main=index.js.
+    find "${pkg_dir}" -mindepth 1 -maxdepth 1 \
+      ! -name package.json \
+      ! -name index.js \
+      ! -name prebuilds \
+      -exec rm -rf {} +
+    return 0
+  fi
+
+  # Language packages load bindings/node/index.js, package.json, the matching
+  # prebuild, and optionally src/node-types.json. Source C/C++ files are bulk.
+  find "${pkg_dir}" -mindepth 1 -maxdepth 1 \
+    ! -name package.json \
+    ! -name bindings \
+    ! -name prebuilds \
+    ! -name src \
+    -exec rm -rf {} +
+
+  if [[ -d "${pkg_dir}/src" ]]; then
+    find "${pkg_dir}/src" -mindepth 1 \
+      ! -name node-types.json \
+      ! -path '*/tree_sitter' \
+      ! -path '*/tree_sitter/*' \
+      -exec rm -rf {} +
+  fi
+}
+
+slim_native_bindings_for_platform() {
+  local platform dst native_platform onnx_platform onnx_os onnx_arch scoped_pkg
+  platform="$1"
+  dst="${TAURI_RESOURCES_DIR}/engine"
+  native_platform="$(native_platform_from_resource_platform "${platform}")"
+  onnx_platform="$(onnx_platform_from_resource_platform "${platform}")"
+  onnx_os="${onnx_platform%%/*}"
+  onnx_arch="${onnx_platform##*/}"
+
+  find "${dst}/gitnexus/node_modules" -maxdepth 1 -type d -name 'tree-sitter*' -print0 |
+    while IFS= read -r -d '' pkg; do
+      slim_tree_sitter_package "${pkg}" "${native_platform}"
+    done
+
+  for scoped_pkg in "${dst}/gitnexus/node_modules/@ladybugdb"/core-*; do
+    [[ -e "${scoped_pkg}" ]] || continue
+    case "$(basename "${scoped_pkg}")" in
+      core-darwin-arm64|core-darwin-x64|core-win32-x64)
+        [[ "$(basename "${scoped_pkg}")" = "core-${native_platform}" ]] || rm -rf "${scoped_pkg}"
+        ;;
+    esac
+  done
+
+  if [[ -d "${dst}/gitnexus/node_modules/onnxruntime-node/bin/napi-v6" ]]; then
+    find "${dst}/gitnexus/node_modules/onnxruntime-node/bin/napi-v6" -mindepth 1 -maxdepth 1 -type d ! -name "${onnx_os}" -exec rm -rf {} +
+    find "${dst}/gitnexus/node_modules/onnxruntime-node/bin/napi-v6/${onnx_os}" -mindepth 1 -maxdepth 1 -type d ! -name "${onnx_arch}" -exec rm -rf {} + 2>/dev/null || true
+  fi
+
+  # The desktop runtime is Node-only; onnxruntime-web's WASM/browser payload is
+  # large and not used by the bundled emitter.
+  rm -rf "${dst}/gitnexus/node_modules/onnxruntime-web"
+}
+
+slim_engine_resource() {
+  local platform dst npm_os npm_cpu native_platform ladybug_pkg
+  platform="$1"
+  dst="${TAURI_RESOURCES_DIR}/engine"
+  native_platform="$(native_platform_from_resource_platform "${platform}")"
+
+  case "${platform}" in
+    darwin-arm64) npm_os="darwin"; npm_cpu="arm64"; ladybug_pkg="core-darwin-arm64" ;;
+    darwin-x64) npm_os="darwin"; npm_cpu="x64"; ladybug_pkg="core-darwin-x64" ;;
+    win-x64) npm_os="win32"; npm_cpu="x64"; ladybug_pkg="core-win32-x64" ;;
+  esac
+
+  echo "==> 瘦身 engine 运行时 (${platform})"
+  npm --prefix "${dst}/gitnexus" prune \
+    --omit=dev \
+    --ignore-scripts \
+    --include=optional \
+    --os="${npm_os}" \
+    --cpu="${npm_cpu}"
+
+  # npm prune removes the materialized vendored grammars because they are not
+  # package-lock dependencies. Re-materialize them after pruning, then activate
+  # the matching prebuilds without requiring a compiler.
+  (
+    cd "${dst}/gitnexus"
+    node scripts/materialize-vendor-grammars.cjs
+    node scripts/build-tree-sitter-grammars.cjs
+  )
+
+  rm -rf \
+    "${dst}/gitnexus-shared" \
+    "${dst}/gitnexus/src" \
+    "${dst}/gitnexus/scripts" \
+    "${dst}/gitnexus/test" \
+    "${dst}/gitnexus/tests" \
+    "${dst}/gitnexus/web" \
+    "${dst}/gitnexus/hooks" \
+    "${dst}/gitnexus/skills" \
+    "${dst}/gitnexus/.vitest" \
+    "${dst}/gitnexus/coverage"
+  find "${dst}/gitnexus/vendor" -mindepth 1 -maxdepth 1 -type d ! -name leiden -exec rm -rf {} + 2>/dev/null || true
+
+  find "${dst}" -type d \( \
+      -name .cache -o \
+      -name .github -o \
+      -name .vscode -o \
+      -name __tests__ -o \
+      -name test -o \
+      -name tests -o \
+      -name docs -o \
+      -name doc -o \
+      -name example -o \
+      -name examples -o \
+      -name benchmark -o \
+      -name benchmarks \
+    \) -prune -exec rm -rf {} +
+  find "${dst}" -type f \( \
+      -name '*.tsbuildinfo' -o \
+      -name '*.map' -o \
+      -name '.DS_Store' -o \
+      -name 'CHANGELOG*' -o \
+      -name 'HISTORY*' \
+    \) -delete
+
+  slim_native_bindings_for_platform "${platform}"
+
+  if [[ -f "${dst}/gitnexus/node_modules/@ladybugdb/${ladybug_pkg}/lbugjs.node" ]]; then
+    cp "${dst}/gitnexus/node_modules/@ladybugdb/${ladybug_pkg}/lbugjs.node" \
+      "${dst}/gitnexus/node_modules/@ladybugdb/core/lbugjs.node"
+  fi
+
+  [[ -f "${dst}/gitnexus/dist/export/emit-cli.js" ]] || { echo "error: engine emit-cli build 缺失" >&2; return 1; }
+  [[ -f "${dst}/gitnexus/node_modules/@ladybugdb/core/lbugjs.node" ]] || { echo "error: engine 缺少 Ladybug native binding" >&2; return 1; }
+  [[ -f "${dst}/gitnexus/node_modules/tree-sitter/prebuilds/${native_platform}/tree-sitter.node" ]] || { echo "error: engine 缺少 tree-sitter ${native_platform} runtime" >&2; return 1; }
+  [[ -f "${dst}/gitnexus/node_modules/tree-sitter-javascript/prebuilds/${native_platform}/tree-sitter-javascript.node" ]] || { echo "error: engine 缺少 tree-sitter-javascript ${native_platform} runtime" >&2; return 1; }
+  [[ -f "${dst}/gitnexus/node_modules/tree-sitter-c/prebuilds/${native_platform}/tree-sitter-c.node" ]] || { echo "error: engine 缺少 tree-sitter-c ${native_platform} runtime" >&2; return 1; }
+}
+
+copy_engine_resource() {
+  local src dst platform npm_os npm_cpu ladybug_pkg
+  platform="$1"
+  src="${REPO_ROOT}/engine"
+  dst="${TAURI_RESOURCES_DIR}/engine"
+
+  case "${platform}" in
+    darwin-arm64) npm_os="darwin"; npm_cpu="arm64"; ladybug_pkg="core-darwin-arm64" ;;
+    darwin-x64) npm_os="darwin"; npm_cpu="x64"; ladybug_pkg="core-darwin-x64" ;;
+    win-x64) npm_os="win32"; npm_cpu="x64"; ladybug_pkg="core-win32-x64" ;;
+    *) echo "error: 不支持的 engine npm 平台 ${platform}" >&2; return 1 ;;
+  esac
+
+  [[ -d "${src}/gitnexus" ]] || { echo "error: 找不到 engine/gitnexus，请先初始化 engine 依赖" >&2; return 1; }
+  [[ -d "${src}/gitnexus-shared" ]] || { echo "error: 找不到 engine/gitnexus-shared，请先初始化 engine 依赖" >&2; return 1; }
+
+  rm -rf "${dst}"
+  mkdir -p "${TAURI_RESOURCES_DIR}"
+  rsync -a --delete \
+    --exclude '.git' \
+    --exclude '.DS_Store' \
+    --exclude 'node_modules' \
+    "${src}/" "${dst}/"
+
+  echo "==> 准备 engine npm 依赖 (${npm_os}/${npm_cpu})"
+  npm --prefix "${dst}/gitnexus-shared" ci \
+    --ignore-scripts \
+    --include=optional \
+    --os="${npm_os}" \
+    --cpu="${npm_cpu}"
+  npm --prefix "${dst}/gitnexus-shared" run build
+  GITNEXUS_SKIP_OPTIONAL_GRAMMARS=0 npm --prefix "${dst}/gitnexus" ci \
+    --ignore-scripts \
+    --include=optional \
+    --os="${npm_os}" \
+    --cpu="${npm_cpu}"
+  (
+    cd "${dst}/gitnexus"
+    node scripts/materialize-vendor-grammars.cjs
+    node scripts/build-tree-sitter-grammars.cjs
+  )
+  npm --prefix "${dst}/gitnexus" run build
+
+  if [[ -f "${dst}/gitnexus/node_modules/@ladybugdb/${ladybug_pkg}/lbugjs.node" ]]; then
+    cp "${dst}/gitnexus/node_modules/@ladybugdb/${ladybug_pkg}/lbugjs.node" \
+      "${dst}/gitnexus/node_modules/@ladybugdb/core/lbugjs.node"
+  fi
+
+  slim_engine_resource "${platform}"
+
+  [[ -f "${dst}/gitnexus/dist/export/emit-cli.js" ]] || { echo "error: engine emit-cli build 缺失" >&2; return 1; }
+  [[ -f "${dst}/gitnexus/node_modules/@ladybugdb/core/lbugjs.node" ]] || { echo "error: engine 缺少 Ladybug native binding" >&2; return 1; }
+  case "${platform}" in
+    win-x64)
+      file "${dst}/gitnexus/node_modules/@ladybugdb/core/lbugjs.node" | grep -q "PE32+" || { echo "error: Windows engine Ladybug binding 不是 PE32+ DLL" >&2; return 1; }
+      [[ -f "${dst}/gitnexus/node_modules/tree-sitter/prebuilds/win32-x64/tree-sitter.node" ]] || { echo "error: Windows engine 缺少 tree-sitter win32-x64 runtime" >&2; return 1; }
+      [[ -f "${dst}/gitnexus/node_modules/tree-sitter-javascript/prebuilds/win32-x64/tree-sitter-javascript.node" ]] || { echo "error: Windows engine 缺少 tree-sitter-javascript win32-x64 runtime" >&2; return 1; }
+      ;;
+    darwin-arm64)
+      file "${dst}/gitnexus/node_modules/@ladybugdb/core/lbugjs.node" | grep -q "Mach-O.*arm64" || { echo "error: macOS arm64 engine Ladybug binding 不是 arm64 Mach-O" >&2; return 1; }
+      [[ -f "${dst}/gitnexus/node_modules/tree-sitter/prebuilds/darwin-arm64/tree-sitter.node" ]] || { echo "error: macOS arm64 engine 缺少 tree-sitter runtime" >&2; return 1; }
+      [[ -f "${dst}/gitnexus/node_modules/tree-sitter-javascript/prebuilds/darwin-arm64/tree-sitter-javascript.node" ]] || { echo "error: macOS arm64 engine 缺少 tree-sitter-javascript runtime" >&2; return 1; }
+      ;;
+    darwin-x64)
+      file "${dst}/gitnexus/node_modules/@ladybugdb/core/lbugjs.node" | grep -q "Mach-O.*x86_64" || { echo "error: macOS x64 engine Ladybug binding 不是 x86_64 Mach-O" >&2; return 1; }
+      [[ -f "${dst}/gitnexus/node_modules/tree-sitter/prebuilds/darwin-x64/tree-sitter.node" ]] || { echo "error: macOS x64 engine 缺少 tree-sitter runtime" >&2; return 1; }
+      [[ -f "${dst}/gitnexus/node_modules/tree-sitter-javascript/prebuilds/darwin-x64/tree-sitter-javascript.node" ]] || { echo "error: macOS x64 engine 缺少 tree-sitter-javascript runtime" >&2; return 1; }
+      ;;
+  esac
+}
+
+copy_node_resource() {
+  local platform archive url cache unpacked src dst
+  platform="$1"
+  dst="${TAURI_RESOURCES_DIR}/node"
+  mkdir -p "${TAURI_RESOURCES_DIR}" "${REPO_ROOT}/target/release-node"
+  rm -rf "${dst}"
+
+  case "${platform}" in
+    darwin-*)
+      archive="${REPO_ROOT}/target/release-node/node-${NODE_VERSION}-${platform}.tar.gz"
+      url="https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-${platform}.tar.gz"
+      if [[ ! -f "${archive}" ]]; then
+        echo "==> 下载 Node ${NODE_VERSION} (${platform})"
+        curl -fL "${url}" -o "${archive}"
+      fi
+      cache="$(mktemp -d)"
+      tar -xzf "${archive}" -C "${cache}"
+      unpacked="${cache}/node-${NODE_VERSION}-${platform}"
+      mkdir -p "${dst}"
+      cp -R "${unpacked}/bin" "${dst}/bin"
+      cp "${unpacked}/README.md" "${unpacked}/LICENSE" "${dst}/" 2>/dev/null || true
+      rm -rf "${cache}"
+      ;;
+    win-x64)
+      archive="${REPO_ROOT}/target/release-node/node-${NODE_VERSION}-${platform}.zip"
+      url="https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-${platform}.zip"
+      if [[ ! -f "${archive}" ]]; then
+        echo "==> 下载 Node ${NODE_VERSION} (${platform})"
+        curl -fL "${url}" -o "${archive}"
+      fi
+      cache="$(mktemp -d)"
+      unzip -q "${archive}" -d "${cache}"
+      unpacked="${cache}/node-${NODE_VERSION}-${platform}"
+      mkdir -p "${dst}"
+      cp "${unpacked}/node.exe" "${dst}/node.exe"
+      cp "${unpacked}/README.md" "${unpacked}/LICENSE" "${dst}/" 2>/dev/null || true
+      rm -rf "${cache}"
+      ;;
+    *)
+      echo "error: 不支持的 Node 平台 ${platform}" >&2
+      return 1
+      ;;
+  esac
+
+  if [[ "${platform}" = win-* ]]; then
+    [[ -f "${dst}/node.exe" ]] || { echo "error: Node runtime 缺少 node.exe" >&2; return 1; }
+  else
+    [[ -x "${dst}/bin/node" ]] || { echo "error: Node runtime 缺少 bin/node" >&2; return 1; }
+  fi
+  slim_node_resource "${platform}"
+}
+
+prepare_desktop_resources() {
+  local triple platform
+  triple="$1"
+  platform="$(platform_from_triple "${triple}")"
+  echo "==> 准备桌面内置资源 (${platform})"
+  copy_engine_resource "${platform}"
+  copy_node_resource "${platform}"
+}
+
 package_desktop() {
   local host_os host_arch desktop_triple app_path desktop_zip
   host_os="$(uname -s)"
@@ -91,6 +424,7 @@ package_desktop() {
       esac
 
       if [[ "${SKIP_BUILD}" -eq 0 ]]; then
+        prepare_desktop_resources "${desktop_triple}"
         echo "==> npm run tauri -- build --bundles app --ci --no-sign"
         (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- build --bundles app --ci --no-sign)
       fi
@@ -111,10 +445,14 @@ package_desktop() {
 }
 
 package_windows_desktop() {
-  local win_triple exe_path setup_src setup_exe portable_zip stage
+  local win_triple exe_path setup_src setup_exe portable_zip stage engine_src node_src
   win_triple="x86_64-pc-windows-msvc"
 
   if [[ "${SKIP_BUILD}" -eq 0 ]]; then
+    prepare_desktop_resources "${win_triple}"
+    rm -rf \
+      "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/engine" \
+      "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/node"
     local tauri_args=(build --target "${win_triple}" --bundles nsis --ci)
     if command -v cargo-xwin >/dev/null 2>&1 && [[ "$(uname -s)" = "Darwin" ]]; then
       tauri_args=(build --runner cargo-xwin --target "${win_triple}" --bundles nsis --ci)
@@ -138,7 +476,13 @@ package_windows_desktop() {
   rm -f "${portable_zip}"
   stage="$(mktemp -d)"
   cp "${exe_path}" "${stage}/aka-desktop.exe"
-  (cd "${stage}" && zip -q -X -r "${portable_zip}" aka-desktop.exe)
+  engine_src="${TAURI_RESOURCES_DIR}/engine"
+  node_src="${TAURI_RESOURCES_DIR}/node"
+  [[ -d "${engine_src}/gitnexus" ]] || { echo "error: 找不到 Windows portable 所需 engine 资源: ${engine_src}" >&2; return 1; }
+  [[ -f "${node_src}/node.exe" ]] || { echo "error: 找不到 Windows portable 所需 Node runtime: ${node_src}" >&2; return 1; }
+  cp -R "${engine_src}" "${stage}/engine"
+  cp -R "${node_src}" "${stage}/node"
+  (cd "${stage}" && zip -q -X -r "${portable_zip}" aka-desktop.exe engine node)
   rm -rf "${stage}"
   echo "==> ${portable_zip}"
 }
@@ -149,7 +493,7 @@ if [[ "${CHECKSUMS_ONLY}" -eq 1 ]]; then
   files=()
   while IFS= read -r f; do
     files+=("${f#./}")
-  done < <(find . -type f ! -name SHA256SUMS ! -name .DS_Store | sort)
+  done < <(find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name .DS_Store | sort)
   [[ ${#files[@]} -gt 0 ]] || { echo "error: dist/ 下没有可校验的产物" >&2; exit 1; }
   shasum -a 256 "${files[@]}" > SHA256SUMS
   echo "==> dist/SHA256SUMS"
