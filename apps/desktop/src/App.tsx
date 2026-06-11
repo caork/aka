@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
+import CodeWorkspace from "./components/CodeWorkspace";
 import DetailPanel from "./components/DetailPanel";
-import DocView from "./components/DocView";
 import GraphView from "./components/GraphView";
 import SearchBubble from "./components/SearchBubble";
 import SegmentedControl from "./components/SegmentedControl";
@@ -44,7 +44,7 @@ export default function App() {
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
             className="h-full"
           >
-            {view === "doc" && <DocView />}
+            {view === "code" && <CodeWorkspace />}
             {view === "graph" && <GraphView />}
           </motion.div>
         </AnimatePresence>

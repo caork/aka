@@ -227,6 +227,7 @@ async fn management_endpoints_are_501_on_mock() {
         Request::get("/api/graph/ego?repo=demo&id=demo:fn:main").body(Body::empty()).unwrap(),
         Request::get("/api/source?repo=demo&path=src/main.rs").body(Body::empty()).unwrap(),
         Request::get("/api/file/symbols?repo=demo&path=src/main.rs").body(Body::empty()).unwrap(),
+        Request::get("/api/files?repo=demo").body(Body::empty()).unwrap(),
         multipart_req(
             "/api/repos/import-zip",
             "XB",
@@ -386,6 +387,16 @@ impl Backend for ManagedBackend {
             ])
         };
         Ok(json!({ "path": path, "symbols": symbols }))
+    }
+    fn list_files(&self, repo: &str) -> anyhow::Result<Vec<aka_server::ops::FileEntry>> {
+        if repo != "demo" {
+            anyhow::bail!("未注册的仓库: {repo}");
+        }
+        // 故意逆序返回，断言 backend 自身保证升序（这里直接给已排序数据）。
+        Ok(vec![
+            aka_server::ops::FileEntry { path: "src/a.ts".into(), symbols: 3 },
+            aka_server::ops::FileEntry { path: "src/b.ts".into(), symbols: 1 },
+        ])
     }
     fn node_detail(&self, repo: &str, id: &str) -> anyhow::Result<Value> {
         Ok(json!({
@@ -683,6 +694,43 @@ async fn file_symbols_contract_and_errors() {
     // 缺必填参数 → 400。
     let res = managed()
         .oneshot(Request::get("/api/file/symbols?repo=demo").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn files_contract_and_errors() {
+    // 正常 → 200 + 合同形状（repo 回显 + files 按 path 升序，每项含 symbols 计数）。
+    let res = managed()
+        .oneshot(Request::get("/api/files?repo=demo").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["repo"], "demo");
+    let files = v["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0]["path"], "src/a.ts");
+    assert_eq!(files[0]["symbols"], 3);
+    assert_eq!(files[1]["path"], "src/b.ts");
+    assert_eq!(files[1]["symbols"], 1);
+    // 升序保证：path 单调递增。
+    let paths: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+    let mut sorted = paths.clone();
+    sorted.sort_unstable();
+    assert_eq!(paths, sorted);
+
+    // repo 不在 registry → 404。
+    let res = managed()
+        .oneshot(Request::get("/api/files?repo=nope").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // 缺必填参数 → 400。
+    let res = managed()
+        .oneshot(Request::get("/api/files").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);

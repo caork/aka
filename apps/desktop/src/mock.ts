@@ -89,6 +89,37 @@ export const MOCK_RESULTS: SearchResult[] = [
   },
 ];
 
+/** Mock 文件清单 —— `aka serve` 离线时让文件树有内容可渲染。 */
+export interface MockFile {
+  path: string;
+  symbols: number;
+}
+
+export const MOCK_FILES: MockFile[] = [
+  { path: "crates/aka-core/src/ingest.rs", symbols: 14 },
+  { path: "crates/aka-core/src/types.rs", symbols: 22 },
+  { path: "crates/aka-core/src/registry.rs", symbols: 9 },
+  { path: "crates/aka-graph/src/store.rs", symbols: 31 },
+  { path: "crates/aka-graph/src/csr.rs", symbols: 12 },
+  { path: "crates/aka-graph/src/adjacency.rs", symbols: 17 },
+  { path: "crates/aka-graph/src/traverse.rs", symbols: 20 },
+  { path: "crates/aka-graph/src/layout.rs", symbols: 8 },
+  { path: "crates/aka-search/src/hybrid.rs", symbols: 19 },
+  { path: "crates/aka-search/src/embed.rs", symbols: 6 },
+  { path: "crates/aka-search/src/tokenize.rs", symbols: 11 },
+  { path: "crates/aka-mcp/src/tools.rs", symbols: 28 },
+  { path: "crates/aka-mcp/src/ops.rs", symbols: 24 },
+  { path: "crates/aka-server/src/lib.rs", symbols: 33 },
+  { path: "apps/cli/src/main.rs", symbols: 7 },
+  { path: "apps/cli/src/backend.rs", symbols: 26 },
+  { path: "docs/contracts/artifacts.md", symbols: 0 },
+  { path: "README.md", symbols: 0 },
+];
+
+export function mockFiles(): MockFile[] {
+  return MOCK_FILES;
+}
+
 export function mockSearch(query: string): SearchResult[] {
   const q = query.trim().toLowerCase();
   if (!q) return MOCK_RESULTS;

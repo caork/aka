@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type ViewId = "doc" | "graph";
+export type ViewId = "code" | "graph";
 
 export type RepoStatus = "ready" | "indexing" | "failed" | "idle";
 
@@ -253,7 +253,7 @@ const MOCK_REPOS: Repo[] = [
 
 
 export const useAppStore = create<AppState>((set) => ({
-  view: "doc",
+  view: "code",
   setView: (view) => set({ view }),
 
   repos: MOCK_REPOS,
@@ -278,7 +278,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   codeTarget: null,
   openCode: (codeTarget) => {
-    set({ codeTarget, view: "doc", detailTarget: null });
+    set({ codeTarget, view: "code" });
   },
   closeCode: () => set({ codeTarget: null }),
 

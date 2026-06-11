@@ -77,9 +77,9 @@ function PanelBody({
   const closeDetail = useAppStore((s) => s.closeDetail);
   const openDetail = useAppStore((s) => s.openDetail);
   const requestEgo = useAppStore((s) => s.requestEgo);
-  const setQuery = useAppStore((s) => s.setQuery);
-  const setView = useAppStore((s) => s.setView);
+  const requestFocus = useAppStore((s) => s.requestFocus);
   const openCode = useAppStore((s) => s.openCode);
+  const view = useAppStore((s) => s.view);
   const repos = useAppStore((s) => s.repos);
   const panelRef = useRef<HTMLElement>(null);
 
@@ -199,14 +199,7 @@ function PanelBody({
       });
   };
 
-  const open360 = () => {
-    if (!target.name) return;
-    setQuery(target.name);
-    setView("doc");
-    closeDetail();
-  };
-
-  /* 「查看完整文件」→ Code 视图（GitHub 式全文预览，CodeView 另行实现） */
+  /* 「查看完整文件」→ Code 视图（GitHub 式全文预览） */
   const repoName = repos.find((r) => r.id === repoId)?.name ?? repoId;
   const openFullFile = () => {
     if (!file) return;
@@ -216,10 +209,18 @@ function PanelBody({
       line: line > 0 ? line : undefined,
       endLine: line > 0 ? endLine : undefined,
     });
-    closeDetail();
   };
 
+  /* 点击关系条目：Code 视图里同时把中栏跳到该节点（跟着图谱走），
+     并把抽屉重锚到它；Graph 视图里只重锚，不抢占画布。 */
   const pickRelation = (r: ContextRef) => {
+    if (view === "code" && r.file) {
+      openCode({
+        repo: repoName,
+        path: r.file,
+        line: r.line > 0 ? r.line : undefined,
+      });
+    }
     openDetail({
       id: r.id,
       name: r.name,
@@ -405,18 +406,17 @@ function PanelBody({
           {copied ? "已复制 ✓" : "复制路径"}
         </ActionButton>
         <button
-          onClick={() => requestEgo(target.id, target.name || target.id)}
+          onClick={() => requestFocus(target.id, target.name || target.id)}
           className="btn-primary focus-ring px-3 py-2 text-[12.5px] font-semibold"
-          data-testid="detail-ego"
+          data-testid="detail-focus-graph"
         >
-          Ego 视图
+          在 Graph 定位
         </button>
         <ActionButton
-          onClick={open360}
-          disabled={!target.name}
-          testId="open-360"
+          onClick={() => requestEgo(target.id, target.name || target.id)}
+          testId="detail-ego"
         >
-          打开 360° 视图
+          Ego 视图
         </ActionButton>
       </div>
     </motion.aside>

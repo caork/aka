@@ -184,6 +184,17 @@ fn basic_queries() {
     let in_file = store.nodes_in_file("src/main.rs").unwrap();
     let ids: Vec<_> = in_file.iter().map(|n| n.id.as_str()).collect();
     assert_eq!(ids, vec!["f1", "main", "a", "b", "c"]);
+
+    // 文件清单：仅含有 startLine 的节点计数，f1（File，无 startLine）不计；
+    // Community 节点无 filePath 被排除；按 path 升序。
+    let files = store.file_list().unwrap();
+    assert_eq!(
+        files,
+        vec![
+            ("src/lib/types.rs".to_string(), 3), // base + derived + m
+            ("src/main.rs".to_string(), 4),       // main + a + b + c（f1 不计）
+        ]
+    );
 }
 
 // ── 遍历 ─────────────────────────────────────────────────────────

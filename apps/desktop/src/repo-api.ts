@@ -205,6 +205,40 @@ export async function fetchSource(
   }
 }
 
+/* ---- 仓库文件清单（GET /api/files，合同：按 path 升序，symbols=定义数） ---- */
+
+export interface RepoFile {
+  /** 仓库内相对路径 */
+  path: string;
+  /** 该文件内有行号的定义节点数 */
+  symbols: number;
+}
+
+export type RepoFilesResult =
+  | { state: "ok"; files: RepoFile[] }
+  /** 404/501 —— 后端版本不支持该端点 */
+  | { state: "unsupported" }
+  | { state: "offline" };
+
+export async function fetchRepoFiles(
+  repo: string,
+  signal?: AbortSignal,
+): Promise<RepoFilesResult> {
+  const params = new URLSearchParams({ repo });
+  try {
+    const r = await fetch(`${SERVER}/api/files?${params.toString()}`, {
+      signal: signal ?? AbortSignal.timeout(6000),
+    });
+    if (r.status === 404 || r.status === 501) return { state: "unsupported" };
+    if (!r.ok) return { state: "offline" };
+    const body = (await r.json()) as { files?: RepoFile[] };
+    return { state: "ok", files: body.files ?? [] };
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    return { state: "offline" };
+  }
+}
+
 /* ---- 文件内符号（GET /api/file/symbols，合同：按 line 升序） ---- */
 
 export interface FileSymbol {

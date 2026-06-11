@@ -198,6 +198,15 @@ pub trait Backend: Send + Sync + 'static {
         anyhow::bail!("file_symbols not supported by this backend")
     }
 
+    /// 仓库源文件清单：每个含真实定义（start_line 非空）的文件 → 符号数，
+    /// 按 path 升序，确定性输出。file_path 为 NULL 的聚合节点排除。
+    /// repo 未注册 → Err（HTTP 面 404）。
+    /// 默认不支持——只有接了图存储的 Backend 才覆写。
+    fn list_files(&self, repo: &str) -> anyhow::Result<Vec<crate::ops::FileEntry>> {
+        let _ = repo;
+        anyhow::bail!("list_files not supported by this backend")
+    }
+
     /// 后台任务运行时状态：仓库名 → (status, detail)。
     /// status ∈ {indexing, failed}；不在 map 里 = ready。
     fn repo_runtime_status(&self) -> std::collections::HashMap<String, (String, Option<String>)> {
