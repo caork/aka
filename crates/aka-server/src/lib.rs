@@ -20,6 +20,7 @@
 //! - `GET    /api/graph/ego`           — ego 子图 `?repo=&id=&depth=&max_nodes=`
 //! - `GET    /api/source`              — 源码切片 `?repo=&path=&start=&end=`（1-based 含端）
 //! - `GET    /api/file/symbols`        — 文件内符号列表 `?repo=&path=`（line 升序）
+//! - `GET    /api/files`               — 仓库源文件清单 `?repo=`（path 升序 + 每文件符号数）
 //!
 //! 导入 / 更新都是 202 语义：handler 不等 analyze，任务在 Backend 内部线程执行，
 //! 进度经 `GET /api/repos` 的 `status` 字段（ready/indexing/failed）轮询。
@@ -40,7 +41,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-use aka_mcp::ops;
+pub use aka_mcp::ops;
 pub use aka_mcp::{
     clamp_render_nodes, Backend, MockBackend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef,
     MAX_RENDER_NODES, MIN_RENDER_NODES,
@@ -76,6 +77,7 @@ pub fn router(backend: Arc<dyn Backend>) -> Router {
         .route("/api/graph/ego", get(graph_ego))
         .route("/api/source", get(source_slice))
         .route("/api/file/symbols", get(file_symbols))
+        .route("/api/files", get(repo_files))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(cors_localhost())
         .with_state(backend)
@@ -491,6 +493,18 @@ struct FileSymbolsParams {
 /// repo 未注册 → 404；文件没有符号 → 200 空数组；Mock 不支持 → 501。
 async fn file_symbols(State(b): State<AppState>, Query(p): Query<FileSymbolsParams>) -> Response {
     run_managed(b, StatusCode::OK, move |b| b.file_symbols(&p.repo, &p.path)).await
+}
+
+#[derive(Debug, Deserialize)]
+struct FilesParams {
+    repo: String,
+}
+
+/// `GET /api/files?repo=` — 仓库源文件清单（文件树用）。
+/// 返回 `{repo, files: [{path, symbols}]}`，files 按 path 升序。
+/// repo 未注册 → 404；Mock 不支持 → 501。
+async fn repo_files(State(b): State<AppState>, Query(p): Query<FilesParams>) -> Response {
+    run_managed(b, StatusCode::OK, move |b| ops::list_files(b, &p.repo)).await
 }
 
 #[cfg(test)]

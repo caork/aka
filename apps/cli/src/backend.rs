@@ -1056,6 +1056,19 @@ impl Backend for AkaBackend {
         Ok(file_symbols_json(path, &rows))
     }
 
+    fn list_files(&self, repo: &str) -> Result<Vec<aka_mcp::ops::FileEntry>> {
+        let handles = self.targets(Some(repo))?;
+        let handle = handles.first().context("repo handle")?;
+        let rows = {
+            let store = handle.store.lock().expect("store lock");
+            store.file_list()?
+        };
+        Ok(rows
+            .into_iter()
+            .map(|(path, symbols)| aka_mcp::ops::FileEntry { path, symbols })
+            .collect())
+    }
+
     fn ego_graph(
         &self,
         repo: &str,

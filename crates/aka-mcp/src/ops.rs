@@ -209,6 +209,19 @@ pub struct AnalyzeOut {
     pub summary: String,
 }
 
+/// 源文件清单的一项：repo 内相对路径（与 nodes 表 file_path 一致）+ 含行号的符号数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct FileEntry {
+    pub path: String,
+    pub symbols: u32,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct FilesOut {
+    pub repo: String,
+    pub files: Vec<FileEntry>,
+}
+
 pub const DEFAULT_QUERY_LIMIT: usize = 10;
 pub const MAX_QUERY_LIMIT: usize = 100;
 pub const DEFAULT_REFS_LIMIT: usize = 25;
@@ -378,4 +391,12 @@ pub fn augment(b: &dyn Backend, repo: Option<&str>, query: &str) -> anyhow::Resu
 
 pub fn analyze(b: &dyn Backend, repo_path: &str) -> anyhow::Result<AnalyzeOut> {
     Ok(AnalyzeOut { summary: b.analyze(repo_path)? })
+}
+
+/// 某仓库的源文件清单（含符号数），按 path 升序。repo 未注册 → Err（HTTP 面 404）。
+pub fn list_files(b: &dyn Backend, repo: &str) -> anyhow::Result<FilesOut> {
+    Ok(FilesOut {
+        repo: repo.to_string(),
+        files: b.list_files(repo)?,
+    })
 }

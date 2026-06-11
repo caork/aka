@@ -14,6 +14,7 @@ import {
   type SymbolContext,
 } from "../search-api";
 import { useAppStore, type DetailTarget } from "../store";
+import EgoMiniGraph from "./EgoMiniGraph";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 /** 源码预览：目标行前后各取多少行上下文 */
@@ -79,9 +80,9 @@ function PanelBody({
   const closeDetail = useAppStore((s) => s.closeDetail);
   const openDetail = useAppStore((s) => s.openDetail);
   const requestEgo = useAppStore((s) => s.requestEgo);
-  const setQuery = useAppStore((s) => s.setQuery);
-  const setView = useAppStore((s) => s.setView);
+  const requestFocus = useAppStore((s) => s.requestFocus);
   const openCode = useAppStore((s) => s.openCode);
+  const view = useAppStore((s) => s.view);
   const repos = useAppStore((s) => s.repos);
   const panelRef = useRef<HTMLElement>(null);
 
@@ -218,14 +219,7 @@ function PanelBody({
       });
   };
 
-  const open360 = () => {
-    if (!target.name) return;
-    setQuery(target.name);
-    setView("doc");
-    closeDetail();
-  };
-
-  /* 「查看完整文件」→ Code 视图（GitHub 式全文预览，CodeView 另行实现） */
+  /* 「查看完整文件」→ Code 视图（GitHub 式全文预览） */
   const repoName = repos.find((r) => r.id === repoId)?.name ?? repoId;
   const openFullFile = () => {
     if (!file) return;
@@ -235,10 +229,18 @@ function PanelBody({
       line: line > 0 ? line : undefined,
       endLine: line > 0 ? endLine : undefined,
     });
-    closeDetail();
   };
 
+  /* 点击关系条目：Code 视图里同时把中栏跳到该节点（跟着图谱走），
+     并把抽屉重锚到它；Graph 视图里只重锚，不抢占画布。 */
   const pickRelation = (r: ContextRef) => {
+    if (view === "code" && r.file) {
+      openCode({
+        repo: repoName,
+        path: r.file,
+        line: r.line > 0 ? r.line : undefined,
+      });
+    }
     openDetail({
       id: r.id,
       name: r.name,
@@ -285,7 +287,7 @@ function PanelBody({
       animate={{ x: 0, opacity: 1 }}
       exit={{ x: 56, opacity: 0 }}
       transition={spring}
-      className="glass-panel absolute bottom-3 right-3 top-3 z-40 flex flex-col overflow-hidden"
+      className="glass-panel absolute bottom-3 right-3 top-14 z-40 flex flex-col overflow-hidden"
       style={{
         width,
         minWidth: MIN_WIDTH,
@@ -380,47 +382,77 @@ function PanelBody({
           </div>
         )}
 
-        {/* 源码预览 */}
-        <div className="mb-1.5 flex items-baseline justify-between">
-          <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
-            Source
-          </span>
-          {file && (
-            <button
-              onClick={openFullFile}
-              className="focus-ring -my-0.5 rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-medium text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)] hover:text-[#2E7CF6]"
-              title={`在 Code 视图打开 ${file}`}
-              data-testid="open-full-file"
-            >
-              查看完整文件 ↗
-            </button>
-          )}
-        </div>
-        {entry && !ownFile && (
-          <div
-            className="mono mb-1.5 flex items-baseline gap-2 px-0.5 text-[11px]"
-            data-testid="process-entry"
-          >
-            <span className="truncate text-ink-2" title={entry.file}>
-              {entry.file}
-              {entry.line > 0 ? `:${entry.line}` : ""}
-            </span>
-            <span className="flex-none text-[10px] text-ink-3">流程入口</span>
-          </div>
+        {/* 顶部互补视图：Code 模式 = ego 图谱；Graph 模式 = 源码预览 */}
+        {view === "code" ? (
+          <>
+            <div className="mb-1.5 flex items-baseline justify-between">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+                Graph
+              </span>
+              {file && (
+                <button
+                  onClick={openFullFile}
+                  className="focus-ring -my-0.5 rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-medium text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)] hover:text-[#2E7CF6]"
+                  title={`跳到 ${file} 的定义`}
+                  data-testid="open-full-file"
+                >
+                  跳到定义 ↗
+                </button>
+              )}
+            </div>
+            <EgoMiniGraph
+              centerName={target.name || target.id}
+              callers={ctx?.callers ?? []}
+              callees={ctx?.callees ?? []}
+              refs={ctx?.refs ?? []}
+              loading={relationsPending}
+              onPick={pickRelation}
+            />
+          </>
+        ) : (
+          <>
+            <div className="mb-1.5 flex items-baseline justify-between">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+                Source
+              </span>
+              {file && (
+                <button
+                  onClick={openFullFile}
+                  className="focus-ring -my-0.5 rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-medium text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)] hover:text-[#2E7CF6]"
+                  title={`在 Code 视图打开 ${file}`}
+                  data-testid="open-full-file"
+                >
+                  查看完整文件 ↗
+                </button>
+              )}
+            </div>
+            {entry && !ownFile && (
+              <div
+                className="mono mb-1.5 flex items-baseline gap-2 px-0.5 text-[11px]"
+                data-testid="process-entry"
+              >
+                <span className="truncate text-ink-2" title={entry.file}>
+                  {entry.file}
+                  {entry.line > 0 ? `:${entry.line}` : ""}
+                </span>
+                <span className="flex-none text-[10px] text-ink-3">流程入口</span>
+              </div>
+            )}
+            <SourcePreview
+              source={source}
+              hasFile={Boolean(file)}
+              resolving={!detailDone}
+              file={file}
+              focusStart={line}
+              focusEnd={endLine}
+              missingNote={
+                isProcess
+                  ? "合成流程节点，无单一源码位置"
+                  : "该节点没有关联的源码位置"
+              }
+            />
+          </>
         )}
-        <SourcePreview
-          source={source}
-          hasFile={Boolean(file)}
-          resolving={!detailDone}
-          file={file}
-          focusStart={line}
-          focusEnd={endLine}
-          missingNote={
-            isProcess
-              ? "合成流程节点，无单一源码位置"
-              : "该节点没有关联的源码位置"
-          }
-        />
 
         {steps ? (
           <>
@@ -516,18 +548,17 @@ function PanelBody({
           {copied ? "已复制 ✓" : "复制路径"}
         </ActionButton>
         <button
-          onClick={() => requestEgo(target.id, target.name || target.id)}
+          onClick={() => requestFocus(target.id, target.name || target.id)}
           className="btn-primary focus-ring px-3 py-2 text-[12.5px] font-semibold"
-          data-testid="detail-ego"
+          data-testid="detail-focus-graph"
         >
-          Ego 视图
+          在 Graph 定位
         </button>
         <ActionButton
-          onClick={open360}
-          disabled={!target.name}
-          testId="open-360"
+          onClick={() => requestEgo(target.id, target.name || target.id)}
+          testId="detail-ego"
         >
-          打开 360° 视图
+          Ego 视图
         </ActionButton>
       </div>
     </motion.aside>

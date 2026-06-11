@@ -2,7 +2,7 @@ import { motion } from "framer-motion";
 import type { ViewId } from "../store";
 
 const VIEWS: { id: ViewId; label: string }[] = [
-  { id: "doc", label: "Doc" },
+  { id: "code", label: "Code" },
   { id: "graph", label: "Graph" },
 ];
 

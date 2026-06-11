@@ -313,6 +313,20 @@ impl GraphStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// 源文件清单：每个含真实定义（start_line 非空）的文件 → 该文件的符号数。
+    /// file_path 为 NULL 的聚合节点排除；按 file_path 字典序升序，确定性输出。
+    pub fn file_list(&self) -> Result<Vec<(String, u32)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT file_path, COUNT(*) FROM nodes \
+             WHERE file_path IS NOT NULL AND start_line IS NOT NULL \
+             GROUP BY file_path ORDER BY file_path ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn node_count(&self) -> Result<u64> {
         let n: i64 = self
             .conn
