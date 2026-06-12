@@ -1,5 +1,6 @@
 //! aka desktop shell with an embedded Rust backend.
 
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -12,6 +13,55 @@ use serde_json::json;
 use tauri::{Manager, State};
 
 type BackendState = Arc<AkaBackend>;
+
+const AKA_HOME_DIR_NAME: &str = "aka-home";
+const APP_DATA_DIR_NAME: &str = "com.aka.desktop";
+
+fn fallback_app_data_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(APP_DATA_DIR_NAME);
+        }
+    }
+    if cfg!(target_os = "windows") {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join(APP_DATA_DIR_NAME);
+        }
+    }
+    if let Some(xdg_data_home) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(xdg_data_home).join(APP_DATA_DIR_NAME);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join(APP_DATA_DIR_NAME);
+    }
+    std::env::temp_dir().join(APP_DATA_DIR_NAME)
+}
+
+fn fallback_resource_dir() -> PathBuf {
+    let Ok(exe) = std::env::current_exe() else {
+        return std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+    };
+    if let Some(contents) = exe.parent().and_then(|macos| macos.parent()) {
+        let resources = contents.join("Resources");
+        if resources.exists() {
+            return resources;
+        }
+    }
+    if let Some(parent) = exe.parent() {
+        let resources = parent.join("resources");
+        if resources.exists() {
+            return resources;
+        }
+        return parent.to_path_buf();
+    }
+    std::env::temp_dir()
+}
 
 #[derive(Debug, Deserialize)]
 struct ImportRequest {
@@ -68,26 +118,31 @@ fn copy_zip_to_temp(path: &str) -> anyhow::Result<std::path::PathBuf> {
     Ok(tmp)
 }
 
-fn configure_desktop_runtime(app: &tauri::App) -> anyhow::Result<()> {
-    let data_dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&data_dir)?;
-    std::env::set_var("AKA_HOME", &data_dir);
+fn configure_desktop_runtime(app: &tauri::App) -> anyhow::Result<AkaBackend> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| fallback_app_data_dir());
+    let aka_home = app_data_dir.join(AKA_HOME_DIR_NAME);
+    std::fs::create_dir_all(&aka_home)?;
+    std::env::set_var("AKA_HOME", &aka_home);
 
-    let resource_dir = app.path().resource_dir()?;
-    let engine_dir = resource_dir.join("engine");
-    if engine_dir.join("gitnexus/package.json").exists() {
-        std::env::set_var("AKA_ENGINE_DIR", &engine_dir);
-    }
-
-    let node = if cfg!(windows) {
-        resource_dir.join("node/node.exe")
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .unwrap_or_else(|_| fallback_resource_dir());
+    let bundled_engine = resource_dir.join("engine");
+    let has_bundled_engine = bundled_engine.join("codebase-memory-mcp").exists()
+        || bundled_engine.join("codebase-memory-mcp.exe").exists()
+        || bundled_engine.join("build/c/codebase-memory-mcp").exists()
+        || bundled_engine
+            .join("build/c/codebase-memory-mcp.exe")
+            .exists();
+    Ok(if has_bundled_engine {
+        AkaBackend::with_engine_dir(bundled_engine)
     } else {
-        resource_dir.join("node/bin/node")
-    };
-    if node.exists() {
-        std::env::set_var("AKA_NODE", &node);
-    }
-    Ok(())
+        AkaBackend::new()
+    })
 }
 
 #[tauri::command]
@@ -106,7 +161,14 @@ async fn query(
         .unwrap_or(ops::DEFAULT_QUERY_LIMIT)
         .clamp(1, ops::MAX_QUERY_LIMIT);
     run_backend(backend, move |b| {
-        ops::query(b.as_ref(), repo.as_deref(), &query, limit)
+        ops::query(
+            b.as_ref(),
+            repo.as_deref(),
+            &query,
+            limit,
+            ops::DEFAULT_QUERY_PROCESS_SYMBOL_LIMIT,
+            false,
+        )
     })
     .await
 }
@@ -312,10 +374,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            configure_desktop_runtime(app).map_err(|e| {
+            let backend = configure_desktop_runtime(app).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("configure desktop runtime: {e:#}"))
             })?;
-            app.manage(Arc::new(AkaBackend::new()));
+            app.manage(Arc::new(backend));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

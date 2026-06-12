@@ -26,6 +26,42 @@ pub struct SearchHit {
     pub snippet: Option<String>,
 }
 
+/// 源码行级命中（code search 的 raw match + surrounding context）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeLineMatch {
+    pub line: u32,
+    pub text: String,
+    /// true = query/regex directly matched this line; false = surrounding context.
+    #[serde(default)]
+    pub matched: bool,
+}
+
+/// 源码搜索命中：按节点/文件聚合，携带 raw match lines。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeSearchHit {
+    pub node_id: String,
+    pub name: String,
+    pub label: String,
+    pub file_path: String,
+    pub start_line: u32,
+    pub score: f32,
+    pub matches: Vec<CodeLineMatch>,
+}
+
+/// 顶层目录命中分布。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryCount {
+    pub dir: String,
+    pub count: usize,
+}
+
+/// 源码搜索完整结果（raw matches + 目录分布）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeSearchResult {
+    pub hits: Vec<CodeSearchHit>,
+    pub directories: Vec<DirectoryCount>,
+}
+
 /// 图遍历得到的符号引用（callers / callees / references / impact）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SymbolRef {
@@ -53,6 +89,41 @@ pub struct ProcessHit {
     pub step_count: Option<u32>,
 }
 
+/// Query 命中的补充图谱信息。用于把 GitNexus 的 query 语义（流程分组、
+/// 社区/模块提示、可选源码内容）压到一次批量取数里。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct QueryEnrichment {
+    /// 节点所属流程；一个符号可参与多条流程。
+    pub processes: Vec<ProcessHit>,
+    /// Community/模块名（GitNexus 输出里的 `module`），没有则省略。
+    pub module: Option<String>,
+    /// Community cohesion，作为流程排序的轻微加权信号。
+    pub cohesion: f32,
+    /// include_content=true 时返回的符号源码切片。
+    pub content: Option<String>,
+}
+
+/// 后台导入 / 更新任务的实时进度。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepoProgress {
+    /// 当前阶段：queued / checkout / extract / engine / index / register / done。
+    pub stage: String,
+    /// 给 UI 展示的当前动作。
+    pub message: String,
+    /// 0..100 的粗略总体进度。
+    pub percent: f32,
+    /// 当前阶段内的计数（engine 事件提供时携带）。
+    pub current: Option<u64>,
+    /// 当前阶段内的总量（engine 事件提供时携带）。
+    pub total: Option<u64>,
+    pub files: u64,
+    pub nodes: u64,
+    pub edges: u64,
+    pub chunks: u64,
+    /// 最近日志尾部，最新的在最后。
+    pub logs: Vec<String>,
+}
+
 /// 已注册仓库的概要信息。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoInfo {
@@ -73,6 +144,8 @@ pub struct RepoInfo {
     pub detail: Option<String>,
     /// per-repo 预览渲染节点预算；None = 默认 50_000。
     pub render_max_nodes: Option<u32>,
+    /// status = indexing / failed 时携带的实时进度和日志。
+    pub progress: Option<RepoProgress>,
 }
 
 /// per-repo 设置更新（settings 端点与 Backend 接缝共用一个形状）。
@@ -85,33 +158,67 @@ pub struct RepoSettingsUpdate {
     pub render_max_nodes: Option<u32>,
 }
 
-/// 数据层抽象。所有工具（MCP 八件套 + HTTP API）只依赖这个 trait。
+/// 数据层抽象。所有工具（MCP 九工具 + HTTP API）只依赖这个 trait。
 pub trait Backend: Send + Sync + 'static {
     fn list_repos(&self) -> anyhow::Result<Vec<RepoInfo>>;
 
     /// 关键词 / 语义混合检索。
-    fn search(&self, repo: Option<&str>, query: &str, limit: usize)
-        -> anyhow::Result<Vec<SearchHit>>;
+    fn search(
+        &self,
+        repo: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SearchHit>>;
+
+    /// 行级源码搜索：返回 raw match lines 与顶层目录分布。
+    fn search_code(
+        &self,
+        repo: Option<&str>,
+        query: &str,
+        limit: usize,
+        context: usize,
+        regex: bool,
+        path_filter: Option<&str>,
+    ) -> anyhow::Result<CodeSearchResult> {
+        let _ = (repo, query, limit, context, regex, path_filter);
+        anyhow::bail!("search_code not supported by this backend")
+    }
 
     /// 按符号名精确定位定义（可能重名，返回多条）。
-    fn find_definition(&self, repo: Option<&str>, symbol: &str)
-        -> anyhow::Result<Vec<SearchHit>>;
+    fn find_definition(&self, repo: Option<&str>, symbol: &str) -> anyhow::Result<Vec<SearchHit>>;
 
     /// 指向该符号的所有引用边（任意边类型，一跳）。
-    fn references(&self, repo: Option<&str>, symbol: &str, limit: usize)
-        -> anyhow::Result<Vec<SymbolRef>>;
+    fn references(
+        &self,
+        repo: Option<&str>,
+        symbol: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SymbolRef>>;
 
     /// 反向调用链（谁调用了它），BFS 到 `depth` 跳。
-    fn callers(&self, repo: Option<&str>, symbol: &str, depth: u32)
-        -> anyhow::Result<Vec<SymbolRef>>;
+    fn callers(
+        &self,
+        repo: Option<&str>,
+        symbol: &str,
+        depth: u32,
+    ) -> anyhow::Result<Vec<SymbolRef>>;
 
     /// 正向调用链（它调用了谁），BFS 到 `depth` 跳。
-    fn callees(&self, repo: Option<&str>, symbol: &str, depth: u32)
-        -> anyhow::Result<Vec<SymbolRef>>;
+    fn callees(
+        &self,
+        repo: Option<&str>,
+        symbol: &str,
+        depth: u32,
+    ) -> anyhow::Result<Vec<SymbolRef>>;
 
     /// 改动影响面：可达的反向依赖集合，截断到 `limit`。
-    fn impact(&self, repo: Option<&str>, symbol: &str, depth: u32, limit: usize)
-        -> anyhow::Result<Vec<SymbolRef>>;
+    fn impact(
+        &self,
+        repo: Option<&str>,
+        symbol: &str,
+        depth: u32,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SymbolRef>>;
 
     /// 节点所属的执行流程（沿 `符号-[STEP_IN_PROCESS]->Process` 边查归属）。
     /// `node_id` 是图谱节点 id（不是符号名）；节点不存在或没有流程数据
@@ -119,6 +226,30 @@ pub trait Backend: Send + Sync + 'static {
     fn processes_of(&self, repo: Option<&str>, node_id: &str) -> anyhow::Result<Vec<ProcessHit>> {
         let _ = (repo, node_id);
         Ok(Vec::new())
+    }
+
+    /// 批量补充 query 结果所需的流程、模块/社区、可选源码内容。
+    ///
+    /// 默认实现逐个调用 `processes_of`，保证旧 Backend 不破；真实 Backend
+    /// 应覆写为批量查询以避免 GitNexus 曾经修过的 N+1 热点。
+    fn query_enrichment(
+        &self,
+        repo: Option<&str>,
+        node_ids: &[String],
+        include_content: bool,
+    ) -> anyhow::Result<std::collections::HashMap<String, QueryEnrichment>> {
+        let _ = include_content;
+        let mut out = std::collections::HashMap::new();
+        for id in node_ids {
+            out.insert(
+                id.clone(),
+                QueryEnrichment {
+                    processes: self.processes_of(repo, id)?,
+                    ..QueryEnrichment::default()
+                },
+            );
+        }
+        Ok(out)
     }
 
     /// 触发（重新）分析一个仓库，返回任务描述 / 结果摘要。

@@ -10,14 +10,16 @@ use aka_core::types::ChunkRec;
 use aka_search::{SearchIndex, SearchIndexWriter};
 
 const VERBS: [&str; 12] = [
-    "run", "build", "parse", "load", "fetch", "merge", "rank", "cache", "resolve", "emit",
-    "scan", "index",
+    "run", "build", "parse", "load", "fetch", "merge", "rank", "cache", "resolve", "emit", "scan",
+    "index",
 ];
 const NOUNS: [&str; 12] = [
-    "pipeline", "repo", "kernel", "graph", "vector", "token", "file", "segment", "query",
-    "node", "edge", "chunk",
+    "pipeline", "repo", "kernel", "graph", "vector", "token", "file", "segment", "query", "node",
+    "edge", "chunk",
 ];
-const SUFFIXES: [&str; 6] = ["Manager", "Builder", "Handler", "Worker", "Service", "Engine"];
+const SUFFIXES: [&str; 6] = [
+    "Manager", "Builder", "Handler", "Worker", "Service", "Engine",
+];
 
 fn synth_chunks(n: usize) -> impl Iterator<Item = ChunkRec> {
     (0..n).map(|i| {
@@ -86,7 +88,10 @@ fn run_perf(n_chunks: usize, n_queries: usize) {
         total_ms / n_queries as f64,
         max_ms
     );
-    assert!(max_ms < 50.0, "single query took {max_ms:.2}ms (limit 50ms)");
+    assert!(
+        max_ms < 50.0,
+        "single query took {max_ms:.2}ms (limit 50ms)"
+    );
 }
 
 #[test]

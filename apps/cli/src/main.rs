@@ -42,6 +42,20 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// 行级源码搜索（raw match lines + 目录分布）
+    SearchCode {
+        query: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        #[arg(long, default_value_t = 1)]
+        context: usize,
+        #[arg(long)]
+        regex: bool,
+        #[arg(long)]
+        path_filter: Option<String>,
+    },
     /// 符号 360°：定义 + callers + callees + 引用
     Context {
         symbol: String,
@@ -82,6 +96,14 @@ fn main() -> Result<()> {
         Cmd::Index { path } => run_index(path),
         Cmd::Repos => run_repos(),
         Cmd::Search { query, repo, limit } => run_search(query, repo, limit),
+        Cmd::SearchCode {
+            query,
+            repo,
+            limit,
+            context,
+            regex,
+            path_filter,
+        } => run_search_code(query, repo, limit, context, regex, path_filter),
         Cmd::Context { symbol, repo } => run_context(symbol, repo),
         Cmd::Lod {
             repo,
@@ -145,6 +167,45 @@ fn run_search(query: String, repo: Option<String>, limit: usize) -> Result<()> {
     Ok(())
 }
 
+fn run_search_code(
+    query: String,
+    repo: Option<String>,
+    limit: usize,
+    context: usize,
+    regex: bool,
+    path_filter: Option<String>,
+) -> Result<()> {
+    let backend = AkaBackend::new();
+    let result = backend.search_code(
+        repo.as_deref(),
+        &query,
+        limit,
+        context.min(aka_mcp::ops::MAX_CODE_CONTEXT),
+        regex,
+        path_filter.as_deref(),
+    )?;
+    if result.hits.is_empty() {
+        eprintln!("无结果");
+        return Ok(());
+    }
+    println!("── directories");
+    for d in &result.directories {
+        println!("  {:5} {}", d.count, d.dir);
+    }
+    println!("── matches");
+    for h in result.hits {
+        println!(
+            "{:8.3}  {:10} {:24} {}:{}",
+            h.score, h.label, h.name, h.file_path, h.start_line
+        );
+        for m in h.matches {
+            let mark = if m.matched { "*" } else { " " };
+            println!("        {mark} {:>5}: {}", m.line, m.text);
+        }
+    }
+    Ok(())
+}
+
 fn run_context(symbol: String, repo: Option<String>) -> Result<()> {
     let backend = AkaBackend::new();
     let repo = repo.as_deref();
@@ -152,7 +213,10 @@ fn run_context(symbol: String, repo: Option<String>) -> Result<()> {
     let defs = backend.find_definition(repo, &symbol)?;
     println!("── 定义 ({})", defs.len());
     for d in &defs {
-        println!("  {:10} {:24} {}:{}", d.label, d.name, d.file_path, d.start_line);
+        println!(
+            "  {:10} {:24} {}:{}",
+            d.label, d.name, d.file_path, d.start_line
+        );
     }
     let callers = backend.callers(repo, &symbol, 1)?;
     println!("── callers ({})", callers.len());
@@ -167,7 +231,10 @@ fn run_context(symbol: String, repo: Option<String>) -> Result<()> {
     let refs = backend.references(repo, &symbol, 20)?;
     println!("── 引用 ({})", refs.len());
     for r in &refs {
-        println!("  [{}] {:20} {}:{}", r.edge_type, r.name, r.file_path, r.start_line);
+        println!(
+            "  [{}] {:20} {}:{}",
+            r.edge_type, r.name, r.file_path, r.start_line
+        );
     }
     Ok(())
 }

@@ -1,11 +1,11 @@
-//! 八个工具 handler 的输出 JSON 形状测试（直接调用，不走 transport）。
+//! 九个工具 handler 的输出 JSON 形状测试（直接调用，不走 transport）。
 
 use std::sync::Arc;
 
 use aka_mcp::backend::{Backend, RepoInfo, SearchHit, SymbolRef};
 use aka_mcp::service::{
-    AkaMcpServer, AnalyzeParams, AugmentParams, ImpactParams, QueryParams, ReferencesParams,
-    SymbolParams,
+    AkaMcpServer, AnalyzeParams, AugmentParams, CodeSearchParams, ImpactParams, QueryParams,
+    ReferencesParams, SymbolParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -58,11 +58,18 @@ async fn query_shape() {
             repo: Some("fixture".into()),
             query: "handle".into(),
             limit: None,
+            task_context: None,
+            goal: None,
+            max_symbols: None,
+            include_content: None,
         }))
         .await
         .unwrap();
     let v = text_json(&res);
-    assert_eq!(keys(&v), ["hits"]);
+    assert_eq!(
+        keys(&v),
+        ["definitions", "hits", "process_symbols", "processes"]
+    );
     let hits = v["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
     let hit = &hits[0];
@@ -80,6 +87,27 @@ async fn query_shape() {
         .map(|p| p.as_str().unwrap())
         .collect();
     assert_eq!(procs, ["main → read_file", "main → write_output"]);
+
+    let processes = v["processes"].as_array().unwrap();
+    assert_eq!(processes.len(), 2);
+    assert_eq!(processes[0]["id"], "fixture:proc:request-flow");
+    assert_eq!(processes[0]["summary"], "main → read_file");
+    assert_eq!(processes[0]["process_type"], "call_chain");
+    assert_eq!(processes[0]["step_count"], 4);
+
+    let process_symbols = v["process_symbols"].as_array().unwrap();
+    assert_eq!(process_symbols.len(), 1);
+    assert_eq!(process_symbols[0]["name"], "handle_request");
+    assert_eq!(
+        process_symbols[0]["process_id"],
+        "fixture:proc:request-flow"
+    );
+    assert_eq!(process_symbols[0]["step_index"], 2);
+    assert_eq!(process_symbols[0]["type"], "Function");
+    assert_eq!(process_symbols[0]["filePath"], "src/handler.rs");
+    assert_eq!(process_symbols[0]["startLine"], 12);
+    assert_eq!(process_symbols[0]["module"], "IO Pipeline");
+    assert!(v["definitions"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -90,6 +118,10 @@ async fn query_omits_processes_when_empty() {
             repo: Some("beta".into()),
             query: "beta_main".into(),
             limit: None,
+            task_context: None,
+            goal: None,
+            max_symbols: None,
+            include_content: None,
         }))
         .await
         .unwrap();
@@ -97,6 +129,83 @@ async fn query_omits_processes_when_empty() {
     let hits = v["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].get("processes").is_none());
+    assert!(v["processes"].as_array().unwrap().is_empty());
+    assert!(v["process_symbols"].as_array().unwrap().is_empty());
+    assert_eq!(v["definitions"].as_array().unwrap()[0]["name"], "beta_main");
+}
+
+#[tokio::test]
+async fn query_honors_max_symbols_and_include_content() {
+    let res = server()
+        .query(Parameters(QueryParams {
+            repo: Some("fixture".into()),
+            query: "main".into(),
+            limit: Some(1),
+            task_context: None,
+            goal: None,
+            max_symbols: Some(1),
+            include_content: Some(true),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["processes"].as_array().unwrap().len(), 1);
+    let process_symbols = v["process_symbols"].as_array().unwrap();
+    assert_eq!(process_symbols.len(), 1);
+    assert_eq!(process_symbols[0]["name"], "main");
+    assert!(process_symbols[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("fn main"));
+}
+
+#[tokio::test]
+async fn search_code_shape() {
+    let res = server()
+        .search_code(Parameters(CodeSearchParams {
+            repo: Some("fixture".into()),
+            query: "parse_config".into(),
+            limit: Some(5),
+            context: Some(1),
+            regex: false,
+            path_filter: Some("src/".into()),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(keys(&v), ["directories", "hits"]);
+    let dirs = v["directories"].as_array().unwrap();
+    assert_eq!(dirs[0]["dir"], "src");
+    assert_eq!(dirs[0]["count"], 3);
+    let hits = v["hits"].as_array().unwrap();
+    assert!(!hits.is_empty());
+    assert!(hits.iter().any(|h| h["file"] == "src/handler.rs"));
+    let first = &hits[0];
+    let matches = first["matches"].as_array().unwrap();
+    assert!(matches
+        .iter()
+        .any(|m| { m["matched"] == true && m["text"].as_str().unwrap().contains("parse_config") }));
+    assert!(
+        matches.iter().any(|m| m["matched"] == false),
+        "context lines should be present and marked separately"
+    );
+}
+
+#[tokio::test]
+async fn search_code_regex_shape() {
+    let res = server()
+        .search_code(Parameters(CodeSearchParams {
+            repo: Some("fixture".into()),
+            query: "parse_[a-z]+".into(),
+            limit: None,
+            context: None,
+            regex: true,
+            path_filter: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert!(!v["hits"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -111,10 +220,23 @@ async fn context_shape() {
     let v = text_json(&res);
     assert_eq!(v["symbol"], "handle_request");
     assert_eq!(v["defs"].as_array().unwrap().len(), 1);
-    let callers: Vec<_> = v["callers"].as_array().unwrap().iter().map(|r| &r["name"]).collect();
+    let callers: Vec<_> = v["callers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["name"])
+        .collect();
     assert_eq!(callers, [&Value::from("main")]);
-    let callees: Vec<_> = v["callees"].as_array().unwrap().iter().map(|r| &r["name"]).collect();
-    assert_eq!(callees, [&Value::from("parse_config"), &Value::from("write_output")]);
+    let callees: Vec<_> = v["callees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["name"])
+        .collect();
+    assert_eq!(
+        callees,
+        [&Value::from("parse_config"), &Value::from("write_output")]
+    );
     assert_eq!(v["refs"].as_array().unwrap()[0]["edge"], "CALLS");
     // 流程归属：ProcessHit 原样序列化（process_id/name/process_type/step/step_count）。
     let procs = v["processes"].as_array().unwrap();
@@ -144,7 +266,10 @@ async fn find_definition_shape() {
 
     // 未知符号 → 空数组而不是错误。
     let res = server()
-        .find_definition(Parameters(SymbolParams { repo: None, symbol: "nope".into() }))
+        .find_definition(Parameters(SymbolParams {
+            repo: None,
+            symbol: "nope".into(),
+        }))
         .await
         .unwrap();
     assert!(text_json(&res)["defs"].as_array().unwrap().is_empty());
@@ -221,7 +346,9 @@ async fn impact_affected_processes_empty_without_membership() {
 #[tokio::test]
 async fn analyze_shape() {
     let res = server()
-        .analyze(Parameters(AnalyzeParams { repo_path: "/tmp/fixture".into() }))
+        .analyze(Parameters(AnalyzeParams {
+            repo_path: "/tmp/fixture".into(),
+        }))
         .await
         .unwrap();
     let v = text_json(&res);
@@ -232,7 +359,10 @@ async fn analyze_shape() {
 #[tokio::test]
 async fn augment_shape() {
     let res = server()
-        .augment(Parameters(AugmentParams { repo: None, query: "main".into() }))
+        .augment(Parameters(AugmentParams {
+            repo: None,
+            query: "main".into(),
+        }))
         .await
         .unwrap();
     let v = text_json(&res);
@@ -241,8 +371,12 @@ async fn augment_shape() {
     let first = &items[0];
     assert_eq!(first["hit"]["name"], "main");
     assert!(first["callers"].as_array().unwrap().is_empty());
-    let callees: Vec<_> =
-        first["callees"].as_array().unwrap().iter().map(|r| &r["name"]).collect();
+    let callees: Vec<_> = first["callees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["name"])
+        .collect();
     assert_eq!(callees, [&Value::from("handle_request")]);
 }
 
@@ -269,13 +403,7 @@ impl Backend for FailBackend {
     fn callees(&self, _: Option<&str>, _: &str, _: u32) -> anyhow::Result<Vec<SymbolRef>> {
         anyhow::bail!("index corrupted")
     }
-    fn impact(
-        &self,
-        _: Option<&str>,
-        _: &str,
-        _: u32,
-        _: usize,
-    ) -> anyhow::Result<Vec<SymbolRef>> {
+    fn impact(&self, _: Option<&str>, _: &str, _: u32, _: usize) -> anyhow::Result<Vec<SymbolRef>> {
         anyhow::bail!("index corrupted")
     }
     fn analyze(&self, _: &str) -> anyhow::Result<String> {
@@ -287,7 +415,15 @@ impl Backend for FailBackend {
 async fn backend_error_is_in_band() {
     let server = AkaMcpServer::new(Arc::new(FailBackend));
     let res = server
-        .query(Parameters(QueryParams { repo: None, query: "x".into(), limit: None }))
+        .query(Parameters(QueryParams {
+            repo: None,
+            query: "x".into(),
+            limit: None,
+            task_context: None,
+            goal: None,
+            max_symbols: None,
+            include_content: None,
+        }))
         .await
         .unwrap(); // 协议层 Ok
     assert_eq!(res.is_error, Some(true));

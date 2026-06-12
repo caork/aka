@@ -14,6 +14,7 @@ import {
   type OverlayItem,
 } from "../graph/renderer";
 import { useAppStore } from "../store";
+import IndexingPanel from "./IndexingPanel";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 
@@ -94,6 +95,7 @@ export default function GraphView() {
   const renderBudget = repo?.renderMaxNodes ?? null;
   /** 仓库总节点数（来自 /api/repos stats），用于徽章 "已渲染 N / 总数" */
   const totalNodes = repo?.symbols ?? 0;
+  const repoPending = repo?.status === "indexing" || repo?.status === "failed";
 
   /* ---- rig：渲染器 / 相机 / 交互，仅挂载一次 ---- */
   useEffect(() => {
@@ -397,6 +399,23 @@ export default function GraphView() {
       setEmptyReason("missing");
       return;
     }
+    if (repoPending) {
+      rig.renderer.clearData();
+      rig.labels.clear();
+      rig.data = null;
+      rig.grid = null;
+      rig.beacons = [];
+      rig.centerIndex = -1;
+      rig.selectedIndex = -1;
+      rig.hoverIndex = -1;
+      setHover(null);
+      setLoading(false);
+      setEmptyReason("none");
+      setEgo(null);
+      setEgoError(null);
+      setStats((s) => ({ ...s, nodes: 0, edges: 0 }));
+      return;
+    }
     /* repo 切换时退出旧 repo 的 ego 模式（effect 会以 ego=null 重跑） */
     if (ego && ego.repoId !== repoId) {
       setEgo(null);
@@ -457,7 +476,7 @@ export default function GraphView() {
       cancelled = true;
       ctrl.abort();
     };
-  }, [repoId, repo, ego, renderBudget]);
+  }, [repoId, repo, repoPending, ego, renderBudget]);
 
   /* ---- DetailPanel「Ego 视图」发来的下钻请求 ---- */
   useEffect(() => {
@@ -563,6 +582,10 @@ export default function GraphView() {
         ref={labelRef}
         className="pointer-events-none absolute inset-0 h-full w-full"
       />
+      <div
+        aria-hidden
+        className="graph-top-glass pointer-events-none absolute inset-x-0 top-0 z-[5]"
+      />
 
       <div
         className="pointer-events-none absolute inset-x-0 top-0 z-[5] h-[58px]"
@@ -662,10 +685,20 @@ export default function GraphView() {
             </div>
           </motion.div>
         )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {loading && (
+        {repoPending && repo && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={spring}
+            className="absolute inset-0 z-10"
+            data-graph-ui
+            data-testid="graph-indexing-panel"
+          >
+            <IndexingPanel repo={repo} />
+          </motion.div>
+        )}
+        {loading && repoId && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}

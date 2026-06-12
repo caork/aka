@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use aka_server::{Backend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef, router};
+use aka_server::{router, Backend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef};
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tower::ServiceExt;
 
 mod support;
@@ -60,7 +60,10 @@ async fn repos_lists_fixture_data() {
     assert!(repos[0]["source"]["url"].is_null());
     assert!(repos[0]["detail"].is_null());
     // render_max_nodes 必须显式出现且为 null（未设置 = 默认）。
-    assert!(repos[0].as_object().unwrap().contains_key("render_max_nodes"));
+    assert!(repos[0]
+        .as_object()
+        .unwrap()
+        .contains_key("render_max_nodes"));
     assert!(repos[0]["render_max_nodes"].is_null());
     assert_eq!(repos[1]["source"]["kind"], "git");
     assert_eq!(repos[1]["source"]["url"], "https://example.com/beta.git");
@@ -82,6 +85,44 @@ async fn query_returns_hits() {
     assert_eq!(hits[0]["name"], "handle_request");
     assert_eq!(hits[0]["file"], "src/handler.rs");
     assert_eq!(hits[0]["line"], 12);
+    let processes = v["processes"].as_array().unwrap();
+    assert_eq!(processes[0]["id"], "fixture:proc:request-flow");
+    assert_eq!(processes[0]["summary"], "main → read_file");
+    let process_symbols = v["process_symbols"].as_array().unwrap();
+    assert_eq!(process_symbols[0]["name"], "handle_request");
+    assert_eq!(process_symbols[0]["step_index"], 2);
+    assert_eq!(process_symbols[0]["type"], "Function");
+    assert_eq!(process_symbols[0]["filePath"], "src/handler.rs");
+    assert_eq!(process_symbols[0]["startLine"], 12);
+    assert_eq!(process_symbols[0]["module"], "IO Pipeline");
+    assert!(v["definitions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn search_code_returns_raw_matches_and_directory_distribution() {
+    let res = app()
+        .oneshot(post_json(
+            "/api/search/code",
+            json!({ "repo": "fixture", "query": "parse_config", "context": 1 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    let dirs = v["directories"].as_array().unwrap();
+    assert_eq!(dirs[0]["dir"], "src");
+    assert_eq!(dirs[0]["count"], 3);
+    let hits = v["hits"].as_array().unwrap();
+    assert!(!hits.is_empty());
+    assert!(hits.iter().any(|h| h["file"] == "src/handler.rs"));
+    let matches = hits[0]["matches"].as_array().unwrap();
+    assert!(matches
+        .iter()
+        .any(|m| { m["matched"] == true && m["text"].as_str().unwrap().contains("parse_config") }));
+    assert!(
+        matches.iter().any(|m| m["matched"] == false),
+        "context lines should be present and marked separately"
+    );
 }
 
 #[tokio::test]
@@ -155,11 +196,10 @@ async fn cors_allows_localhost_only() {
         )
         .await
         .unwrap();
-    assert!(
-        res.headers()
-            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-            .is_none()
-    );
+    assert!(res
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .is_none());
 }
 
 // ---- 仓库管理端点：Mock 默认不支持 → 501；参数错误 → 400 ----
@@ -168,10 +208,8 @@ fn multipart_body(boundary: &str, name: Option<&str>, file: Option<&[u8]>) -> Ve
     let mut body = Vec::new();
     if let Some(n) = name {
         body.extend_from_slice(
-            format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n{n}\r\n"
-            )
-            .as_bytes(),
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n{n}\r\n")
+                .as_bytes(),
         );
     }
     if let Some(f) = file {
@@ -223,15 +261,35 @@ async fn import_invalid_kind_is_400() {
 async fn management_endpoints_are_501_on_fixture() {
     // Mock 不覆写仓库管理方法 → 默认 bail "not supported" → 501。
     let cases: Vec<Request<Body>> = vec![
-        post_json("/api/repos/import", json!({ "kind": "git", "url": "https://x/y.git" })),
-        post_json("/api/repos/fixture/settings", json!({ "embeddings_enabled": true })),
-        Request::post("/api/repos/fixture/update").body(Body::empty()).unwrap(),
-        Request::delete("/api/repos/fixture").body(Body::empty()).unwrap(),
-        Request::get("/api/node?repo=fixture&id=fixture:fn:main").body(Body::empty()).unwrap(),
-        Request::get("/api/graph/ego?repo=fixture&id=fixture:fn:main").body(Body::empty()).unwrap(),
-        Request::get("/api/source?repo=fixture&path=src/main.rs").body(Body::empty()).unwrap(),
-        Request::get("/api/file/symbols?repo=fixture&path=src/main.rs").body(Body::empty()).unwrap(),
-        Request::get("/api/files?repo=fixture").body(Body::empty()).unwrap(),
+        post_json(
+            "/api/repos/import",
+            json!({ "kind": "git", "url": "https://x/y.git" }),
+        ),
+        post_json(
+            "/api/repos/fixture/settings",
+            json!({ "embeddings_enabled": true }),
+        ),
+        Request::post("/api/repos/fixture/update")
+            .body(Body::empty())
+            .unwrap(),
+        Request::delete("/api/repos/fixture")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/api/node?repo=fixture&id=fixture:fn:main")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/api/graph/ego?repo=fixture&id=fixture:fn:main")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/api/source?repo=fixture&path=src/main.rs")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/api/file/symbols?repo=fixture&path=src/main.rs")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/api/files?repo=fixture")
+            .body(Body::empty())
+            .unwrap(),
         multipart_req(
             "/api/repos/import-zip",
             "XB",
@@ -246,7 +304,11 @@ async fn management_endpoints_are_501_on_fixture() {
     for req in cases {
         let uri = req.uri().clone();
         let res = app().oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED, "{uri} should be 501 on fixture");
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "{uri} should be 501 on fixture"
+        );
         let v = body_json(res).await;
         assert!(v["error"].as_str().unwrap().contains("not supported"));
     }
@@ -300,13 +362,7 @@ impl Backend for ManagedBackend {
     fn callees(&self, _: Option<&str>, _: &str, _: u32) -> anyhow::Result<Vec<SymbolRef>> {
         Ok(vec![])
     }
-    fn impact(
-        &self,
-        _: Option<&str>,
-        _: &str,
-        _: u32,
-        _: usize,
-    ) -> anyhow::Result<Vec<SymbolRef>> {
+    fn impact(&self, _: Option<&str>, _: &str, _: u32, _: usize) -> anyhow::Result<Vec<SymbolRef>> {
         Ok(vec![])
     }
     fn analyze(&self, _: &str) -> anyhow::Result<String> {
@@ -398,8 +454,14 @@ impl Backend for ManagedBackend {
         }
         // 故意逆序返回，断言 backend 自身保证升序（这里直接给已排序数据）。
         Ok(vec![
-            aka_server::ops::FileEntry { path: "src/a.ts".into(), symbols: 3 },
-            aka_server::ops::FileEntry { path: "src/b.ts".into(), symbols: 1 },
+            aka_server::ops::FileEntry {
+                path: "src/a.ts".into(),
+                symbols: 3,
+            },
+            aka_server::ops::FileEntry {
+                path: "src/b.ts".into(),
+                symbols: 1,
+            },
         ])
     }
     fn node_detail(&self, repo: &str, id: &str) -> anyhow::Result<Value> {
@@ -457,7 +519,11 @@ async fn import_zip_is_202_and_writes_temp_file() {
 #[tokio::test]
 async fn update_is_202_and_zip_source_is_400() {
     let res = managed()
-        .oneshot(Request::post("/api/repos/hello/update").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::post("/api/repos/hello/update")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::ACCEPTED);
@@ -466,7 +532,11 @@ async fn update_is_202_and_zip_source_is_400() {
 
     // zip 来源仓库 → 400 提示走 update-zip。
     let res = managed()
-        .oneshot(Request::post("/api/repos/ziprepo/update").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::post("/api/repos/ziprepo/update")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -506,13 +576,21 @@ async fn settings_delete_node_ego_shapes() {
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK, "render_max_nodes={v} 应 clamp 后成功");
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "render_max_nodes={v} 应 clamp 后成功"
+        );
         assert_eq!(body_json(res).await["ok"], true);
     }
 
     // delete → 200 {"ok":true}
     let res = managed()
-        .oneshot(Request::delete("/api/repos/fixture").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::delete("/api/repos/fixture")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -555,7 +633,11 @@ async fn settings_delete_node_ego_shapes() {
 async fn lod_max_nodes_clamped_and_default_is_none() {
     // 未显式传 max_nodes → backend 收到 None（由其解析 per-repo 设置）。
     let res = managed()
-        .oneshot(Request::get("/api/graph/lod?repo=fixture").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/api/graph/lod?repo=fixture")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -563,7 +645,12 @@ async fn lod_max_nodes_clamped_and_default_is_none() {
     assert!(v["max_nodes"].is_null(), "缺省必须透传 None 给 backend");
 
     // 显式传值 → clamp 到 1_000..=500_000 后透传。
-    for (q, expect) in [(1usize, 1_000u64), (999, 1_000), (50_000, 50_000), (9_999_999, 500_000)] {
+    for (q, expect) in [
+        (1usize, 1_000u64),
+        (999, 1_000),
+        (50_000, 50_000),
+        (9_999_999, 500_000),
+    ] {
         let res = managed()
             .oneshot(
                 Request::get(format!("/api/graph/lod?repo=fixture&max_nodes={q}"))
@@ -641,7 +728,11 @@ async fn source_endpoint_contract_and_errors() {
 
     // 缺必填参数 → 400。
     let res = managed()
-        .oneshot(Request::get("/api/source?repo=fixture").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/api/source?repo=fixture")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -697,7 +788,11 @@ async fn file_symbols_contract_and_errors() {
 
     // 缺必填参数 → 400。
     let res = managed()
-        .oneshot(Request::get("/api/file/symbols?repo=fixture").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/api/file/symbols?repo=fixture")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -707,7 +802,11 @@ async fn file_symbols_contract_and_errors() {
 async fn files_contract_and_errors() {
     // 正常 → 200 + 合同形状（repo 回显 + files 按 path 升序，每项含 symbols 计数）。
     let res = managed()
-        .oneshot(Request::get("/api/files?repo=fixture").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/api/files?repo=fixture")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -727,7 +826,11 @@ async fn files_contract_and_errors() {
 
     // repo 不在 registry → 404。
     let res = managed()
-        .oneshot(Request::get("/api/files?repo=nope").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/api/files?repo=nope")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -763,13 +866,7 @@ impl Backend for FailBackend {
     fn callees(&self, _: Option<&str>, _: &str, _: u32) -> anyhow::Result<Vec<SymbolRef>> {
         anyhow::bail!("index corrupted")
     }
-    fn impact(
-        &self,
-        _: Option<&str>,
-        _: &str,
-        _: u32,
-        _: usize,
-    ) -> anyhow::Result<Vec<SymbolRef>> {
+    fn impact(&self, _: Option<&str>, _: &str, _: u32, _: usize) -> anyhow::Result<Vec<SymbolRef>> {
         anyhow::bail!("index corrupted")
     }
     fn analyze(&self, _: &str) -> anyhow::Result<String> {

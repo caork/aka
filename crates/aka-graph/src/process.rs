@@ -4,7 +4,9 @@
 //! `入口 -[ENTRY_POINT_OF]-> Process`。流程查询是低频点查，SQL 直查
 //! （edges JOIN nodes JOIN edge_types）即可，不进 CSR 邻接。
 
-use rusqlite::params;
+use std::collections::HashMap;
+
+use rusqlite::{params, params_from_iter};
 
 use crate::error::Result;
 use crate::store::GraphStore;
@@ -38,6 +40,15 @@ pub struct ProcessStepRow {
     /// nodes 表统一存 1-based 行号。
     pub start_line: Option<u32>,
     pub step: Option<u32>,
+}
+
+/// 符号所属的社区/模块信息。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommunityMembership {
+    /// Community 节点名或 heuristicLabel。
+    pub module: String,
+    /// Community props.cohesion，缺省 0。
+    pub cohesion: f32,
 }
 
 impl GraphStore {
@@ -75,6 +86,108 @@ impl GraphStore {
                 step,
                 step_count: props["stepCount"].as_u64().map(|v| v as u32),
             });
+        }
+        Ok(out)
+    }
+
+    /// 批量查询符号参与的流程，避免 query 对每个命中单独查一次 SQLite。
+    /// 输出 key 是传入的 node id。
+    pub fn processes_of_node_ids(
+        &self,
+        node_ids: &[String],
+    ) -> Result<HashMap<String, Vec<ProcessMembership>>> {
+        let mut out: HashMap<String, Vec<ProcessMembership>> = HashMap::new();
+        for ids in node_ids.chunks(100) {
+            if ids.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; ids.len()].join(",");
+            let sql = format!(
+                "SELECT n.id, p.rowid, p.id, p.name, p.props, e.step \
+                 FROM edges e \
+                 JOIN edge_types t ON t.type_id = e.type_id \
+                 JOIN nodes n ON n.rowid = e.source \
+                 JOIN nodes p ON p.rowid = e.target \
+                 WHERE n.id IN ({placeholders}) AND t.name = 'STEP_IN_PROCESS' AND p.label = 'Process' \
+                 ORDER BY n.id ASC, p.rowid ASC"
+            );
+            let mut stmt = self.conn().prepare_cached(&sql)?;
+            let rows = stmt.query_map(params_from_iter(ids.iter().map(String::as_str)), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, Option<u32>>(5)?,
+                ))
+            })?;
+            for row in rows {
+                let (node_id, process_rowid, process_id, name, props_text, step) = row?;
+                let props: serde_json::Value =
+                    serde_json::from_str(&props_text).unwrap_or(serde_json::Value::Null);
+                out.entry(node_id).or_default().push(ProcessMembership {
+                    process_rowid,
+                    process_id,
+                    name: name.unwrap_or_default(),
+                    process_type: props["processType"].as_str().unwrap_or("").to_owned(),
+                    step,
+                    step_count: props["stepCount"].as_u64().map(|v| v as u32),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// 批量查询符号所属的第一个 Community，保持 GitNexus query 的 module/cohesion 语义。
+    pub fn community_of_node_ids(
+        &self,
+        node_ids: &[String],
+    ) -> Result<HashMap<String, CommunityMembership>> {
+        let mut out = HashMap::new();
+        for ids in node_ids.chunks(100) {
+            if ids.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; ids.len()].join(",");
+            let sql = format!(
+                "SELECT n.id, c.name, c.props \
+                 FROM edges e \
+                 JOIN edge_types t ON t.type_id = e.type_id \
+                 JOIN nodes n ON n.rowid = e.source \
+                 JOIN nodes c ON c.rowid = e.target \
+                 WHERE n.id IN ({placeholders}) AND t.name = 'MEMBER_OF' AND c.label = 'Community' \
+                 ORDER BY n.id ASC, c.rowid ASC"
+            );
+            let mut stmt = self.conn().prepare_cached(&sql)?;
+            let rows = stmt.query_map(params_from_iter(ids.iter().map(String::as_str)), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (node_id, name, props_text) = row?;
+                if out.contains_key(&node_id) {
+                    continue;
+                }
+                let props: serde_json::Value =
+                    serde_json::from_str(&props_text).unwrap_or(serde_json::Value::Null);
+                let module = props["heuristicLabel"]
+                    .as_str()
+                    .or_else(|| props["label"].as_str())
+                    .or(name.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                out.insert(
+                    node_id,
+                    CommunityMembership {
+                        module,
+                        cohesion: props["cohesion"].as_f64().unwrap_or(0.0) as f32,
+                    },
+                );
+            }
         }
         Ok(out)
     }

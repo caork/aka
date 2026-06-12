@@ -1,6 +1,6 @@
 # aka 客户端接入
 
-把 aka 接进编码 agent 客户端：本地 stdio MCP（`aka mcp`，八工具）是统一接入面，三个客户端只是配置格式不同。设计文档（架构、能力矩阵、远程模式演进）见 [docs/clients.md](../docs/clients.md)。
+把 aka 接进编码 agent 客户端：本地 stdio MCP（`aka mcp`，九工具）是统一接入面，三个客户端只是配置格式不同。设计文档（架构、能力矩阵、远程模式演进）见 [docs/clients.md](../docs/clients.md)。
 
 ## 一键安装
 
@@ -35,4 +35,4 @@ clients/install.sh --client opencode             # 需要 jq
 2. 至少索引一个仓库：`aka analyze /path/to/repo`（否则 agent 调 `list_repos` 得到空列表）。
 3. MCP server 是 stdio 子进程，由客户端按需拉起，无需常驻；`aka serve`（HTTP :4111）只服务桌面端，与客户端接入无关（远程模式落地后才复用，见设计文档）。
 
-> License 提醒：项目整体遵守 PolyForm Noncommercial 1.0，所有接入仅限非商用场景。
+> License 提醒：解析引擎 `codebase-memory-mcp` 为 MIT，aka 客户端接入按 MIT 口径分发。

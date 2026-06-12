@@ -53,6 +53,10 @@
   --code-gutter: #f4f6fa;
   --code-gutter-focus: #e9f1fe;
   --code-line-focus: rgba(46, 124, 246, 0.07);
+  --code-marker: rgba(255, 229, 94, 0.58);
+  --code-marker-edge: rgba(246, 166, 35, 0.52);
+  --code-marker-selected: rgba(46, 124, 246, 0.2);
+  --code-marker-selected-edge: rgba(46, 124, 246, 0.5);
   --syntax-string: #9d5b25;
   --syntax-number: #7c4fc9;
   --syntax-keyword: #2563c9;
@@ -131,6 +135,10 @@ html[data-theme="dark"] {
   --code-gutter: #141c28;
   --code-gutter-focus: #182b47;
   --code-line-focus: rgba(95, 156, 255, 0.12);
+  --code-marker: rgba(255, 210, 70, 0.28);
+  --code-marker-edge: rgba(242, 184, 75, 0.36);
+  --code-marker-selected: rgba(95, 156, 255, 0.25);
+  --code-marker-selected-edge: rgba(95, 156, 255, 0.48);
   --syntax-string: #d6a170;
   --syntax-number: #c3a6ff;
   --syntax-keyword: #8bb7ff;
@@ -184,6 +192,31 @@ body {
   filter: blur(120px);
 }
 
+.window-drag-region {
+  display: none;
+  height: var(--titlebar-height);
+  -webkit-app-region: drag;
+  background: transparent;
+  pointer-events: auto;
+}
+
+.app-content {
+  box-sizing: border-box;
+  position: relative;
+}
+
+html[data-platform="macos"] .window-drag-region {
+  display: block;
+}
+
+html[data-platform="macos"] .app-content {
+  padding-top: 0;
+}
+
+html[data-platform="macos"] .app-content > * {
+  height: 100%;
+}
+
 /* ---------------------------------------------------------------------------
    glass surfaces
    --------------------------------------------------------------------------- */
@@ -208,6 +241,70 @@ body {
     inset 0 0 0 0.5px var(--glass-inner),
     0 0 0 1px var(--glass-border),
     var(--shadow-panel);
+}
+
+.graph-top-glass {
+  height: 60px;
+  background:
+    linear-gradient(
+      to bottom,
+      rgba(var(--graph-bg-rgb), 0.68) 0%,
+      rgba(var(--graph-bg-rgb), 0.38) 44%,
+      rgba(var(--graph-bg-rgb), 0.08) 78%,
+      rgba(var(--graph-bg-rgb), 0) 100%
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--accent) 5%, transparent),
+      transparent 72%
+    );
+  -webkit-backdrop-filter: blur(18px) saturate(165%);
+  backdrop-filter: blur(18px) saturate(165%);
+  -webkit-mask-image: linear-gradient(to bottom, black 0%, black 48%, transparent 100%);
+  mask-image: linear-gradient(to bottom, black 0%, black 48%, transparent 100%);
+}
+
+.code-symbol-mark {
+  padding: 0 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  background:
+    linear-gradient(
+      to bottom,
+      transparent 0%,
+      transparent 38%,
+      var(--code-marker) 38%,
+      var(--code-marker) 88%,
+      transparent 88%
+    );
+  box-shadow: inset 0 -2px 0 var(--code-marker-edge);
+}
+
+.code-symbol-mark:hover {
+  background:
+    linear-gradient(
+      to bottom,
+      transparent 0%,
+      transparent 30%,
+      color-mix(in srgb, var(--code-marker) 80%, var(--accent-fill)) 30%,
+      color-mix(in srgb, var(--code-marker) 80%, var(--accent-fill)) 90%,
+      transparent 90%
+    );
+}
+
+.code-symbol-mark.selected {
+  background:
+    linear-gradient(
+      to bottom,
+      transparent 0%,
+      transparent 26%,
+      var(--code-marker-selected) 26%,
+      var(--code-marker-selected) 92%,
+      transparent 92%
+    );
+  box-shadow:
+    inset 0 -2px 0 var(--code-marker-selected-edge),
+    0 0 0 1px rgba(46, 124, 246, 0.12);
 }
 
 /* ---------------------------------------------------------------------------
@@ -244,30 +341,6 @@ body {
 .app-top-left-controls {
   left: var(--titlebar-leading-safe);
 }
-
-.window-drag-region {
-  display: none;
-  height: var(--titlebar-height);
-  -webkit-app-region: drag;
-}
-
-.app-content {
-  box-sizing: border-box;
-  position: relative;
-}
-
-html[data-platform="macos"] .window-drag-region {
-  display: block;
-}
-
-html[data-platform="macos"] .app-content {
-  padding-top: var(--titlebar-height);
-}
-
-html[data-platform="macos"] .app-content > * {
-  height: 100%;
-}
-
 html[data-theme="dark"] .app-logo {
   filter: invert(1) hue-rotate(180deg) saturate(0.65) brightness(1.25);
   opacity: 0.86;

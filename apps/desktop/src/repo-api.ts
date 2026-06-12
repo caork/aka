@@ -1,8 +1,7 @@
 /* Repo 管理 API —— 桌面端优先走 Tauri 内嵌后端；浏览器/dev 回退 HTTP aka serve。 */
 
 import { asDesktopError, invokeDesktop, isDesktopRuntime } from "./desktop-api";
-
-const SERVER = "http://127.0.0.1:4111";
+import { apiUrl, localServeUnavailable } from "./api-base";
 
 export class ApiError extends Error {
   status: number;
@@ -37,13 +36,13 @@ function asError(e: unknown): Error {
   if (e instanceof DOMException && e.name === "TimeoutError") {
     return new Error("请求超时——aka serve 是否在运行？");
   }
-  return new Error("无法连接本地 aka serve（127.0.0.1:4111）");
+  return localServeUnavailable();
 }
 
 async function postJson(path: string, body: unknown, timeout = 8000): Promise<void> {
   let r: Response;
   try {
-    r = await fetch(`${SERVER}${path}`, {
+    r = await fetch(apiUrl(path), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -58,7 +57,7 @@ async function postJson(path: string, body: unknown, timeout = 8000): Promise<vo
 async function postForm(path: string, form: FormData, timeout = 60_000): Promise<void> {
   let r: Response;
   try {
-    r = await fetch(`${SERVER}${path}`, {
+    r = await fetch(apiUrl(path), {
       method: "POST",
       body: form,
       signal: AbortSignal.timeout(timeout),
@@ -175,7 +174,7 @@ export async function deleteRepo(name: string): Promise<void> {
   }
   let r: Response;
   try {
-    r = await fetch(`${SERVER}/api/repos/${encodeURIComponent(name)}`, {
+    r = await fetch(apiUrl(`/api/repos/${encodeURIComponent(name)}`), {
       method: "DELETE",
       signal: AbortSignal.timeout(8000),
     });
@@ -268,7 +267,7 @@ export async function fetchNodeDetail(
       return { state: "ok", detail };
     }
     const r = await fetch(
-      `${SERVER}/api/node?repo=${encodeURIComponent(repo)}&id=${encodeURIComponent(id)}`,
+      apiUrl(`/api/node?repo=${encodeURIComponent(repo)}&id=${encodeURIComponent(id)}`),
       { signal: signal ?? AbortSignal.timeout(4000) },
     );
     if (r.status === 404 || r.status === 501) return { state: "unsupported" };
@@ -324,7 +323,7 @@ export async function fetchSource(
       });
       return { state: "ok", source };
     }
-    const r = await fetch(`${SERVER}/api/source?${params.toString()}`, {
+    const r = await fetch(apiUrl(`/api/source?${params.toString()}`), {
       signal: signal ?? AbortSignal.timeout(6000),
     });
     if (r.status === 404 || r.status === 501) return { state: "unsupported" };
@@ -367,7 +366,7 @@ export async function fetchRepoFiles(
       const body = await invokeDesktop<{ files?: RepoFile[] }>("repo_files", { repo });
       return { state: "ok", files: body.files ?? [] };
     }
-    const r = await fetch(`${SERVER}/api/files?${params.toString()}`, {
+    const r = await fetch(apiUrl(`/api/files?${params.toString()}`), {
       signal: signal ?? AbortSignal.timeout(6000),
     });
     if (r.status === 404 || r.status === 501) return { state: "unsupported" };
@@ -414,7 +413,7 @@ export async function fetchFileSymbols(
       });
       return { state: "ok", symbols: body.symbols ?? [] };
     }
-    const r = await fetch(`${SERVER}/api/file/symbols?${params.toString()}`, {
+    const r = await fetch(apiUrl(`/api/file/symbols?${params.toString()}`), {
       signal: signal ?? AbortSignal.timeout(6000),
     });
     if (r.status === 404 || r.status === 501) return { state: "unsupported" };

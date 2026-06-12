@@ -74,11 +74,11 @@ export default function RepoDropdown() {
       <AnimatePresence>
         {open && (
           <motion.div
-            initial={{ opacity: 0, y: -8, scale: 0.96 }}
+            initial={{ opacity: 0, y: 8, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -8, scale: 0.96 }}
+            exit={{ opacity: 0, y: 8, scale: 0.96 }}
             transition={spring}
-            className="absolute left-0 top-[calc(100%+6px)] z-50 w-[220px] overflow-hidden rounded-[14px]"
+            className="absolute bottom-[calc(100%+6px)] left-0 z-50 w-[220px] origin-bottom-left overflow-hidden rounded-[14px]"
             style={{
               background: "var(--glass-bg-strong)",
               backdropFilter: "blur(28px) saturate(190%)",
@@ -90,6 +90,11 @@ export default function RepoDropdown() {
             onMouseLeave={leave}
           >
             <nav className="p-1.5">
+              {repos.length === 0 && (
+                <div className="px-3 py-3 text-[12px] leading-relaxed text-ink-3">
+                  No repositories yet
+                </div>
+              )}
               {repos.map((repo, idx) => {
                 const active = repo.id === selectedRepoId;
                 return (
@@ -132,7 +137,9 @@ export default function RepoDropdown() {
                         }`}
                       >
                         {repo.status === "indexing"
-                          ? "indexing…"
+                          ? `${Math.round(repo.progress?.percent ?? 0)}% · ${
+                              repo.progress?.stage ?? "indexing"
+                            }`
                           : repo.status === "failed"
                             ? (repo.detail ?? "failed")
                             : repo.status === "idle"

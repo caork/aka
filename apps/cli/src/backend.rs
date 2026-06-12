@@ -13,17 +13,24 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
 
 use aka_core::{
-    aka_home, clamp_render_nodes, Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
+    aka_home, clamp_render_nodes, ArtifactStats, EngineEvent, Registry, RepoEntry, RepoPaths,
+    DEFAULT_RENDER_MAX_NODES,
 };
 use aka_graph::{Adjacency, GraphStore, NodeRow};
-use aka_mcp::{Backend, ProcessHit, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef};
+use aka_mcp::{
+    Backend, CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, ProcessHit,
+    QueryEnrichment, RepoInfo, RepoProgress, RepoSettingsUpdate, SearchHit, SymbolRef,
+};
 use aka_search::SearchIndex;
+use git2::{
+    build::{CheckoutBuilder, RepoBuilder},
+    BranchType, Cred, CredentialType, FetchOptions, RemoteCallbacks, Repository,
+};
 
 /// `/api/source` 单次最多返回的行数。
 const MAX_SOURCE_LINES: usize = 2000;
@@ -38,7 +45,10 @@ const DEFINITION_LABELS: &[&str] = &[
     "Trait",
 ];
 
+const JOB_LOG_LIMIT: usize = 80;
+
 pub struct RepoHandle {
+    pub entry: RepoEntry,
     pub store: Mutex<GraphStore>,
     pub adj: Adjacency,
     pub search: SearchIndex,
@@ -54,8 +64,8 @@ impl RepoHandle {
         let adj = Adjacency::build(&store)?;
         let search = SearchIndex::open(&paths.search_dir())
             .with_context(|| format!("搜索索引未就绪（先 aka analyze）: {}", entry.name))?;
-        let _ = &entry;
         Ok(Self {
+            entry,
             store: Mutex::new(store),
             adj,
             search,
@@ -97,6 +107,28 @@ fn row_to_hit(row: &NodeRow, score: f32) -> SearchHit {
     }
 }
 
+fn node_content(repo_root: &Path, row: &NodeRow) -> Result<Option<String>> {
+    let Some(file) = row.file_path.as_deref() else {
+        return Ok(None);
+    };
+    let Some(start) = row.start_line else {
+        return Ok(None);
+    };
+    let end = row.end_line.or(row.start_line);
+    let source = read_source_slice(repo_root, file, Some(start), end)?;
+    let lines = source["lines"]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    Ok((!lines.is_empty()).then_some(lines))
+}
+
 /// 后台任务状态（import / update）。不在 map 里 = ready。
 #[derive(Debug, Clone)]
 struct JobInfo {
@@ -110,11 +142,177 @@ struct JobInfo {
     url: Option<String>,
     /// 任务针对的仓库路径（合成 list 条目展示用）。
     path: PathBuf,
+    /// 当前进度和日志尾部。
+    progress: RepoProgress,
+}
+
+impl JobInfo {
+    fn new(kind: &str, url: Option<String>, path: PathBuf) -> Self {
+        Self {
+            status: "indexing".into(),
+            detail: None,
+            kind: kind.to_string(),
+            url,
+            path,
+            progress: RepoProgress {
+                stage: "queued".into(),
+                message: "Queued for indexing".into(),
+                percent: 1.0,
+                current: None,
+                total: None,
+                files: 0,
+                nodes: 0,
+                edges: 0,
+                chunks: 0,
+                logs: vec!["Queued for indexing".into()],
+            },
+        }
+    }
+
+    fn push_log(&mut self, line: impl Into<String>) {
+        let line = line.into();
+        if self.progress.logs.last() == Some(&line) {
+            return;
+        }
+        self.progress.logs.push(line);
+        if self.progress.logs.len() > JOB_LOG_LIMIT {
+            let drop_count = self.progress.logs.len() - JOB_LOG_LIMIT;
+            self.progress.logs.drain(0..drop_count);
+        }
+    }
+
+    fn set_stage(&mut self, stage: &str, message: impl Into<String>, percent: f32) {
+        let message = message.into();
+        self.progress.stage = stage.to_string();
+        self.progress.message = message.clone();
+        self.progress.percent = self.progress.percent.max(percent).min(99.0);
+        self.progress.current = None;
+        self.progress.total = None;
+        self.push_log(format!("{stage}: {message}"));
+    }
+
+    fn apply_engine_event(&mut self, ev: &EngineEvent) {
+        match ev {
+            EngineEvent::Phase {
+                phase,
+                current,
+                total,
+            } => {
+                let phase_lc = phase.to_ascii_lowercase();
+                if phase_lc.contains("building graph") || phase_lc.contains("search index") {
+                    self.progress.stage = "index".into();
+                    self.progress.message = phase.clone();
+                    self.progress.current = None;
+                    self.progress.total = None;
+                    self.progress.percent = self.progress.percent.clamp(86.0, 96.0);
+                    self.push_log(format!("index: {phase}"));
+                    return;
+                }
+                if phase_lc.contains("registering") {
+                    self.progress.stage = "register".into();
+                    self.progress.message = phase.clone();
+                    self.progress.current = None;
+                    self.progress.total = None;
+                    self.progress.percent = self.progress.percent.clamp(96.0, 99.0);
+                    self.push_log(format!("register: {phase}"));
+                    return;
+                }
+                self.progress.stage = "engine".into();
+                self.progress.message = phase.clone();
+                self.progress.current = (*total > 0 || *current > 0).then_some(*current);
+                self.progress.total = (*total > 0).then_some(*total);
+                self.progress.percent = engine_percent(phase, *current, *total)
+                    .max(self.progress.percent)
+                    .min(76.0);
+                if *total > 0 {
+                    self.push_log(format!("engine: {phase} ({current}/{total})"));
+                } else {
+                    self.push_log(format!("engine: {phase}"));
+                }
+            }
+            EngineEvent::Warning { message } => {
+                self.push_log(format!("warning: {message}"));
+            }
+            EngineEvent::Done { stats } => {
+                self.progress.stage = "engine".into();
+                self.progress.message = "Engine emit complete".into();
+                self.progress.percent = 78.0;
+                self.apply_stats(stats);
+                self.push_log(format!(
+                    "engine: done ({} files, {} nodes, {} edges, {} chunks)",
+                    stats.files, stats.nodes, stats.edges, stats.chunks
+                ));
+            }
+        }
+    }
+
+    fn apply_stats(&mut self, stats: &ArtifactStats) {
+        self.progress.files = stats.files;
+        self.progress.nodes = stats.nodes;
+        self.progress.edges = stats.edges;
+        self.progress.chunks = stats.chunks;
+    }
+}
+
+fn engine_percent(phase: &str, current: u64, total: u64) -> f32 {
+    if total > 0 {
+        let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
+        return 18.0 + ratio * 54.0;
+    }
+    let phase = phase.to_ascii_lowercase();
+    if phase.contains("discover") || phase.contains("scan") {
+        24.0
+    } else if phase.contains("parse") || phase.contains("ast") {
+        44.0
+    } else if phase.contains("edge") || phase.contains("relationship") {
+        60.0
+    } else if phase.contains("chunk") {
+        70.0
+    } else {
+        34.0
+    }
+}
+
+fn update_job(
+    jobs: &Arc<Mutex<HashMap<String, JobInfo>>>,
+    name: &str,
+    update: impl FnOnce(&mut JobInfo),
+) {
+    if let Some(job) = jobs.lock().expect("jobs lock").get_mut(name) {
+        update(job);
+    }
+}
+
+fn run_analyze_job(
+    jobs: &Arc<Mutex<HashMap<String, JobInfo>>>,
+    name: &str,
+    repo: PathBuf,
+    engine_dir: Option<PathBuf>,
+) -> Result<()> {
+    update_job(jobs, name, |job| {
+        job.set_stage("engine", "Starting AST parser", 14.0);
+    });
+    let mut on_progress = |ev: &EngineEvent| {
+        update_job(jobs, name, |job| {
+            job.apply_engine_event(ev);
+        });
+    };
+    crate::run_analyze_with_progress(repo, engine_dir, false, Some(&mut on_progress))
+        .map_err(|e| anyhow!("{e:#}"))?;
+    update_job(jobs, name, |job| {
+        job.set_stage("done", "Index ready", 99.0);
+    });
+    Ok(())
+}
+
+fn job_matches_key(name: &str, job: &JobInfo, key: &str) -> bool {
+    name == key || job.path.to_string_lossy() == key
 }
 
 pub struct AkaBackend {
     handles: Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
+    engine_dir: Option<PathBuf>,
 }
 
 /// git / zip 导入的受管 checkout 根目录。
@@ -124,12 +322,7 @@ fn checkouts_dir() -> PathBuf {
 
 /// 仓库名用于拼 checkout 路径，必须是单段目录名。
 fn validate_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
-    {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
         bail!("invalid repo name: {name:?}");
     }
     Ok(())
@@ -159,27 +352,92 @@ fn derive_git_name(url: &str) -> Result<String> {
     Ok(name)
 }
 
-/// shell out 系统 git；失败带 stderr 尾部。
-fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<()> {
-    let mut cmd = Command::new("git");
-    cmd.args(args);
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
+fn git_callbacks<'a>() -> RemoteCallbacks<'a> {
+    let mut callbacks = RemoteCallbacks::new();
+    callbacks.credentials(|_, username_from_url, allowed| {
+        if allowed.contains(CredentialType::SSH_KEY) {
+            Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+        } else {
+            Cred::default()
+        }
+    });
+    callbacks
+}
+
+fn git_fetch_options<'a>() -> FetchOptions<'a> {
+    let mut fetch = FetchOptions::new();
+    fetch.remote_callbacks(git_callbacks());
+    fetch
+}
+
+fn clone_git_repo(url: &str, dest: &Path) -> Result<()> {
+    let mut builder = RepoBuilder::new();
+    builder.fetch_options(git_fetch_options());
+    builder
+        .clone(url, dest)
+        .with_context(|| format!("git clone {url} -> {}", dest.display()))?;
+    Ok(())
+}
+
+fn fast_forward_git_repo(dir: &Path) -> Result<()> {
+    let repo = Repository::open(dir).with_context(|| format!("open git repo {}", dir.display()))?;
+    let head = repo.head().context("read git HEAD")?;
+    if !head.is_branch() {
+        bail!("git repo is in detached HEAD state; checkout a branch before updating");
     }
-    let out = cmd
-        .output()
-        .with_context(|| format!("spawn git {}", args.join(" ")))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let tail: Vec<&str> = stderr.lines().rev().take(8).collect();
-        let tail: Vec<&str> = tail.into_iter().rev().collect();
-        bail!(
-            "git {} failed ({}): {}",
-            args.first().unwrap_or(&"?"),
-            out.status,
-            tail.join(" | ")
-        );
+    let head_name = head.name().context("read git HEAD ref name")?.to_string();
+    let branch_name = head
+        .shorthand()
+        .context("read git branch name")?
+        .to_string();
+    drop(head);
+
+    let branch = repo
+        .find_branch(&branch_name, BranchType::Local)
+        .with_context(|| format!("find local git branch {branch_name}"))?;
+    let upstream = branch
+        .upstream()
+        .with_context(|| format!("git branch {branch_name} has no upstream"))?;
+    let upstream_name = upstream
+        .get()
+        .name()
+        .context("read upstream ref name")?
+        .to_string();
+    let remote_name = upstream_name
+        .strip_prefix("refs/remotes/")
+        .and_then(|s| s.split('/').next())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("origin")
+        .to_string();
+    drop(upstream);
+    drop(branch);
+
+    let mut remote = repo
+        .find_remote(&remote_name)
+        .with_context(|| format!("find git remote {remote_name}"))?;
+    remote
+        .fetch(&[] as &[&str], Some(&mut git_fetch_options()), None)
+        .with_context(|| format!("fetch git remote {remote_name}"))?;
+    drop(remote);
+
+    let upstream_ref = repo
+        .find_reference(&upstream_name)
+        .with_context(|| format!("find upstream ref {upstream_name}"))?;
+    let upstream_commit = repo.reference_to_annotated_commit(&upstream_ref)?;
+    let (analysis, _) = repo.merge_analysis(&[&upstream_commit])?;
+    if analysis.is_up_to_date() {
+        return Ok(());
     }
+    if !analysis.is_fast_forward() {
+        bail!("git update is not fast-forward; resolve the branch manually and retry");
+    }
+
+    let mut reference = repo
+        .find_reference(&head_name)
+        .with_context(|| format!("find local ref {head_name}"))?;
+    reference.set_target(upstream_commit.id(), "fast-forward")?;
+    repo.set_head(&head_name)?;
+    repo.checkout_head(Some(CheckoutBuilder::new().force()))?;
     Ok(())
 }
 
@@ -199,7 +457,11 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
             );
         };
         // macOS 压缩垃圾不落盘。
-        if rel.components().next().is_some_and(|c| c.as_os_str() == "__MACOSX") {
+        if rel
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == "__MACOSX")
+        {
             continue;
         }
         let out = dest.join(&rel);
@@ -209,8 +471,8 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let mut f = std::fs::File::create(&out)
-                .with_context(|| format!("write {}", out.display()))?;
+            let mut f =
+                std::fs::File::create(&out).with_context(|| format!("write {}", out.display()))?;
             std::io::copy(&mut entry, &mut f)?;
         }
     }
@@ -296,7 +558,11 @@ fn read_source_slice(
         e = s + MAX_SOURCE_LINES - 1;
         truncated = true;
     }
-    let lines: Vec<&str> = if total == 0 { Vec::new() } else { all[s - 1..e].to_vec() };
+    let lines: Vec<&str> = if total == 0 {
+        Vec::new()
+    } else {
+        all[s - 1..e].to_vec()
+    };
 
     Ok(serde_json::json!({
         "path": rel,
@@ -330,6 +596,193 @@ fn file_symbols_json(path: &str, rows: &[NodeRow]) -> serde_json::Value {
     serde_json::json!({ "path": path, "symbols": symbols })
 }
 
+fn code_search_in_handle(
+    handle: &RepoHandle,
+    query: &str,
+    limit: usize,
+    context: usize,
+    regex: bool,
+    path_filter: Option<&str>,
+) -> Result<CodeSearchResult> {
+    if query.trim().is_empty() || limit == 0 {
+        return Ok(CodeSearchResult {
+            hits: Vec::new(),
+            directories: Vec::new(),
+        });
+    }
+    let re = if regex {
+        Some(regex::Regex::new(query).with_context(|| format!("invalid regex: {query}"))?)
+    } else {
+        None
+    };
+    let needle = query.to_ascii_lowercase();
+    let mut hits = Vec::new();
+    let mut dirs: HashMap<String, usize> = HashMap::new();
+    let files = {
+        let store = handle.store.lock().expect("store lock");
+        store.searchable_file_list()?
+    };
+
+    for (file_path, _) in files {
+        if path_filter.is_some_and(|f| !file_path.contains(f)) {
+            continue;
+        }
+        let lines = match read_source_lines(&handle.entry.repo_path, &file_path) {
+            Ok(lines) => lines,
+            Err(_) => continue,
+        };
+        let scan = find_code_line_matches(&lines, &needle, re.as_ref(), context);
+        if scan.lines.is_empty() {
+            continue;
+        }
+        let dir = top_level_dir(&file_path);
+        *dirs.entry(dir).or_default() += scan.raw_count;
+        let symbol = nearest_symbol_for_match(handle, &file_path, scan.first_line)?;
+        hits.push(CodeSearchHit {
+            node_id: symbol
+                .as_ref()
+                .map(|r| r.id.clone())
+                .unwrap_or_else(|| format!("file:{file_path}")),
+            name: symbol
+                .as_ref()
+                .and_then(|r| r.name.clone())
+                .unwrap_or_else(|| file_path.clone()),
+            label: symbol
+                .as_ref()
+                .map(|r| r.label.clone())
+                .unwrap_or_else(|| "File".into()),
+            file_path,
+            start_line: symbol
+                .as_ref()
+                .and_then(|r| r.start_line)
+                .unwrap_or(scan.first_line),
+            score: scan.raw_count as f32,
+            matches: scan.lines,
+        });
+    }
+
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
+    hits.truncate(limit);
+    let mut directories: Vec<DirectoryCount> = dirs
+        .into_iter()
+        .map(|(dir, count)| DirectoryCount { dir, count })
+        .collect();
+    directories.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.dir.cmp(&b.dir)));
+    Ok(CodeSearchResult { hits, directories })
+}
+
+struct CodeLineScan {
+    lines: Vec<CodeLineMatch>,
+    raw_count: usize,
+    first_line: u32,
+}
+
+fn read_source_lines(repo_root: &Path, rel: &str) -> Result<Vec<String>> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        bail!("invalid path (must be repo-relative): {rel}");
+    }
+    let root = repo_root
+        .canonicalize()
+        .with_context(|| format!("repo path not found: {}", repo_root.display()))?;
+    let abs = root
+        .join(rel_path)
+        .canonicalize()
+        .with_context(|| format!("file not found in repo: {rel}"))?;
+    if !abs.starts_with(&root) || !abs.is_file() {
+        bail!("invalid path: {rel}");
+    }
+    let bytes = std::fs::read(&abs).with_context(|| format!("read {}", abs.display()))?;
+    if bytes.contains(&0) {
+        bail!("invalid file (binary content): {rel}");
+    }
+    let text = std::str::from_utf8(&bytes).with_context(|| format!("invalid UTF-8: {rel}"))?;
+    Ok(text.lines().map(str::to_string).collect())
+}
+
+fn find_code_line_matches(
+    lines: &[String],
+    needle: &str,
+    re: Option<&regex::Regex>,
+    context: usize,
+) -> CodeLineScan {
+    let mut out: Vec<CodeLineMatch> = Vec::new();
+    let mut raw_count = 0;
+    let mut first_line = 1;
+    for (idx, line) in lines.iter().enumerate() {
+        let matched = if let Some(re) = re {
+            re.is_match(line)
+        } else {
+            line.to_ascii_lowercase().contains(needle)
+        };
+        if !matched {
+            continue;
+        }
+        raw_count += 1;
+        if raw_count == 1 {
+            first_line = (idx + 1) as u32;
+        }
+        let from = idx.saturating_sub(context);
+        let to = (idx + context + 1).min(lines.len());
+        for (ctx_idx, text) in lines.iter().enumerate().take(to).skip(from) {
+            let line_no = (ctx_idx + 1) as u32;
+            if let Some(existing) = out.iter_mut().find(|m| m.line == line_no) {
+                existing.matched |= line_no == (idx + 1) as u32;
+            } else {
+                out.push(CodeLineMatch {
+                    line: line_no,
+                    text: text.clone(),
+                    matched: line_no == (idx + 1) as u32,
+                });
+            }
+        }
+    }
+    CodeLineScan {
+        lines: out,
+        raw_count,
+        first_line,
+    }
+}
+
+fn nearest_symbol_for_match(
+    handle: &RepoHandle,
+    file_path: &str,
+    line: u32,
+) -> Result<Option<NodeRow>> {
+    let rows = {
+        let store = handle.store.lock().expect("store lock");
+        store.nodes_in_file(file_path)?
+    };
+    let mut best_before: Option<NodeRow> = None;
+    let mut first_symbol: Option<NodeRow> = None;
+    for row in rows {
+        if row.start_line.is_none() {
+            continue;
+        }
+        if first_symbol.is_none() {
+            first_symbol = Some(row.clone());
+        }
+        if row.start_line.unwrap_or(0) <= line {
+            best_before = Some(row);
+        } else {
+            break;
+        }
+    }
+    Ok(best_before.or(first_symbol))
+}
+
+fn top_level_dir(path: &str) -> String {
+    path.split('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("(root)")
+        .to_string()
+}
+
 /// analyze 落注册表后补 name / source 字段（register() 只继承已有条目，
 /// 新导入的 git/zip 仓库要在这里盖上来源）。
 fn finalize_entry(repo_path: &Path, name: &str, kind: &str, url: Option<String>) -> Result<()> {
@@ -348,6 +801,7 @@ impl AkaBackend {
         Self {
             handles: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            engine_dir: None,
         }
     }
 
@@ -368,6 +822,30 @@ impl AkaBackend {
         std::fs::create_dir_all(&home)
             .with_context(|| format!("recreate aka data dir {}", home.display()))?;
         Ok(())
+    }
+
+    pub fn with_engine_dir(engine_dir: PathBuf) -> Self {
+        Self {
+            handles: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            engine_dir: Some(engine_dir),
+        }
+    }
+
+    fn engine_dir(&self) -> Option<PathBuf> {
+        self.engine_dir.clone()
+    }
+
+    pub fn has_running_jobs(&self) -> bool {
+        self.jobs
+            .lock()
+            .expect("jobs lock")
+            .values()
+            .any(|job| job.status == "indexing")
+    }
+
+    pub fn clear_cached_handles(&self) {
+        self.handles.lock().expect("handles lock").clear();
     }
 
     /// 名字可用性守卫：已注册或有进行中任务 → 拒绝。
@@ -403,21 +881,16 @@ impl AkaBackend {
         kind: &str,
         url: Option<String>,
         path: PathBuf,
-        work: impl FnOnce() -> Result<PathBuf> + Send + 'static,
+        work: impl FnOnce(Arc<Mutex<HashMap<String, JobInfo>>>, String) -> Result<PathBuf>
+            + Send
+            + 'static,
     ) {
         let jobs = Arc::clone(&self.jobs);
         let handles = Arc::clone(&self.handles);
-        jobs.lock().expect("jobs lock").insert(
-            name.clone(),
-            JobInfo {
-                status: "indexing".into(),
-                detail: None,
-                kind: kind.to_string(),
-                url,
-                path,
-            },
-        );
-        std::thread::spawn(move || match work() {
+        jobs.lock()
+            .expect("jobs lock")
+            .insert(name.clone(), JobInfo::new(kind, url, path));
+        std::thread::spawn(move || match work(Arc::clone(&jobs), name.clone()) {
             Ok(repo_path) => {
                 handles.lock().expect("handles lock").remove(&repo_path);
                 jobs.lock().expect("jobs lock").remove(&name);
@@ -425,7 +898,11 @@ impl AkaBackend {
             Err(e) => {
                 if let Some(job) = jobs.lock().expect("jobs lock").get_mut(&name) {
                     job.status = "failed".into();
-                    job.detail = Some(format!("{e:#}"));
+                    let detail = format!("{e:#}");
+                    job.detail = Some(detail.clone());
+                    job.progress.stage = "failed".into();
+                    job.progress.message = "Indexing failed".into();
+                    job.push_log(format!("failed: {detail}"));
                 }
             }
         });
@@ -434,8 +911,19 @@ impl AkaBackend {
     /// 解析 repo 参数（名字或路径；None = 全部已索引仓库）。
     fn targets(&self, repo: Option<&str>) -> Result<Vec<Arc<RepoHandle>>> {
         let registry = Registry::load()?;
+        let jobs = self.jobs.lock().expect("jobs lock").clone();
         let entries: Vec<RepoEntry> = match repo {
             Some(key) => {
+                if let Some((_, job)) = jobs
+                    .iter()
+                    .find(|(name, job)| job_matches_key(name, job, key))
+                {
+                    match job.status.as_str() {
+                        "indexing" => bail!("仓库仍在索引中，请等待完成: {key}"),
+                        "failed" => bail!("仓库索引失败: {}", job.detail.as_deref().unwrap_or(key)),
+                        _ => {}
+                    }
+                }
                 let found = registry
                     .repos
                     .iter()
@@ -455,6 +943,13 @@ impl AkaBackend {
         let mut cache = self.handles.lock().expect("handles lock");
         let mut out = Vec::with_capacity(entries.len());
         for entry in entries {
+            if let Some(job) = jobs.get(&entry.name) {
+                match job.status.as_str() {
+                    "indexing" => continue,
+                    "failed" => continue,
+                    _ => {}
+                }
+            }
             let key = entry.repo_path.clone();
             if let Some(h) = cache.get(&key) {
                 out.push(Arc::clone(h));
@@ -463,6 +958,9 @@ impl AkaBackend {
             let handle = Arc::new(RepoHandle::open(entry)?);
             cache.insert(key, Arc::clone(&handle));
             out.push(handle);
+        }
+        if out.is_empty() {
+            bail!("没有已就绪的仓库——请等待索引完成");
         }
         Ok(out)
     }
@@ -527,6 +1025,7 @@ impl Backend for AkaBackend {
                     source_url: r.source_url.clone(),
                     detail,
                     render_max_nodes: r.render_max_nodes,
+                    progress: jobs.get(&r.name).map(|j| j.progress.clone()),
                 }
             })
             .collect();
@@ -549,6 +1048,7 @@ impl Backend for AkaBackend {
                 source_url: job.url.clone(),
                 detail: job.detail.clone(),
                 render_max_nodes: None,
+                progress: Some(job.progress.clone()),
             });
         }
         Ok(out)
@@ -573,6 +1073,39 @@ impl Backend for AkaBackend {
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    fn search_code(
+        &self,
+        repo: Option<&str>,
+        query: &str,
+        limit: usize,
+        context: usize,
+        regex: bool,
+        path_filter: Option<&str>,
+    ) -> Result<CodeSearchResult> {
+        let mut hits = Vec::new();
+        let mut dirs: HashMap<String, usize> = HashMap::new();
+        for handle in self.targets(repo)? {
+            let result = code_search_in_handle(&handle, query, limit, context, regex, path_filter)?;
+            hits.extend(result.hits);
+            for d in result.directories {
+                *dirs.entry(d.dir).or_default() += d.count;
+            }
+        }
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.start_line.cmp(&b.start_line))
+        });
+        hits.truncate(limit);
+        let mut directories: Vec<DirectoryCount> = dirs
+            .into_iter()
+            .map(|(dir, count)| DirectoryCount { dir, count })
+            .collect();
+        directories.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.dir.cmp(&b.dir)));
+        Ok(CodeSearchResult { hits, directories })
     }
 
     fn find_definition(&self, repo: Option<&str>, symbol: &str) -> Result<Vec<SearchHit>> {
@@ -676,6 +1209,72 @@ impl Backend for AkaBackend {
         Ok(out)
     }
 
+    fn query_enrichment(
+        &self,
+        repo: Option<&str>,
+        node_ids: &[String],
+        include_content: bool,
+    ) -> Result<HashMap<String, QueryEnrichment>> {
+        let mut out = HashMap::new();
+        if node_ids.is_empty() {
+            return Ok(out);
+        }
+        for handle in self.targets(repo)? {
+            let (processes_by_node, community_by_node, rows_by_id) = {
+                let store = handle.store.lock().expect("store lock");
+                let processes = store.processes_of_node_ids(node_ids)?;
+                let communities = store.community_of_node_ids(node_ids)?;
+                let mut rows = HashMap::new();
+                if include_content {
+                    for id in node_ids {
+                        if let Some(row) = store.node_by_id(id)? {
+                            rows.insert(id.clone(), row);
+                        }
+                    }
+                }
+                (processes, communities, rows)
+            };
+
+            for id in node_ids {
+                let processes = processes_by_node
+                    .get(id)
+                    .map(|rows| {
+                        rows.iter()
+                            .map(|m| ProcessHit {
+                                process_id: m.process_id.clone(),
+                                name: m.name.clone(),
+                                process_type: m.process_type.clone(),
+                                step: m.step,
+                                step_count: m.step_count,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let community = community_by_node.get(id);
+                let content = if include_content {
+                    rows_by_id
+                        .get(id)
+                        .and_then(|row| node_content(&handle.entry.repo_path, row).ok().flatten())
+                } else {
+                    None
+                };
+                if !processes.is_empty() || community.is_some() || content.is_some() {
+                    out.insert(
+                        id.clone(),
+                        QueryEnrichment {
+                            processes,
+                            module: community
+                                .and_then(|c| (!c.module.is_empty()).then(|| c.module.clone())),
+                            cohesion: community.map(|c| c.cohesion).unwrap_or(0.0),
+                            content,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn graph_lod(&self, repo: &str, max_nodes: Option<usize>) -> Result<serde_json::Value> {
         // 缺省 → per-repo render_max_nodes 设置 → 默认 50_000；一律 clamp 到硬上限。
         let requested = match max_nodes {
@@ -696,7 +1295,7 @@ impl Backend for AkaBackend {
     }
 
     fn analyze(&self, repo_path: &str) -> Result<String> {
-        let summary = crate::run_analyze(PathBuf::from(repo_path), None, false)
+        let summary = crate::run_analyze(PathBuf::from(repo_path), self.engine_dir(), false)
             .map_err(|e| anyhow!("{e:#}"))?;
         // 旧句柄作废（重新索引后必须重开）。
         self.handles
@@ -719,17 +1318,26 @@ impl Backend for AkaBackend {
                 let url = src.to_string();
                 let job_name = name.clone();
                 let job_url = url.clone();
-                self.spawn_job(name.clone(), "git", Some(url), dest.clone(), move || {
-                    run_git(
-                        &["clone", &job_url, &dest.to_string_lossy()],
-                        None,
-                    )?;
-                    let repo = dest.canonicalize()?;
-                    crate::run_analyze(repo.clone(), None, false)
-                        .map_err(|e| anyhow!("{e:#}"))?;
-                    finalize_entry(&repo, &job_name, "git", Some(job_url))?;
-                    Ok(repo)
-                });
+                let engine_dir = self.engine_dir();
+                self.spawn_job(
+                    name.clone(),
+                    "git",
+                    Some(url),
+                    dest.clone(),
+                    move |jobs, name| {
+                        update_job(&jobs, &name, |job| {
+                            job.set_stage("checkout", "Cloning git repository", 6.0);
+                        });
+                        clone_git_repo(&job_url, &dest)?;
+                        let repo = dest.canonicalize()?;
+                        run_analyze_job(&jobs, &name, repo.clone(), engine_dir)?;
+                        update_job(&jobs, &name, |job| {
+                            job.set_stage("register", "Saving repository metadata", 98.0);
+                        });
+                        finalize_entry(&repo, &job_name, "git", Some(job_url))?;
+                        Ok(repo)
+                    },
+                );
                 Ok(name)
             }
             "local" => {
@@ -753,9 +1361,12 @@ impl Backend for AkaBackend {
                 }
                 let job_name = name.clone();
                 let job_path = path.clone();
-                self.spawn_job(name.clone(), "local", None, path, move || {
-                    crate::run_analyze(job_path.clone(), None, false)
-                        .map_err(|e| anyhow!("{e:#}"))?;
+                let engine_dir = self.engine_dir();
+                self.spawn_job(name.clone(), "local", None, path, move |jobs, name| {
+                    run_analyze_job(&jobs, &name, job_path.clone(), engine_dir)?;
+                    update_job(&jobs, &name, |job| {
+                        job.set_stage("register", "Saving repository metadata", 98.0);
+                    });
                     finalize_entry(&job_path, &job_name, "local", None)?;
                     Ok(job_path)
                 });
@@ -770,18 +1381,30 @@ impl Backend for AkaBackend {
         let dest = self.prepare_checkout(&name)?;
         let zip = zip_path.to_path_buf();
         let job_name = name.clone();
-        self.spawn_job(name.clone(), "zip", None, dest.clone(), move || {
-            let result = (|| {
-                extract_zip(&zip, &dest)?;
-                let repo = dest.canonicalize()?;
-                crate::run_analyze(repo.clone(), None, false)
-                    .map_err(|e| anyhow!("{e:#}"))?;
-                finalize_entry(&repo, &job_name, "zip", None)?;
-                Ok(repo)
-            })();
-            let _ = std::fs::remove_file(&zip); // 上传临时件用完即焚（含失败路径）
-            result
-        });
+        let engine_dir = self.engine_dir();
+        self.spawn_job(
+            name.clone(),
+            "zip",
+            None,
+            dest.clone(),
+            move |jobs, name| {
+                let result = (|| {
+                    update_job(&jobs, &name, |job| {
+                        job.set_stage("extract", "Extracting zip archive", 8.0);
+                    });
+                    extract_zip(&zip, &dest)?;
+                    let repo = dest.canonicalize()?;
+                    run_analyze_job(&jobs, &name, repo.clone(), engine_dir)?;
+                    update_job(&jobs, &name, |job| {
+                        job.set_stage("register", "Saving repository metadata", 98.0);
+                    });
+                    finalize_entry(&repo, &job_name, "zip", None)?;
+                    Ok(repo)
+                })();
+                let _ = std::fs::remove_file(&zip); // 上传临时件用完即焚（含失败路径）
+                result
+            },
+        );
         Ok(name)
     }
 
@@ -800,16 +1423,19 @@ impl Backend for AkaBackend {
             "git" => {
                 let dir = entry.repo_path.clone();
                 let job_dir = dir.clone();
+                let engine_dir = self.engine_dir();
                 self.spawn_job(
                     name.to_string(),
                     "git",
                     entry.source_url.clone(),
                     dir,
-                    move || {
-                        run_git(&["pull", "--ff-only"], Some(&job_dir))?;
+                    move |jobs, name| {
+                        update_job(&jobs, &name, |job| {
+                            job.set_stage("checkout", "Fetching git updates", 6.0);
+                        });
+                        fast_forward_git_repo(&job_dir)?;
                         // register() 继承旧条目的 name/source/embeddings，无须再 finalize。
-                        crate::run_analyze(job_dir.clone(), None, false)
-                            .map_err(|e| anyhow!("{e:#}"))?;
+                        run_analyze_job(&jobs, &name, job_dir.clone(), engine_dir)?;
                         Ok(job_dir)
                     },
                 );
@@ -821,9 +1447,9 @@ impl Backend for AkaBackend {
             _ => {
                 let dir = entry.repo_path.clone();
                 let job_dir = dir.clone();
-                self.spawn_job(name.to_string(), "local", None, dir, move || {
-                    crate::run_analyze(job_dir.clone(), None, false)
-                        .map_err(|e| anyhow!("{e:#}"))?;
+                let engine_dir = self.engine_dir();
+                self.spawn_job(name.to_string(), "local", None, dir, move |jobs, name| {
+                    run_analyze_job(&jobs, &name, job_dir.clone(), engine_dir)?;
                     Ok(job_dir)
                 });
                 Ok(format!("update scheduled: {name} (re-analyze)"))
@@ -860,21 +1486,33 @@ impl Backend for AkaBackend {
         let dest = entry.repo_path.clone();
         let zip = zip_path.to_path_buf();
         let job_name = name.to_string();
-        self.spawn_job(name.to_string(), "zip", None, dest.clone(), move || {
-            let result = (|| {
-                if dest.exists() {
-                    std::fs::remove_dir_all(&dest)?;
-                }
-                extract_zip(&zip, &dest)?;
-                let repo = dest.canonicalize()?;
-                crate::run_analyze(repo.clone(), None, false)
-                    .map_err(|e| anyhow!("{e:#}"))?;
-                finalize_entry(&repo, &job_name, "zip", None)?;
-                Ok(repo)
-            })();
-            let _ = std::fs::remove_file(&zip);
-            result
-        });
+        let engine_dir = self.engine_dir();
+        self.spawn_job(
+            name.to_string(),
+            "zip",
+            None,
+            dest.clone(),
+            move |jobs, name| {
+                let result = (|| {
+                    update_job(&jobs, &name, |job| {
+                        job.set_stage("extract", "Replacing zip checkout", 6.0);
+                    });
+                    if dest.exists() {
+                        std::fs::remove_dir_all(&dest)?;
+                    }
+                    extract_zip(&zip, &dest)?;
+                    let repo = dest.canonicalize()?;
+                    run_analyze_job(&jobs, &name, repo.clone(), engine_dir)?;
+                    update_job(&jobs, &name, |job| {
+                        job.set_stage("register", "Saving repository metadata", 98.0);
+                    });
+                    finalize_entry(&repo, &job_name, "zip", None)?;
+                    Ok(repo)
+                })();
+                let _ = std::fs::remove_file(&zip);
+                result
+            },
+        );
         Ok(name.to_string())
     }
 
@@ -890,7 +1528,10 @@ impl Backend for AkaBackend {
             if let Some(job) = removed {
                 if job.status == "indexing" {
                     // 放回去，进行中的任务不能删。
-                    self.jobs.lock().expect("jobs lock").insert(name.to_string(), job);
+                    self.jobs
+                        .lock()
+                        .expect("jobs lock")
+                        .insert(name.to_string(), job);
                     bail!("invalid: repo {name} is still indexing, wait for it to finish");
                 }
                 let stale = checkouts.join(name);
@@ -1118,7 +1759,8 @@ mod tests {
 
     /// 每个测试用独立临时仓库目录，互不串扰。
     fn temp_repo(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("aka-source-test-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aka-source-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1151,7 +1793,10 @@ mod tests {
         let symbols = v["symbols"].as_array().unwrap();
         assert_eq!(symbols.len(), 3, "File 节点（无行号）必须被滤掉");
         // line 升序 + 合同字段一字不差。
-        let lines: Vec<u64> = symbols.iter().map(|s| s["line"].as_u64().unwrap()).collect();
+        let lines: Vec<u64> = symbols
+            .iter()
+            .map(|s| s["line"].as_u64().unwrap())
+            .collect();
         assert_eq!(lines, [3, 12, 50]);
         assert_eq!(symbols[0]["id"], "Fn:src/x.ts:alpha");
         assert_eq!(symbols[0]["name"], "alpha");
@@ -1188,7 +1833,12 @@ mod tests {
         let v = read_source_slice(&repo, "src/a.ts", Some(3), Some(5)).unwrap();
         assert_eq!(v["start"], 3);
         assert_eq!(v["end"], 5);
-        let lines: Vec<&str> = v["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect();
+        let lines: Vec<&str> = v["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str().unwrap())
+            .collect();
         assert_eq!(lines, ["line3", "line4", "line5"]);
 
         // 越界自动 clamp：start=0 → 1；end=999 → 10；start>total → 最后一行。
@@ -1225,14 +1875,20 @@ mod tests {
         let repo = temp_repo("traverse");
         std::fs::write(repo.join("ok.txt"), "hi\n").unwrap();
         // 仓库外目标文件（../ 穿越能拿到的位置）。
-        std::fs::write(repo.parent().unwrap().join("aka-source-test-outside.txt"), "secret").unwrap();
+        std::fs::write(
+            repo.parent().unwrap().join("aka-source-test-outside.txt"),
+            "secret",
+        )
+        .unwrap();
 
         let err = read_source_slice(&repo, "../aka-source-test-outside.txt", None, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("invalid path"), "应拒绝 ../ 穿越: {err}");
 
-        let err = read_source_slice(&repo, "/etc/hosts", None, None).unwrap_err().to_string();
+        let err = read_source_slice(&repo, "/etc/hosts", None, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("invalid path"), "应拒绝绝对路径: {err}");
     }
 
@@ -1247,23 +1903,37 @@ mod tests {
         std::fs::write(&outside, "secret\n").unwrap();
         std::os::unix::fs::symlink(&outside, repo.join("sneaky.txt")).unwrap();
 
-        let err = read_source_slice(&repo, "sneaky.txt", None, None).unwrap_err().to_string();
+        let err = read_source_slice(&repo, "sneaky.txt", None, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("invalid path"), "软链接逃逸必须被挡: {err}");
     }
 
     #[test]
     fn source_slice_missing_file_and_binary() {
         let repo = temp_repo("misc");
-        let err = read_source_slice(&repo, "nope.rs", None, None).unwrap_err().to_string();
-        assert!(err.contains("file not found"), "缺文件要 not found 语义: {err}");
+        let err = read_source_slice(&repo, "nope.rs", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("file not found"),
+            "缺文件要 not found 语义: {err}"
+        );
 
         std::fs::write(repo.join("bin.dat"), b"abc\0def").unwrap();
-        let err = read_source_slice(&repo, "bin.dat", None, None).unwrap_err().to_string();
+        let err = read_source_slice(&repo, "bin.dat", None, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("invalid file"), "二进制要 invalid 语义: {err}");
 
         std::fs::write(repo.join("bad.txt"), [0xFFu8, 0xFE, 0x41]).unwrap();
-        let err = read_source_slice(&repo, "bad.txt", None, None).unwrap_err().to_string();
-        assert!(err.contains("invalid file"), "非 UTF-8 要 invalid 语义: {err}");
+        let err = read_source_slice(&repo, "bad.txt", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("invalid file"),
+            "非 UTF-8 要 invalid 语义: {err}"
+        );
 
         // 空文件：total 0 / start 1 / end 0 / lines []。
         std::fs::write(repo.join("empty.txt"), "").unwrap();

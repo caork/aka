@@ -7,9 +7,9 @@ import {
   RENDER_MAX_MIN,
 } from "../store";
 import { invokeDesktop, isDesktopRuntime } from "../desktop-api";
+import { apiUrl } from "../api-base";
 import { parseGraphJSON, type GraphData, type GraphJSON } from "./format";
 
-const SERVER = "http://127.0.0.1:4111";
 const EGO_MAX_NODES = 2_000;
 
 /**
@@ -43,7 +43,7 @@ async function loadRealGraphHttp(
   signal?: AbortSignal,
 ): Promise<GraphJSON> {
   const lr = await fetch(
-    `${SERVER}/api/graph/lod?repo=${encodeURIComponent(repo)}&max_nodes=${budget}`,
+    apiUrl(`/api/graph/lod?repo=${encodeURIComponent(repo)}&max_nodes=${budget}`),
     { signal: signal ?? AbortSignal.timeout(20_000) },
   );
   if (!lr.ok) throw new Error(String(lr.status));
@@ -80,7 +80,7 @@ async function loadEgoGraphHttp(
   signal?: AbortSignal,
 ): Promise<GraphJSON> {
   const lr = await fetch(
-    `${SERVER}/api/graph/ego?repo=${encodeURIComponent(repo)}&id=${encodeURIComponent(id)}&depth=${depth}&max_nodes=${EGO_MAX_NODES}`,
+    apiUrl(`/api/graph/ego?repo=${encodeURIComponent(repo)}&id=${encodeURIComponent(id)}&depth=${depth}&max_nodes=${EGO_MAX_NODES}`),
     { signal: signal ?? AbortSignal.timeout(20_000) },
   );
   if (!lr.ok) throw new Error(String(lr.status));

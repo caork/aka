@@ -286,8 +286,8 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
       data-testid="code-view"
     >
       {/* ---- 头部：面包屑 + 徽章 + 操作 ---- */}
-      {/* pr-[152px] reserves space for the absolute Code/Graph switcher (≈130px) at right-3 */}
-      <div className="themed-divider flex flex-none items-center gap-3 border-b pl-4 pr-[152px] py-2.5">
+      {/* pr reserves space for the absolute Search + Code/Graph controls at right-3. */}
+      <div className="themed-divider flex flex-none items-center gap-3 border-b pl-4 pr-[196px] py-2.5">
         <nav
           className="mono flex min-w-0 flex-1 items-center gap-1 text-[12px]"
           aria-label="文件路径"
@@ -522,7 +522,7 @@ function renderLine(
           "code-symbol-mark focus-ring cursor-pointer rounded-[3px] align-baseline transition-colors duration-150 ease-out",
           selected ? "font-medium" : "",
         ].join(" ")}
-        style={{ font: "inherit", padding: "0 1px" }}
+        style={{ font: "inherit" }}
         data-testid="code-symbol"
         data-selected={selected ? "true" : undefined}
       >

@@ -1,6 +1,6 @@
 # aka × Claude Code 插件
 
-把 aka 作为 Claude Code 插件安装：捆绑 **aka MCP server**（stdio，八工具）+ **aka-code-graph skill**（指导 agent 何时用哪个工具）。
+把 aka 作为 Claude Code 插件安装：捆绑 **aka MCP server**（stdio，九工具）+ **aka-code-graph skill**（指导 agent 何时用哪个工具）。
 
 ## 目录结构
 
@@ -64,4 +64,4 @@ claude plugin validate clients/claude-code
 claude plugin validate .                     # 校验 marketplace.json
 ```
 
-> 注意：上游 License 为 PolyForm Noncommercial 1.0，本插件随整个项目仅限非商用。
+> 注意：解析引擎 `codebase-memory-mcp` 为 MIT，本插件随 aka 客户端接入按 MIT 口径分发。

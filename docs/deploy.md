@@ -1,15 +1,14 @@
 # 部署（Docker）
 
-> 许可提醒：上游 GitNexus 为 **PolyForm Noncommercial 1.0**，aka 整体非商用。镜像 OCI label
-> 已带 `org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0`，不得用于商业化场景。
+> 许可提醒：解析引擎 `codebase-memory-mcp` 为 MIT，aka 镜像 OCI label 使用
+> `org.opencontainers.image.licenses=MIT`。
 
-镜像内容：`aka` 二进制（serve / analyze / mcp 等八命令）+ TS 解析引擎 sidecar（node 22 +
-tree-sitter 原生模块，构建期已编译好）+ git（git 导入用）。默认启动 `aka serve`，HTTP API 在 4111。
+镜像内容：`aka` 二进制（serve / analyze / mcp 等八命令）+ `codebase-memory-mcp` 原生 C 解析引擎 + git（git 导入用）。CBM 负责解析并写入 SQLite，aka-core adapter 导出 NDJSON 后进入 Rust 索引。默认启动 `aka serve`，HTTP API 在 4111。
 
 ## 构建
 
 ```bash
-# 仓库根目录（engine/ 下需有 gitnexus/ 与 gitnexus-shared/ 源码副本，scripts/sync-engine.sh 同步）
+# 仓库根目录（Dockerfile 会拉取/构建 codebase-memory-mcp native engine）
 docker build -t aka:0.1.0 .
 ```
 
@@ -19,10 +18,10 @@ docker build -t aka:0.1.0 .
 |---|---|
 | `rust-builder` | `cargo build --release -p aka-cli`（native arch） |
 | `rust-cross` | 可选：`--target rust-cross` 单独构建 x86_64 linux 二进制（不在默认链路） |
-| `engine-builder` | node:22 完整镜像里 `npm install`，postinstall 编译 tree-sitter 原生 grammar |
-| `runtime` | node:22-slim + git + aka + engine，非 root（uid 10001），`/data` 数据卷 |
+| `engine-builder` | Debian build 环境里拉取 `codebase-memory-mcp` 并 `make -f Makefile.cbm cbm` |
+| `runtime` | debian-slim + git + aka + CBM native engine，非 root（uid 10001），`/data` 数据卷 |
 
-构建慢点正常：rust release 编译 + engine `npm install`（含原生模块编译）合计十几分钟量级。
+构建慢点正常：rust release 编译 + CBM native engine 编译合计数分钟到十几分钟量级。
 
 ## 运行
 
@@ -39,7 +38,8 @@ curl http://127.0.0.1:4111/api/health     # → {"status":"ok","service":"aka-se
 关键环境变量（镜像内已设好，一般不用动）：
 
 - `AKA_HOME=/data` — registry.json 与各仓库索引数据（artifact / graph.db / search）都在这，**挂卷持久化**。
-- `AKA_ENGINE_DIR=/opt/aka/engine` — TS 引擎目录（含 gitnexus/ 与 gitnexus-shared/）。
+- `AKA_ENGINE_DIR=/opt/aka/engine` — CBM native engine 目录（含 `codebase-memory-mcp`）。
+- `AKA_CBM_MODE=fast|moderate|full` — CBM 解析模式，默认 `fast`。
 
 ## 导入仓库
 
@@ -63,7 +63,7 @@ curl -X POST http://127.0.0.1:4111/api/repos/import-zip \
   -F name=myrepo -F file=@repo.zip
 ```
 
-镜像自带冒烟样本 `/opt/aka/fixtures-demo`（fixtures/demo-ts），可快速验证 engine 在容器内可用：
+镜像自带冒烟样本 `/opt/aka/fixtures-demo`（fixtures/demo-ts），可快速验证 CBM engine 和 adapter 在容器内可用：
 
 ```bash
 docker exec aka aka analyze /opt/aka/fixtures-demo
@@ -88,10 +88,9 @@ git 导入的 `checkouts/`。删除容器不丢索引；要全清就 `docker vol
 
 **镜像不在 macOS 本机构建**（约定）。推送 `v*` tag 触发 `.github/workflows/release.yml`：
 
-1. 读 `engine/ENGINE_SHA`，从公开 fork `caork/GitNexus` checkout 该 SHA，
-   `scripts/sync-engine.sh` 同步 engine 源码进构建上下文（engine 副本不入 git，CI 自取）；
+1. Dockerfile 按 CBM pin 拉取 `DeusData/codebase-memory-mcp` 并构建 native C binary；
 2. 构建 linux/amd64 镜像并**容器内冒烟**（health → `analyze /opt/aka/fixtures-demo` → query 非空，
-   覆盖 tree-sitter 原生模块这一关键风险点）；
+   覆盖 CBM native engine + SQLite->NDJSON adapter 这一关键风险点）；
 3. 推 `ghcr.io/caork/aka:<版本>` 与 `:latest`（私有 package，拉取需 `read:packages` 的 PAT：
    `echo $PAT | docker login ghcr.io -u caork --password-stdin`）；
 4. `docker save` 的镜像 tar、Linux/macOS/Windows CLI 二进制、macOS/Windows 桌面 GUI 包、
@@ -114,9 +113,9 @@ docker load -i aka-0.1.0-linux-amd64.docker.tar.gz       # 走 release 资产（
 - `aka-desktop-<版本>-x86_64-pc-windows-msvc-portable.zip` — Windows GUI 免安装包
 
 `aka-<版本>-...` 裸二进制是 CLI/server 包，能启动 `aka serve` / `aka mcp` / 查询既有索引，但不会打开 GUI；
-桌面窗口请下载 `aka-desktop-<版本>-...`。完整 `aka analyze` 仍依赖 `engine/` 源码目录与 Node/`npx`
-环境（或设置 `AKA_ENGINE_DIR` 指向已准备好的 engine）。要开箱跑分析与 HTTP server，优先用 Docker 镜像。
+桌面窗口请下载 `aka-desktop-<版本>-...`。完整 `aka analyze` 需要 `codebase-memory-mcp` 原生二进制：
+可以使用 Docker/桌面包内置资源，或设置 `AKA_ENGINE_DIR` 指向含二进制的 engine 目录，或设置 `AKA_CBM_BIN` 指向二进制。
 
-arm64 镜像暂不预构建（engine 阶段需在目标架构编译原生模块，QEMU 全模拟太慢）；
+arm64 镜像暂不预构建（engine 阶段需在目标架构编译 CBM native binary，QEMU 全模拟太慢）；
 需要时在 arm64 机器上 `docker build -t aka:0.1.0 .` 即可，Dockerfile 全程架构无关。
 macOS 本机 CLI/GUI 包由 `scripts/package-release.sh` 产出（不含 Docker）。

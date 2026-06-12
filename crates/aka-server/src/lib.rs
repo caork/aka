@@ -6,7 +6,8 @@
 //! 路由：
 //! - `GET    /api/health`              — 存活探针
 //! - `GET    /api/repos`               — 已索引仓库列表（含 status/source/detail）
-//! - `POST   /api/query`               — 混合检索 `{ repo?, query, limit? }`
+//! - `POST   /api/query`               — 混合检索 `{ repo?, query, limit?, max_symbols?, include_content? }`
+//! - `POST   /api/search/code`         — 行级源码搜索 `{ repo?, query, limit?, context?, regex?, path_filter? }`
 //! - `POST   /api/symbol/context`      — 符号 360° 上下文 `{ repo?, symbol }`
 //! - `GET    /api/graph/lod`           — 图 LOD 数据 `?repo=&max_nodes=`（缺省用 per-repo
 //!   render_max_nodes 设置，没有则 50_000；一律 clamp 到硬上限；Backend 不支持时 501）
@@ -29,11 +30,11 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -43,8 +44,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub use aka_mcp::ops;
 pub use aka_mcp::{
-    clamp_render_nodes, Backend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef, MAX_RENDER_NODES,
-    MIN_RENDER_NODES,
+    clamp_render_nodes, Backend, RepoInfo, RepoProgress, RepoSettingsUpdate, SearchHit, SymbolRef,
+    MAX_RENDER_NODES, MIN_RENDER_NODES,
 };
 
 type AppState = Arc<dyn Backend>;
@@ -71,6 +72,7 @@ pub fn router(backend: Arc<dyn Backend>) -> Router {
         .route("/api/repos/{name}/settings", post(repo_settings))
         .route("/api/repos/{name}", delete(repo_delete))
         .route("/api/query", post(query))
+        .route("/api/search/code", post(search_code))
         .route("/api/symbol/context", post(symbol_context))
         .route("/api/node", get(node_detail))
         .route("/api/graph/lod", get(graph_lod))
@@ -179,7 +181,11 @@ where
 }
 
 fn bad_request(msg: impl Into<String>) -> Response {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": msg.into() }))).into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": msg.into() })),
+    )
+        .into_response()
 }
 
 // ---- 请求体 ----
@@ -193,6 +199,38 @@ pub struct QueryRequest {
     /// 默认 10，上限 100。
     #[serde(default)]
     pub limit: Option<usize>,
+    /// GitNexus-compatible hint；当前接受但不改变排序。
+    #[serde(default)]
+    pub task_context: Option<String>,
+    /// GitNexus-compatible hint；当前接受但不改变排序。
+    #[serde(default)]
+    pub goal: Option<String>,
+    /// GitNexus-compatible字段；当前紧凑输出使用服务默认符号上限。
+    #[serde(default)]
+    pub max_symbols: Option<usize>,
+    /// GitNexus-compatible字段；当前 query 不内联完整源码。
+    #[serde(default)]
+    pub include_content: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CodeSearchRequest {
+    /// 仓库名；缺省 = 所有已索引仓库。
+    #[serde(default)]
+    pub repo: Option<String>,
+    pub query: String,
+    /// 默认 10，上限 100。
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// 命中行上下文，默认 1，上限 5。
+    #[serde(default)]
+    pub context: Option<usize>,
+    /// true 时 query 按 regex 解释；默认大小写不敏感 literal。
+    #[serde(default)]
+    pub regex: bool,
+    /// 可选 repo-relative path 子串过滤。
+    #[serde(default)]
+    pub path_filter: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,14 +258,56 @@ async fn query(
         .limit
         .unwrap_or(ops::DEFAULT_QUERY_LIMIT)
         .clamp(1, ops::MAX_QUERY_LIMIT);
-    run(b, move |b| ops::query(b, req.repo.as_deref(), &req.query, limit)).await
+    let max_symbols = ops::clamp_process_symbol_limit(req.max_symbols);
+    let include_content = req.include_content.unwrap_or(false);
+    let _ = (&req.task_context, &req.goal);
+    run(b, move |b| {
+        ops::query(
+            b,
+            req.repo.as_deref(),
+            &req.query,
+            limit,
+            max_symbols,
+            include_content,
+        )
+    })
+    .await
+}
+
+async fn search_code(
+    State(b): State<AppState>,
+    Json(req): Json<CodeSearchRequest>,
+) -> Result<Json<ops::CodeSearchOut>, ApiError> {
+    let limit = req
+        .limit
+        .unwrap_or(ops::DEFAULT_QUERY_LIMIT)
+        .clamp(1, ops::MAX_QUERY_LIMIT);
+    let context = req
+        .context
+        .unwrap_or(ops::DEFAULT_CODE_CONTEXT)
+        .min(ops::MAX_CODE_CONTEXT);
+    run(b, move |b| {
+        ops::search_code(
+            b,
+            req.repo.as_deref(),
+            &req.query,
+            limit,
+            context,
+            req.regex,
+            req.path_filter.as_deref(),
+        )
+    })
+    .await
 }
 
 async fn symbol_context(
     State(b): State<AppState>,
     Json(req): Json<ContextRequest>,
 ) -> Result<Json<ops::ContextOut>, ApiError> {
-    run(b, move |b| ops::context(b, req.repo.as_deref(), &req.symbol)).await
+    run(b, move |b| {
+        ops::context(b, req.repo.as_deref(), &req.symbol)
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -291,7 +371,9 @@ async fn repos_import(State(b): State<AppState>, Json(req): Json<ImportRequest>)
 }
 
 /// multipart 收集结果：name 字段（import 必填）+ zip 落到的临时文件。
-async fn collect_multipart(mp: &mut Multipart) -> Result<(Option<String>, Option<PathBuf>), String> {
+async fn collect_multipart(
+    mp: &mut Multipart,
+) -> Result<(Option<String>, Option<PathBuf>), String> {
     let mut name: Option<String> = None;
     let mut tmp: Option<PathBuf> = None;
     loop {

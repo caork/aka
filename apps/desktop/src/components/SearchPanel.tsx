@@ -11,7 +11,7 @@ export default function SearchPanel({ compact = false }: { compact?: boolean }) 
   const repoId = useAppStore((s) => s.selectedRepoId);
   const hasRepos = useAppStore((s) => s.repos.length > 0);
   const repoStatus = useAppStore(
-    (s) => s.repos.find((r) => r.id === s.selectedRepoId)?.status ?? "ready",
+    (s) => s.repos.find((r) => r.id === s.selectedRepoId)?.status ?? null,
   );
   const openDetail = useAppStore((s) => s.openDetail);
   const openCode = useAppStore((s) => s.openCode);

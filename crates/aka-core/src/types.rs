@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const CONTRACT_VERSION: u32 = 0;
 
-/// nodes.ndjson 的一行 — gitnexus-shared `GraphNode` 原样透传。
+/// nodes.ndjson 的一行 — CBM graph node 经 aka adapter 规范化后的记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeRec {
     pub id: String,
@@ -27,7 +27,7 @@ impl NodeRec {
         self.prop_str("filePath").or_else(|| self.prop_str("path"))
     }
 
-    /// 工件原始值 —— engine（tree-sitter）的 0-based row。
+    /// 工件原始值 —— engine 的 0-based row。
     pub fn start_line(&self) -> Option<u32> {
         self.properties
             .get("startLine")
@@ -35,7 +35,7 @@ impl NodeRec {
             .map(|v| v as u32)
     }
 
-    /// 工件原始值 —— engine（tree-sitter）的 0-based row。
+    /// 工件原始值 —— engine 的 0-based row。
     pub fn end_line(&self) -> Option<u32> {
         self.properties
             .get("endLine")
@@ -54,7 +54,7 @@ impl NodeRec {
     }
 }
 
-/// edges.ndjson 的一行 — gitnexus-shared `GraphRelationship` 原样透传。
+/// edges.ndjson 的一行 — CBM graph edge 经 aka adapter 规范化后的记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EdgeRec {
@@ -80,7 +80,7 @@ pub struct ChunkRec {
     pub node_id: String,
     pub kind: String,
     pub file_path: String,
-    /// 工件原始值 —— engine（tree-sitter）的 0-based row。
+    /// 工件原始值 —— engine 的 0-based row。
     #[serde(default)]
     pub start_line: u32,
     #[serde(default)]

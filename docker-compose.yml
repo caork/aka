@@ -1,4 +1,4 @@
-# aka HTTP 服务（非商用：上游 GitNexus 为 PolyForm Noncommercial 1.0）
+# aka HTTP 服务（MIT：内置 codebase-memory-mcp native engine）
 # 用法：docker compose up -d  →  http://127.0.0.1:4111/api/health
 # 详见 docs/deploy.md
 services:

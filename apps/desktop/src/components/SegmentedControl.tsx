@@ -15,7 +15,7 @@ export default function SegmentedControl({
 }) {
   return (
     <div
-      className="segmented flex items-center gap-0.5 rounded-[10px] p-0.5"
+      className="segmented flex h-8 items-center gap-0.5 rounded-[10px] p-0.5"
       role="tablist"
       data-testid="view-switcher"
     >
@@ -27,7 +27,7 @@ export default function SegmentedControl({
             role="tab"
             aria-selected={active}
             onClick={() => onChange(v.id)}
-            className="focus-ring relative rounded-[8px] px-3.5 py-1.5 text-[12.5px] font-medium transition-colors duration-150 ease-out"
+            className="focus-ring relative flex h-7 items-center rounded-[8px] px-3.5 text-[12.5px] font-medium leading-none transition-colors duration-150 ease-out"
             style={{ color: active ? "var(--ink)" : "var(--ink-2)" }}
           >
             {active && (

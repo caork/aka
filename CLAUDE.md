@@ -1,23 +1,23 @@
 # aka
 
-感知所有代码的知识引擎（GitNexus 的 Rust 重写，名字源自 Akasha records）：tree-sitter 解析（继承的 TS engine 作 sidecar）→ NDJSON 工件 → Rust 索引（tantivy BM25 + SQLite/CSR 图）→ CLI / MCP / HTTP / 液态玻璃桌面端。私有库 `caork/aka`。
+感知所有代码的知识引擎（名字源自 Akasha records）：codebase-memory-mcp native C engine 解析 → SQLite->NDJSON adapter → Rust 索引（tantivy BM25 + SQLite/CSR 图）→ CLI / MCP / HTTP / 液态玻璃桌面端。私有库 `caork/aka`。
 
-**工作路径**：本仓库 `~/Documents/github/aka`；engine 上游开发在 `~/Documents/github/GitNexus-engine`（fork `caork/GitNexus` 的 `engine/aka` 分支 worktree）；运行时数据在 `~/.aka/`（registry.json + repos/<slug-hash>/{artifact,graph.db,search}/ + checkouts/）。
+**工作路径**：本仓库 `~/Documents/github/aka`；engine 来源为 `codebase-memory-mcp`（默认由 `scripts/sync-engine.sh` 同步到 `engine/codebase-memory-mcp-src/` 并产出 `engine/codebase-memory-mcp`）；运行时数据在 `~/.aka/`（registry.json + repos/<slug-hash>/{artifact,graph.db,search}/ + checkouts/）。
 
 ## 硬约束（必须遵守）
 
-- **License**：上游 GitNexus 是 PolyForm Noncommercial 1.0，engine 是其衍生作品 → **整个项目非商用**，不得用于任何商业化场景。
-- **engine/ 是 vendored 同步副本，不要直接改它的代码**：parser/emit 的改动必须提交到 fork 的 `engine/aka` 分支（在 GitNexus-engine worktree 里改、测、push **fork**，绝不 push origin 上游），再跑 `scripts/sync-engine.sh` 同步过来。`engine/gitnexus*` 不入 git，`engine/ENGINE_SHA` 锚定来源版本。上游 parser 很活跃，**每月 rebase 一次**而不是冻结。
-- **工件合同** `docs/contracts/artifacts.md` 是 engine↔Rust 的唯一接口：字段只增不改不删；破坏性变更必须 `contractVersion` +1 并双侧同步，Rust 侧永不 import engine 内部模块。
+- **License**：codebase-memory-mcp 为 MIT；aka 按 MIT 口径接入与分发。
+- **engine/ 是 CBM 同步/构建产物，不要直接改生成物**：解析能力改动应先在 codebase-memory-mcp 源码侧完成，再跑 `scripts/sync-engine.sh` 同步 native C binary。`engine/codebase-memory-mcp*` 不入 git，`engine/ENGINE_SHA` 锚定来源版本。
+- **工件合同** `docs/contracts/artifacts.md` 是 engine adapter↔Rust 的唯一接口：字段只增不改不删；破坏性变更必须 `contractVersion` +1 并双侧同步，Rust 侧永不 import engine 内部模块。
 - **embedding 默认关闭**（用户拍板）：默认纯 BM25；开启只能由用户在 per-repo 设置里手动操作，代码里不许悄悄打开。
-- **图查询不引 Cypher / 嵌入式图数据库**（用户拍板）：SQLite 持久 + 内存 CSR 邻接，就这一条路。
+- **图查询不引 Cypher / 嵌入式图数据库**（用户拍板）：aka 服务面使用 SQLite 持久 + 内存 CSR 邻接，就这一条路。
 - **渲染性能红线**：WebGL 渲染器每帧 draw call O(1)（与图规模无关），pan/zoom 60fps；动 `apps/desktop/src/graph/renderer.ts` 后必须实测 FPS（页面右下角徽章）。
 - **验证 Web/UI 用浏览器实际渲染**（Playwright MCP 打开页面看真实结果），不要只凭 curl 下结论。
 
 ## 架构
 
 ```
-仓库源码 ─engine(TS sidecar, npx tsx emit-cli)─▶ NDJSON 工件 ─aka-core 摄取─▶
+仓库源码 ─codebase-memory-mcp native C binary─▶ CBM SQLite ─aka-core adapter─▶ NDJSON 工件 ─aka-core 摄取─▶
   ├ aka-graph: SQLite(nodes/edges/positions) + CSR 邻接 + phyllotaxis 布局 / LOD / ego
   ├ aka-search: tantivy BM25(代码感知分词) + usearch 向量 + RRF(K=60)
   └ 服务面: aka-mcp(rmcp 八工具, Backend trait 接缝) + aka-server(axum :4111)
@@ -25,7 +25,7 @@
        ▲ apps/desktop = Tauri2 + React19 + 自研 WebGL2 渲染器(50万节点/百万边 60fps)
 ```
 
-- `crates/aka-core`：合同类型、流式 NDJSON 读取、注册表（~/.aka/registry.json）、EngineRunner（spawn engine、解析 stdout 进度事件）。
+- `crates/aka-core`：合同类型、流式 NDJSON 读取、注册表（~/.aka/registry.json）、EngineRunner（spawn CBM native engine、读取 CBM SQLite、导出 artifacts、解析 stdout 进度事件）。
 - `crates/aka-graph`：store(摄取/查询)、adjacency(callers/callees/impact)、layout(确定性两级 phyllotaxis)、lod、ego(BFS 分环径向)。
 - `crates/aka-mcp`：`Backend` trait 是数据层接缝（mock 可测）；八工具 list_repos/query/context/find_definition/search_references/impact/analyze/augment。
 - `crates/aka-server`：REST 面（repos 的导入/更新/设置/删除、query、symbol/context、graph/lod、graph/ego、node），CORS 仅 localhost。
@@ -35,17 +35,17 @@
 
 ```bash
 cargo build -p aka-cli
-./target/debug/aka analyze <repo>      # engine 解析 + 索引（首次先装 engine 依赖，见下）
+./target/debug/aka analyze <repo>      # CBM engine 解析 + SQLite->NDJSON adapter + 索引
 ./target/debug/aka serve &             # HTTP :4111（桌面端数据源）
 cd apps/desktop && npm run dev         # UI :5188（HMR；自动连 serve）
 ./target/debug/aka mcp                 # MCP stdio（claude mcp add aka -- <绝对路径>/aka mcp）
 
-# engine 首次初始化（同步副本装依赖）
-cd engine/gitnexus-shared && npm i && npm run build && cd ../gitnexus && npm i
+# engine 首次初始化（同步并构建 CBM native binary）
+scripts/sync-engine.sh
 
 # 提交门槛
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
-cd apps/desktop && npx tsc --noEmit && npm run build
+cd apps/desktop && npm run build
 ```
 
 ## 任务流程（每个任务必走）
@@ -66,6 +66,6 @@ cd apps/desktop && npx tsc --noEmit && npm run build
 
 ## 现状
 
-（2026-06-10）M0–M3 完成：engine 移植（Ascend C 25/25）+ 工件合同 v0；Rust 五 crate 全绿（workspace 73 测试 + clippy -D warnings）；CLI 八命令；MCP/HTTP 双服务；桌面端三视图真实数据 + 仓库全生命周期（git/zip 导入、一键更新、per-repo 设置、删除）+ 节点详情/ego 下钻；WebGL 50 万节点/百万边 60fps 实测。
+（2026-06-10）M0–M3 完成：CBM native engine 接入 + SQLite->NDJSON 工件合同 v0；Rust 五 crate 全绿（workspace 73 测试 + clippy -D warnings）；CLI 八命令；MCP/HTTP 双服务；桌面端三视图真实数据 + 仓库全生命周期（git/zip 导入、一键更新、per-repo 设置、删除）+ 节点详情/ego 下钻；WebGL 50 万节点/百万边 60fps 实测。
 （2026-06-11）Process 执行流全链路接入：edges.step 摄取（旧库自动迁移）、布局 Processes 专属簇、MCP impact 报 affected_processes（哪条流断在第几步）、query/context 带流程归属、/api/node 对 Process 展开 entry/terminal/steps、桌面端流程详情视图（入口源码+步骤时间线）+ 普通符号"参与流程"。改完需对已有仓库重跑 `aka index` 补 step 数据。
-**待办**：M4 Docker 化 + Jensen 部署 + 远程模式；embedding 实现（本地 fastembed，默认关）；增量索引（fileHashes/parse-cache）；Tauri 正式打包（engine Bun compile 成 sidecar）；wiki/group 按需移植；导入中 update 返回 404 的小语义瑕疵。
+**待办**：M4 Docker 化 + Jensen 部署 + 远程模式；embedding 实现（本地 fastembed，默认关）；增量索引（fileHashes/parse-cache）；Tauri 正式打包（内置 CBM native binary）；wiki/group 按需补齐；导入中 update 返回 404 的小语义瑕疵。

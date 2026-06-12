@@ -259,9 +259,9 @@ impl GraphStore {
     }
 
     fn ensure_layout(&self) -> Result<()> {
-        let positions: i64 =
-            self.conn()
-                .query_row("SELECT COUNT(*) FROM positions", [], |r| r.get(0))?;
+        let positions: i64 = self
+            .conn()
+            .query_row("SELECT COUNT(*) FROM positions", [], |r| r.get(0))?;
         if positions == 0 && self.node_count()? > 0 {
             return Err(GraphError::Invalid(
                 "layout not computed yet — call compute_layout first".to_string(),

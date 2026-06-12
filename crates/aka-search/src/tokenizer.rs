@@ -232,7 +232,10 @@ mod tests {
 
     #[test]
     fn kebab_case() {
-        assert_eq!(toks("my-component"), vec!["my-component", "my", "component"]);
+        assert_eq!(
+            toks("my-component"),
+            vec!["my-component", "my", "component"]
+        );
     }
 
     #[test]

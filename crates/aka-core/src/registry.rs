@@ -141,7 +141,11 @@ impl Registry {
 
     /// 插入或更新（按 repo_path 去重）。
     pub fn upsert(&mut self, entry: RepoEntry) {
-        match self.repos.iter_mut().find(|r| r.repo_path == entry.repo_path) {
+        match self
+            .repos
+            .iter_mut()
+            .find(|r| r.repo_path == entry.repo_path)
+        {
             Some(slot) => *slot = entry,
             None => self.repos.push(entry),
         }

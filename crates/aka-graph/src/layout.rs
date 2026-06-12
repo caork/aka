@@ -43,9 +43,8 @@ pub fn compute_layout(store: &GraphStore, adj: &Adjacency) -> Result<()> {
     // Community 节点（rowid 升序 → 社区簇的确定性编号）。
     let mut communities: Vec<(u32, String)> = Vec::new(); // (稠密下标, 簇标签)
     {
-        let mut stmt = conn.prepare(
-            "SELECT id, name FROM nodes WHERE label = 'Community' ORDER BY rowid",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, name FROM nodes WHERE label = 'Community' ORDER BY rowid")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;

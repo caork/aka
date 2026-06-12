@@ -142,9 +142,7 @@ impl Adjacency {
             type_index.insert(name, tid as u16);
         }
         if type_names.len() > u16::MAX as usize {
-            return Err(GraphError::Invalid(
-                "edge type id exceeds u16".to_string(),
-            ));
+            return Err(GraphError::Invalid("edge type id exceeds u16".to_string()));
         }
 
         // 边：一次扫描进内存，再计数排序成正反两份 CSR。
@@ -164,9 +162,7 @@ impl Adjacency {
         let fwd = Csr::from_edges(n, &edges, false);
         let rev = Csr::from_edges(n, &edges, true);
         let degree = (0..n)
-            .map(|i| {
-                (fwd.offsets[i + 1] - fwd.offsets[i]) + (rev.offsets[i + 1] - rev.offsets[i])
-            })
+            .map(|i| (fwd.offsets[i + 1] - fwd.offsets[i]) + (rev.offsets[i + 1] - rev.offsets[i]))
             .collect();
 
         let id_index = ids
@@ -235,12 +231,16 @@ impl Adjacency {
 
     /// 出边迭代（target, type_id）。
     pub fn out_edges(&self, node: u32) -> impl Iterator<Item = (u32, u16)> + '_ {
-        self.fwd.range(node).map(|i| (self.fwd.targets[i], self.fwd.types[i]))
+        self.fwd
+            .range(node)
+            .map(|i| (self.fwd.targets[i], self.fwd.types[i]))
     }
 
     /// 入边迭代（source, type_id）。
     pub fn in_edges(&self, node: u32) -> impl Iterator<Item = (u32, u16)> + '_ {
-        self.rev.range(node).map(|i| (self.rev.targets[i], self.rev.types[i]))
+        self.rev
+            .range(node)
+            .map(|i| (self.rev.targets[i], self.rev.types[i]))
     }
 
     // ── 遍历 ────────────────────────────────────────────────────
@@ -257,7 +257,13 @@ impl Adjacency {
 
     /// 影响面：反向 BFS 走 CALLS/IMPORTS/EXTENDS/IMPLEMENTS/HAS_METHOD/MEMBER_OF。
     pub fn impact(&self, node: u32, max_depth: u32, limit: usize) -> Vec<(u32, u32)> {
-        self.bfs(node, max_depth, limit, true, &self.mask_for(&IMPACT_EDGE_TYPES))
+        self.bfs(
+            node,
+            max_depth,
+            limit,
+            true,
+            &self.mask_for(&IMPACT_EDGE_TYPES),
+        )
     }
 
     /// 任意类型一跳邻居（带边类型名与方向）。

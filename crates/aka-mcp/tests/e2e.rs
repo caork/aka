@@ -5,16 +5,17 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use aka_mcp::AkaMcpServer;
-use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
+use rmcp::ServiceExt;
 
 mod support;
 
 use support::fixture_backend::FixtureBackend;
 
-const EXPECTED_TOOLS: [&str; 8] = [
+const EXPECTED_TOOLS: [&str; 9] = [
     "list_repos",
     "query",
+    "search_code",
     "context",
     "find_definition",
     "search_references",
@@ -38,11 +39,14 @@ async fn initialize_list_and_call_query() -> anyhow::Result<()> {
     let info = client.peer_info().expect("server info after initialize");
     assert_eq!(info.server_info.name, "aka-mcp");
 
-    // tools/list：八个工具齐全，query 的 schema 带必填参数。
+    // tools/list：九个工具齐全，query 的 schema 带必填参数。
     let tools = client.list_all_tools().await?;
     let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     for expected in EXPECTED_TOOLS {
-        assert!(names.contains(expected), "missing tool {expected}, got {names:?}");
+        assert!(
+            names.contains(expected),
+            "missing tool {expected}, got {names:?}"
+        );
     }
     let query_tool = tools.iter().find(|t| t.name == "query").unwrap();
     let schema = serde_json::to_value(query_tool.input_schema.as_ref())?;
@@ -54,13 +58,11 @@ async fn initialize_list_and_call_query() -> anyhow::Result<()> {
     let args = serde_json::json!({ "repo": "fixture", "query": "handle" });
     let result = client
         .call_tool(
-            CallToolRequestParams::new("query")
-                .with_arguments(args.as_object().unwrap().clone()),
+            CallToolRequestParams::new("query").with_arguments(args.as_object().unwrap().clone()),
         )
         .await?;
     assert_ne!(result.is_error, Some(true));
-    let body: serde_json::Value =
-        serde_json::from_str(&result.content[0].as_text().unwrap().text)?;
+    let body: serde_json::Value = serde_json::from_str(&result.content[0].as_text().unwrap().text)?;
     assert_eq!(body["hits"][0]["name"], "handle_request");
     assert_eq!(body["hits"][0]["file"], "src/handler.rs");
 

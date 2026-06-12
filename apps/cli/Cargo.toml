@@ -16,6 +16,8 @@ aka-search = { path = "../../crates/aka-search" }
 aka-server = { path = "../../crates/aka-server" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+git2 = { version = "0.21.0", default-features = false, features = ["https", "vendored-libgit2", "vendored-openssl"] }
+regex = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

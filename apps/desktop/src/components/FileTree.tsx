@@ -124,17 +124,18 @@ export default function FileTree() {
   const autoFor = useRef<string | null>(null);
 
   useEffect(() => {
-    let stale = false;
-    const ctrl = new AbortController();
-    if (!repoId || !repo) {
-      setLoad({ phase: "ok", files: [] });
-      return () => {
-        stale = true;
-        ctrl.abort();
-      };
-    }
     if (repo?.status === "indexing" || repo?.status === "failed") {
       setLoad({ phase: "pending", status: repo.status, detail: repo.detail });
+      return;
+    }
+    if (!repoId) {
+      setLoad({ phase: "unsupported" });
+      return;
+    }
+    let stale = false;
+    const ctrl = new AbortController();
+    if (!repo) {
+      setLoad({ phase: "ok", files: [] });
       return () => {
         stale = true;
         ctrl.abort();
@@ -161,7 +162,7 @@ export default function FileTree() {
       stale = true;
       ctrl.abort();
     };
-  }, [repoId, repo?.status, repo?.detail]);
+  }, [repoId, repo, repo?.status, repo?.detail]);
 
   const tree = useMemo(
     () => (load.phase === "ok" ? buildTree(load.files) : []),
@@ -252,7 +253,6 @@ export default function FileTree() {
             />
           ))}
       </div>
-
     </div>
   );
 }

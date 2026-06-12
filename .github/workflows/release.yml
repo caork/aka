@@ -5,7 +5,7 @@
 #   macos-desktop : macOS 上构建 Tauri GUI aka.app → zip 挂到 Release
 #   windows-desktop : Windows 上构建 Tauri GUI NSIS 安装包 + portable zip → 挂到 Release
 #   client-packages : 打包 Claude Code / OpenCode 插件包与 clients 总包 → 挂到 Release
-#   docker-image : 从公开 fork（caork/GitNexus @ engine/ENGINE_SHA）同步 engine 源码后
+#   docker-image : Dockerfile 自行 clone/build codebase-memory-mcp native engine，
 #                  构建 linux/amd64 镜像 → 容器内冒烟（health/analyze/query）→
 #                  推 ghcr.io/caork/aka → 镜像 tar 挂到 Release（便于 Jensen 离线 docker load）
 #   checksums : 全部 release 资产上传后生成 SHA256SUMS
@@ -208,30 +208,22 @@ jobs:
 
       - name: Build Windows desktop GUI
         id: pkg
-        shell: pwsh
+        shell: bash
         run: |
-          $version = "${env:GITHUB_REF_NAME}" -replace '^v',''
-          if ("${env:GITHUB_REF_TYPE}" -ne "tag") {
-            $version = "dev-$($env:GITHUB_SHA.Substring(0, 8))"
-          }
+          set -euxo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ "${GITHUB_REF_TYPE}" = "tag" ] || VERSION="dev-${GITHUB_SHA::8}"
 
-          Push-Location apps/desktop
-          npm run tauri -- build --bundles nsis --ci
-          Pop-Location
+          CBM_ZIP="codebase-memory-mcp-windows-amd64.zip"
+          curl -fL "https://github.com/DeusData/codebase-memory-mcp/releases/latest/download/${CBM_ZIP}" -o "${CBM_ZIP}"
+          unzip -q "${CBM_ZIP}" -d cbm-win
+          CBM_BIN="$(find cbm-win -type f -name codebase-memory-mcp.exe | head -n 1)"
+          test -f "${CBM_BIN}"
 
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $installer = Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -Filter "*.exe" | Select-Object -First 1
-          if (-not $installer) {
-            throw "Tauri NSIS installer was not produced"
-          }
-          $setupName = "aka-desktop-$version-x86_64-pc-windows-msvc-setup.exe"
-          Copy-Item $installer.FullName "dist/$setupName" -Force
+          AKA_CBM_BIN_WIN_X64="${PWD}/${CBM_BIN}" scripts/package-release.sh --version "${VERSION}" --desktop-windows
 
-          $portableName = "aka-desktop-$version-x86_64-pc-windows-msvc-portable.zip"
-          Compress-Archive -Path apps/desktop/src-tauri/target/release/aka-desktop.exe -DestinationPath "dist/$portableName" -Force
-
-          "setup_name=$setupName" >> $env:GITHUB_OUTPUT
-          "portable_name=$portableName" >> $env:GITHUB_OUTPUT
+          echo "setup_name=aka-desktop-${VERSION}-x86_64-pc-windows-msvc-setup.exe" >> "$GITHUB_OUTPUT"
+          echo "portable_name=aka-desktop-${VERSION}-x86_64-pc-windows-msvc-portable.zip" >> "$GITHUB_OUTPUT"
 
       - name: Upload to release
         if: github.ref_type == 'tag'
@@ -298,20 +290,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read engine pin
-        id: engine
-        run: echo "sha=$(cat engine/ENGINE_SHA)" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout engine source (public fork @ pinned SHA)
-        uses: actions/checkout@v4
-        with:
-          repository: caork/GitNexus
-          ref: ${{ steps.engine.outputs.sha }}
-          path: engine-src
-
-      - name: Sync engine into build context
-        run: bash scripts/sync-engine.sh "$PWD/engine-src"
-
       - name: Resolve version
         id: ver
         run: |
@@ -331,7 +309,7 @@ jobs:
             [ "$i" = 30 ] && { docker logs aka-smoke; exit 1; }
             sleep 1
           done
-          # 容器内真实跑通 engine（tree-sitter 原生模块 + node sidecar 是关键风险点）
+          # 容器内真实跑通 codebase-memory-mcp native engine
           docker exec aka-smoke aka analyze /opt/aka/fixtures-demo
           HITS=$(curl -fsS -X POST http://127.0.0.1:4111/api/query \
             -H 'content-type: application/json' \
