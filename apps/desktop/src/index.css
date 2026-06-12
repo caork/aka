@@ -520,6 +520,10 @@ html[data-theme="dark"] .app-logo {
   color: var(--success-ink);
   background: var(--success-fill);
 }
+.badge.Community {
+  color: var(--ink-2);
+  background: var(--subtle-fill);
+}
 
 mark {
   background: var(--accent-fill-strong);

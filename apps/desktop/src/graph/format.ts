@@ -31,6 +31,41 @@ export interface GraphJSON {
   edges: number[];
   edge_weights?: number[];
   cluster_labels?: string[];
+  cluster_summaries?: ClusterSummary[];
+}
+
+export interface ClusterSymbolSummary {
+  id: string;
+  name: string;
+  label: string;
+  file_path?: string;
+  start_line?: number;
+  score: number;
+}
+
+export interface ClusterFileSummary {
+  path: string;
+  nodes: number;
+  symbols: number;
+}
+
+export interface ClusterQuality {
+  cohesion: number;
+  boundary_ratio: number;
+  internal_edges: number;
+  external_edges: number;
+  confidence: number;
+  explanation: string;
+}
+
+export interface ClusterSummary {
+  cluster: number;
+  label: string;
+  display_label: string;
+  label_basis: string[];
+  top_symbols: ClusterSymbolSummary[];
+  top_files: ClusterFileSummary[];
+  quality: ClusterQuality;
 }
 
 export interface Bounds {
@@ -67,10 +102,12 @@ export interface GraphData {
   degrees: Uint32Array;
   classNames: string[];
   clusterMeta: ClusterMeta[];
+  clusterSummaries: ClusterSummary[];
   bounds: Bounds;
   name(i: number): string;
   id(i: number): string;
   file(i: number): string;
+  clusterSummaryByNode(i: number): ClusterSummary | null;
 }
 
 /** Convert the JSON wire format into render-ready TypedArrays. */
@@ -82,6 +119,10 @@ export function parseGraphJSON(json: GraphJSON): GraphData {
   const clusters = new Uint32Array(n);
   const names = new Array<string>(n);
   const ids = new Array<string>(n);
+  const clusterSummaryByCluster = new Map<number, ClusterSummary>();
+  for (const summary of json.cluster_summaries ?? []) {
+    clusterSummaryByCluster.set(summary.cluster, summary);
+  }
 
   const bounds: Bounds = {
     minX: Infinity,
@@ -127,10 +168,18 @@ export function parseGraphJSON(json: GraphJSON): GraphData {
     degrees,
     classNames: json.classes,
     clusterMeta,
+    clusterSummaries: json.cluster_summaries ?? [],
     bounds,
     name: (i) => names[i] ?? "",
     id: (i) => ids[i] ?? "",
     file: () => "",
+    clusterSummaryByNode: (i) => {
+      const id = ids[i] ?? "";
+      const rawCluster = id.startsWith("cluster:")
+        ? Number.parseInt(id.slice("cluster:".length), 10)
+        : clusters[i];
+      return clusterSummaryByCluster.get(rawCluster) ?? null;
+    },
   };
 }
 

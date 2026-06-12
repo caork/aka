@@ -732,13 +732,35 @@ fn cluster_lod_snapshot_uses_real_cluster_labels_and_weights() {
     assert_eq!(snap.total_nodes, 10);
     assert_eq!(
         snap.cluster_labels,
-        vec!["community-two", "community-one", "src"]
+        vec!["Base Derived", "Alpha Beta", "Main"]
     );
     let names: Vec<_> = snap.nodes.iter().map(|n| n.name.as_str()).collect();
-    assert_eq!(names, vec!["community-two", "community-one", "src"]);
+    assert_eq!(names, vec!["Base Derived", "Alpha Beta", "Main"]);
     assert!(snap.nodes.iter().all(|n| n.id.starts_with("cluster:")));
     assert_eq!(snap.edges.len(), snap.edge_weights.len() * 2);
     assert!(snap.edge_weights.iter().all(|&w| w > 0));
+
+    assert_eq!(snap.cluster_summaries.len(), 3);
+    let first = &snap.cluster_summaries[0];
+    assert_eq!(first.label, "community-two");
+    assert_eq!(first.display_label, "Base Derived");
+    assert!(first
+        .label_basis
+        .iter()
+        .any(|b| b == "file:src/lib/types.rs"));
+    assert!(first.label_basis.iter().any(|b| b == "symbol:Base"));
+    assert_eq!(first.top_files[0].path, "src/lib/types.rs");
+    assert_eq!(first.top_files[0].symbols, 3);
+    assert!(first.top_symbols.iter().any(|s| s.name == "Base"));
+    assert!(first.quality.cohesion > 0.0 && first.quality.cohesion <= 1.0);
+    assert!(first.quality.boundary_ratio >= 0.0 && first.quality.boundary_ratio <= 1.0);
+    assert!(first.quality.internal_edges > 0);
+    assert!(first.quality.external_edges > 0);
+    assert!(first.quality.confidence > 0.0 && first.quality.confidence <= 1.0);
+    assert!(first
+        .quality
+        .explanation
+        .contains("strongest file signal is src/lib/types.rs"));
 }
 
 // ── ego 子图 ─────────────────────────────────────────────────────

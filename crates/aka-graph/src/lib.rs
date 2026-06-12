@@ -22,7 +22,8 @@ pub use ego::EGO_RING_STEP;
 pub use error::{GraphError, Result};
 pub use layout::compute_layout;
 pub use lod::{
-    ClusterEdge, ClusterGraph, ClusterLodGraph, ClusterNode, LodBinary, LodGraph, LodNode,
+    ClusterEdge, ClusterFileSummary, ClusterGraph, ClusterLodGraph, ClusterNode, ClusterQuality,
+    ClusterSummary, ClusterSymbolSummary, LodBinary, LodGraph, LodNode,
 };
 pub use process::{CommunityMembership, ProcessMembership, ProcessStepRow};
 pub use store::{GraphStore, IngestStats, NodeRow, PositionRow};

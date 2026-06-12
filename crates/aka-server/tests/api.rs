@@ -488,6 +488,33 @@ impl Backend for ManagedBackend {
             "edges": [],
             "edge_weights": [],
             "cluster_labels": ["core"],
+            "cluster_summaries": [{
+                "cluster": 0,
+                "label": "core",
+                "display_label": "Core",
+                "label_basis": ["label:core"],
+                "top_symbols": [{
+                    "id": "core::run",
+                    "name": "run",
+                    "label": "Function",
+                    "file_path": "src/core.rs",
+                    "start_line": 12,
+                    "score": 42
+                }],
+                "top_files": [{
+                    "path": "src/core.rs",
+                    "nodes": 7,
+                    "symbols": 5
+                }],
+                "quality": {
+                    "cohesion": 0.82,
+                    "boundary_ratio": 0.18,
+                    "internal_edges": 23,
+                    "external_edges": 5,
+                    "confidence": 0.76,
+                    "explanation": "82% internal edges, 18% boundary edges; strongest file signal is src/core.rs."
+                }
+            }],
             "total_nodes": 42,
             "returned_nodes": 1
         }))
@@ -762,6 +789,13 @@ async fn graph_clusters_endpoint_returns_cluster_overview() {
     assert_eq!(v["classes"], json!(["Community"]));
     assert_eq!(v["nodes"][0]["id"], "cluster:0");
     assert_eq!(v["cluster_labels"], json!(["core"]));
+    assert_eq!(v["cluster_summaries"][0]["display_label"], "Core");
+    assert_eq!(
+        v["cluster_summaries"][0]["top_files"][0]["path"],
+        "src/core.rs"
+    );
+    assert_eq!(v["cluster_summaries"][0]["top_symbols"][0]["name"], "run");
+    assert_eq!(v["cluster_summaries"][0]["quality"]["internal_edges"], 23);
 }
 
 #[tokio::test]
