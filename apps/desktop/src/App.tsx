@@ -1,6 +1,8 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import CodeWorkspace from "./components/CodeWorkspace";
+import { isDesktopRuntime } from "./desktop-api";
 import DetailPanel from "./components/DetailPanel";
 import GraphView from "./components/GraphView";
 import RepoDropdown from "./components/RepoDropdown";
@@ -21,6 +23,12 @@ export default function App() {
     return () => media.removeEventListener("change", syncSystemTheme);
   }, [syncSystemTheme]);
 
+  const startWindowDrag = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || !isDesktopRuntime()) return;
+    e.preventDefault();
+    void getCurrentWindow().startDragging().catch(() => {});
+  };
+
   return (
     <div className="flex h-full">
       <div className="app-backdrop" />
@@ -36,6 +44,7 @@ export default function App() {
         <div
           className="window-drag-region absolute top-0 z-30"
           style={{ left: 92, right: 180 }}
+          onMouseDown={startWindowDrag}
           data-tauri-drag-region
           aria-hidden
         />

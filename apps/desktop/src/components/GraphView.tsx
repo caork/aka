@@ -197,6 +197,18 @@ export default function GraphView() {
       camera.setViewport(rect.width, rect.height);
       renderer.resize(rect.width, rect.height, dpr);
       labels.resize(rect.width, rect.height, dpr);
+      if (rig.data && rig.grid) {
+        const lod = computeLod(camera.zoomLevel);
+        renderer.render(camera, lod, [], useAppStore.getState().resolvedTheme);
+        labels.render(
+          camera,
+          lod,
+          rig.data,
+          rig.grid,
+          dpr,
+          useAppStore.getState().resolvedTheme,
+        );
+      }
     };
     applySize();
     const ro = new ResizeObserver(applySize);
