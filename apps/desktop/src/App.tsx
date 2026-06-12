@@ -34,7 +34,8 @@ export default function App() {
         }}
       >
         <div
-          className="window-drag-region absolute inset-x-0 top-0 z-10"
+          className="window-drag-region absolute top-0 z-30"
+          style={{ left: 92, right: 180 }}
           data-tauri-drag-region
           aria-hidden
         />
