@@ -6,6 +6,8 @@
 //!   repos/<slug>-<hash8>/    # 每仓库数据
 //!     artifact/              # engine 产出的 NDJSON 工件
 //!     engine-cache/           # codebase-memory-mcp SQLite/cache 工作目录
+//!     index-state.json        # 文件哈希/engine/合同版本快照，用于安全复用索引
+//!     parse-cache/            # 预留给 engine adapter 的内容寻址 parse-cache
 //!     graph.db               # aka-graph SQLite
 //!     search/                # tantivy 索引
 //!     vectors/               # 向量库（embedding 开启后）
@@ -66,6 +68,14 @@ impl RepoPaths {
 
     pub fn engine_cache_dir(&self) -> PathBuf {
         self.root.join("engine-cache")
+    }
+
+    pub fn index_state_path(&self) -> PathBuf {
+        self.root.join("index-state.json")
+    }
+
+    pub fn parse_cache_dir(&self) -> PathBuf {
+        self.root.join("parse-cache")
     }
 
     pub fn graph_db(&self) -> PathBuf {

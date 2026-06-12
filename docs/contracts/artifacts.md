@@ -49,7 +49,9 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 
 **行号语义**：工件中的 `startLine`/`endLine`（节点与 chunk 同）由 CBM/tree-sitter 坐标导出，合同内保持 **0-based row**。Rust 摄取层（aka-graph/aka-search）写索引时统一 **+1 转为 1-based 人类行号**（`NodeRec::start_line_1based`），因此 SQLite/tantivy 及一切下游（HTTP/MCP/桌面端）的行号都与编辑器、`/api/source` 对齐。`properties` JSON 列存底里保留的是工件原始 0-based 值。
 
-**合成 Process**：若 CBM SQLite 已经产出 `label = "Process"` 节点，adapter 原样透传，不重复合成；若没有，adapter 会基于 `CALLS` 边保守合成 `label = "Process"` 的调用链流程节点。合成节点的 `id` 形如 `process:call-chain:<hash>`，`properties` 至少包含 `name`、`processType = "call-chain"`、`stepCount`、`entryPointId`、`terminalId`、`source = "aka-cbm-synth"`。这是合同内只增字段/节点类型，下游按普通节点摄取。
+**合成 Community**：若 CBM SQLite 已经产出 `label = "Community"` 节点，adapter 原样透传，不重复合成；若没有，adapter 会按源码模块路径初始化社区，并用 `CALLS` 图做保守标签传播，合成 GitNexus-like `label = "Community"` 社区节点。合成节点的 `id` 形如 `community:heuristic:<hash>`，`properties` 至少包含 `name`、`heuristicLabel`、`cohesion`、`symbolCount`、`keywords`、`enrichedBy = "heuristic"`、`source = "aka-cbm-synth"`。`cohesion` 为 0..1 的启发式内聚度；`symbolCount` 为社区内符号数。
+
+**合成 Process**：若 CBM SQLite 已经产出 `label = "Process"` 节点，adapter 原样透传，不重复合成；若没有，adapter 会基于 `CALLS` 边保守合成 `label = "Process"` 的调用链流程节点。合成流程使用 GitNexus-like 入口评分（调用比、导出/公开、入口命名、框架路径、测试/工具降权）、BFS trace、子链去重、入口-终点去重和动态流程上限。合成节点的 `id` 形如 `process:call-chain:<hash>`，`properties` 至少包含 `name`、`heuristicLabel`、`processType`、`communities`、`communityIds`、`communityLabels`、`trace`、`stepCount`、`entryPointId`、`terminalId`、`source = "aka-cbm-synth"`。其中 `processType` 取 `intra_community` 或 `cross_community`，分别表示流程步骤落在单个社区或跨多个社区；`communities` 为流程涉及的 Community 引用数组（元素至少包含 `id`、`label`）。这是合同内只增字段/节点类型，下游按普通节点摄取。
 
 ### edges.ndjson — aka contract `GraphRelationship`
 
@@ -58,6 +60,10 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 ```
 
 `type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/HTTP_CALLS/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
+
+合成 Community 会追加：
+
+- `MEMBER_OF`：符号 → Community，表示符号所属社区。
 
 合成 Process 会追加两类边：
 

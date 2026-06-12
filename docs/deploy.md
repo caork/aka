@@ -108,9 +108,15 @@ docker load -i aka-0.1.0-linux-amd64.docker.tar.gz       # 走 release 资产（
 - `aka-<版本>-x86_64-unknown-linux-gnu.tar.gz` — Linux `aka`
 - `aka-<版本>-aarch64-apple-darwin.tar.gz` — macOS `aka`
 - `aka-<版本>-x86_64-pc-windows-msvc.zip` — Windows `aka.exe`
+- `aka-desktop-<版本>-aarch64-apple-darwin.dmg` — macOS GUI 安装镜像（桌面端更新检查优先展示）
 - `aka-desktop-<版本>-aarch64-apple-darwin.app.zip` — macOS GUI（zip 内是 `aka.app`）
 - `aka-desktop-<版本>-x86_64-pc-windows-msvc-setup.exe` — Windows GUI 安装包
 - `aka-desktop-<版本>-x86_64-pc-windows-msvc-portable.zip` — Windows GUI 免安装包
+- `latest.json` — 桌面端更新清单，可同步到 `https://aka.hawkingrad.com/releases/latest.json`
+
+桌面端 Settings → Updates 会读取 hawkingrad 的 `latest.json`。CI 在 tag release 的 checksums 阶段通过
+`scripts/release-manifest.mjs` 生成该文件，至少包含 `version`、`releaseUrl`、`publishedAt`、
+`assets[]`，其中 macOS DMG 与 Windows setup EXE 会被识别为可下载更新包。
 
 `aka-<版本>-...` 裸二进制是 CLI/server 包，能启动 `aka serve` / `aka mcp` / 查询既有索引，但不会打开 GUI；
 桌面窗口请下载 `aka-desktop-<版本>-...`。完整 `aka analyze` 需要 `codebase-memory-mcp` 原生二进制：

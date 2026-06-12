@@ -384,14 +384,26 @@ pub fn list_repos(b: &dyn Backend) -> anyhow::Result<ReposOut> {
     })
 }
 
-pub fn query(
-    b: &dyn Backend,
-    repo: Option<&str>,
-    query: &str,
-    limit: usize,
-    max_symbols: usize,
-    include_content: bool,
-) -> anyhow::Result<QueryOut> {
+pub struct QueryOptions<'a> {
+    pub repo: Option<&'a str>,
+    pub query: &'a str,
+    pub limit: usize,
+    pub max_symbols: usize,
+    pub include_content: bool,
+    pub task_context: Option<&'a str>,
+    pub goal: Option<&'a str>,
+}
+
+pub fn query(b: &dyn Backend, opts: QueryOptions<'_>) -> anyhow::Result<QueryOut> {
+    let QueryOptions {
+        repo,
+        query,
+        limit,
+        max_symbols,
+        include_content,
+        task_context,
+        goal,
+    } = opts;
     let mut hits = Vec::new();
     let mut process_map: BTreeMap<String, QueryProcessAgg> = BTreeMap::new();
     let mut process_symbols = Vec::new();
@@ -401,6 +413,7 @@ pub fn query(
     let search_hits = b.search(repo, query, search_limit)?;
     let node_ids: Vec<String> = search_hits.iter().map(|h| h.node_id.clone()).collect();
     let enrichments = b.query_enrichment(repo, &node_ids, include_content)?;
+    let context_terms = ranking_terms([Some(query), task_context, goal]);
     for h in search_hits {
         let enrichment = enrichments.get(&h.node_id).cloned().unwrap_or_default();
         let procs = &enrichment.processes;
@@ -424,6 +437,11 @@ pub fn query(
                             step_count: p.step_count,
                             total_score: 0.0,
                             cohesion_boost: 0.0,
+                            context_boost: context_score(
+                                &context_terms,
+                                [p.name.as_str(), p.process_type.as_str()],
+                                std::iter::empty::<&str>(),
+                            ),
                             symbol_count: 0,
                             order: next_process_order,
                         },
@@ -435,6 +453,17 @@ pub fn query(
                     .expect("process inserted above");
                 entry.total_score += hit.score;
                 entry.cohesion_boost = entry.cohesion_boost.max(enrichment.cohesion);
+                entry.context_boost = entry.context_boost.max(context_score(
+                    &context_terms,
+                    [
+                        p.name.as_str(),
+                        p.process_type.as_str(),
+                        hit.name.as_str(),
+                        hit.label.as_str(),
+                        hit.file.as_str(),
+                    ],
+                    enrichment.module.iter().map(String::as_str),
+                ));
                 entry.symbol_count += 1;
                 process_symbols.push(QueryProcessSymbolOut {
                     id: hit.id.clone(),
@@ -461,8 +490,8 @@ pub fn query(
     }
     let mut process_aggs: Vec<QueryProcessAgg> = process_map.into_values().collect();
     process_aggs.sort_by(|a, b| {
-        let a_priority = a.total_score + a.cohesion_boost * 0.1;
-        let b_priority = b.total_score + b.cohesion_boost * 0.1;
+        let a_priority = a.priority();
+        let b_priority = b.priority();
         b_priority
             .total_cmp(&a_priority)
             .then_with(|| b.symbol_count.cmp(&a.symbol_count))
@@ -471,13 +500,16 @@ pub fn query(
     process_aggs.truncate(limit);
     let processes: Vec<QueryProcessOut> = process_aggs
         .into_iter()
-        .map(|p| QueryProcessOut {
-            id: p.id,
-            summary: p.summary,
-            priority: ((p.total_score + p.cohesion_boost * 0.1) * 1000.0).round() / 1000.0,
-            symbol_count: p.symbol_count,
-            process_type: p.process_type,
-            step_count: p.step_count,
+        .map(|p| {
+            let priority = (p.priority() * 1000.0).round() / 1000.0;
+            QueryProcessOut {
+                id: p.id,
+                summary: p.summary,
+                priority,
+                symbol_count: p.symbol_count,
+                process_type: p.process_type,
+                step_count: p.step_count,
+            }
         })
         .collect();
     let allowed: HashSet<&str> = processes.iter().map(|p| p.id.as_str()).collect();
@@ -523,8 +555,51 @@ struct QueryProcessAgg {
     step_count: Option<u32>,
     total_score: f32,
     cohesion_boost: f32,
+    context_boost: f32,
     symbol_count: usize,
     order: usize,
+}
+
+impl QueryProcessAgg {
+    fn priority(&self) -> f32 {
+        self.total_score + self.cohesion_boost * 0.1 + self.context_boost
+    }
+}
+
+fn ranking_terms<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> Vec<String> {
+    let mut terms = HashSet::new();
+    for part in parts.into_iter().flatten() {
+        for raw in part.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_') {
+            let term = raw.trim_matches('_').to_ascii_lowercase();
+            if term.len() >= 3 {
+                terms.insert(term);
+            }
+        }
+    }
+    let mut out: Vec<String> = terms.into_iter().collect();
+    out.sort();
+    out
+}
+
+fn context_score<'a>(
+    terms: &[String],
+    fields: impl IntoIterator<Item = &'a str>,
+    extra_fields: impl IntoIterator<Item = &'a str>,
+) -> f32 {
+    if terms.is_empty() {
+        return 0.0;
+    }
+    let haystack = fields
+        .into_iter()
+        .chain(extra_fields)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let matches = terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .count();
+    (matches as f32 * 0.05).min(0.25)
 }
 
 pub fn search_code(

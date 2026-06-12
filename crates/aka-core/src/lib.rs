@@ -2,12 +2,14 @@
 
 pub mod artifact;
 pub mod engine;
+pub mod incremental;
 pub mod paths;
 pub mod registry;
 pub mod types;
 
 pub use artifact::{ArtifactDir, ArtifactError, NdjsonIter};
 pub use engine::{EngineError, EngineRunner};
+pub use incremental::{load_index_state, save_index_state, FileFingerprint, IndexState};
 pub use paths::{aka_home, RepoPaths};
 pub use registry::{
     clamp_render_nodes, Registry, RegistryError, RepoEntry, DEFAULT_RENDER_MAX_NODES,

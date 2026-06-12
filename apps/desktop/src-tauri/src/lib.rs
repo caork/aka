@@ -161,14 +161,15 @@ async fn query(
         .unwrap_or(ops::DEFAULT_QUERY_LIMIT)
         .clamp(1, ops::MAX_QUERY_LIMIT);
     run_backend(backend, move |b| {
-        ops::query(
-            b.as_ref(),
-            repo.as_deref(),
-            &query,
+        ops::query(b.as_ref(), ops::QueryOptions {
+            repo: repo.as_deref(),
+            query: &query,
             limit,
-            ops::DEFAULT_QUERY_PROCESS_SYMBOL_LIMIT,
-            false,
-        )
+            max_symbols: ops::DEFAULT_QUERY_PROCESS_SYMBOL_LIMIT,
+            include_content: false,
+            task_context: None,
+            goal: None,
+        })
     })
     .await
 }
@@ -369,6 +370,60 @@ async fn clear_app_data(backend: State<'_, BackendState>) -> Result<serde_json::
     .await
 }
 
+#[tauri::command]
+async fn app_version() -> Result<String, String> {
+    Ok(env!("CARGO_PKG_VERSION").to_string())
+}
+
+#[tauri::command]
+async fn open_url(url: String) -> Result<serde_json::Value, String> {
+    let url = validate_external_url(&url)?.to_string();
+    spawn_url_opener(&url).map_err(|e| format!("open url failed: {e}"))?;
+    Ok(json!({ "ok": true }))
+}
+
+fn validate_external_url(url: &str) -> Result<&str, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("url is required".into());
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("url contains invalid control characters".into());
+    }
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return Err("only http(s) urls can be opened".into());
+    }
+    Ok(trimmed)
+}
+
+fn spawn_url_opener(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "opening urls is unsupported on this platform",
+    ))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -397,6 +452,8 @@ pub fn run() {
             set_repo_settings,
             delete_repo,
             clear_app_data,
+            app_version,
+            open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

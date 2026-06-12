@@ -160,6 +160,26 @@ async fn query_honors_max_symbols_and_include_content() {
 }
 
 #[tokio::test]
+async fn query_uses_task_context_for_process_ranking() {
+    let res = server()
+        .query(Parameters(QueryParams {
+            repo: Some("fixture".into()),
+            query: "handle".into(),
+            limit: Some(2),
+            task_context: Some("write output response".into()),
+            goal: Some("trace output flow".into()),
+            max_symbols: None,
+            include_content: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    let processes = v["processes"].as_array().unwrap();
+    assert_eq!(processes[0]["id"], "fixture:proc:output-flow");
+    assert_eq!(processes[0]["summary"], "main → write_output");
+}
+
+#[tokio::test]
 async fn search_code_shape() {
     let res = server()
         .search_code(Parameters(CodeSearchParams {

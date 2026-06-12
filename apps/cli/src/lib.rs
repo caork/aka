@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use aka_core::{
-    registry::now_unix, ArtifactDir, EngineEvent, EngineRunner, Registry, RepoEntry, RepoPaths,
+    load_index_state, registry::now_unix, save_index_state, ArtifactDir, EngineEvent, EngineRunner,
+    IndexState, Registry, RepoEntry, RepoPaths,
 };
 use anyhow::{Context, Result};
 
@@ -77,6 +78,34 @@ pub fn run_analyze_with_progress(
         .with_context(|| format!("仓库路径不存在: {}", path.display()))?;
     let paths = RepoPaths::for_repo(&repo);
     let artifact_dir = paths.artifact_dir();
+    let runner = EngineRunner::discover(engine_dir.as_deref())?;
+    let engine_sha = std::fs::read_to_string(runner.dir().join("ENGINE_SHA"))
+        .ok()
+        .map(|s| s.trim().to_string());
+
+    let current_state = IndexState::compute(&repo, engine_sha.clone(), no_chunks)
+        .with_context(|| format!("compute file hashes for {}", repo.display()))?;
+    if can_reuse_existing_index(&paths, &current_state)? {
+        if let Some(cb) = progress.as_mut() {
+            cb(&EngineEvent::Phase {
+                phase: "Reusing unchanged index".into(),
+                current: 1,
+                total: 1,
+            });
+        }
+        let artifact = ArtifactDir::open(&artifact_dir)?;
+        register(&repo, &paths, &artifact, engine_sha)?;
+        return Ok(format!(
+            "aka ▸ {} 未变化：复用现有索引（{} 节点 / {} 边 / {} 切块）",
+            repo.file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default(),
+            artifact.manifest.stats.nodes,
+            artifact.manifest.stats.edges,
+            artifact.manifest.stats.chunks,
+        ));
+    }
+
     if artifact_dir.exists() {
         std::fs::remove_dir_all(&artifact_dir)
             .with_context(|| format!("clear stale artifact dir {}", artifact_dir.display()))?;
@@ -85,11 +114,7 @@ pub fn run_analyze_with_progress(
     let engine_cache_dir = paths.engine_cache_dir();
     std::fs::create_dir_all(&engine_cache_dir)
         .with_context(|| format!("create engine cache dir {}", engine_cache_dir.display()))?;
-
-    let runner = EngineRunner::discover(engine_dir.as_deref())?;
-    let engine_sha = std::fs::read_to_string(runner.dir().join("ENGINE_SHA"))
-        .ok()
-        .map(|s| s.trim().to_string());
+    std::fs::create_dir_all(paths.parse_cache_dir())?;
     eprintln!("aka ▸ engine 解析 {} …", repo.display());
 
     let mut last_phase = String::new();
@@ -145,6 +170,8 @@ pub fn run_analyze_with_progress(
         });
     }
     register(&repo, &paths, &artifact, engine_sha)?;
+    save_index_state(&paths.index_state_path(), &current_state)
+        .with_context(|| format!("save index state {}", paths.index_state_path().display()))?;
 
     let summary = format!(
         "aka ▸ {} 就绪：{} 节点 / {} 边（悬空跳过 {}）/ {} 切块入索引{}",
@@ -162,6 +189,21 @@ pub fn run_analyze_with_progress(
         }
     );
     Ok(summary)
+}
+
+fn can_reuse_existing_index(paths: &RepoPaths, current_state: &IndexState) -> Result<bool> {
+    let Some(previous) = load_index_state(&paths.index_state_path())
+        .with_context(|| format!("load index state {}", paths.index_state_path().display()))?
+    else {
+        return Ok(false);
+    };
+    if !previous.is_reusable_for(current_state) {
+        return Ok(false);
+    }
+    if !paths.graph_db().is_file() || !paths.search_dir().is_dir() {
+        return Ok(false);
+    }
+    Ok(ArtifactDir::open(paths.artifact_dir()).is_ok())
 }
 
 fn register(

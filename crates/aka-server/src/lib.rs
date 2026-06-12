@@ -199,16 +199,16 @@ pub struct QueryRequest {
     /// 默认 10，上限 100。
     #[serde(default)]
     pub limit: Option<usize>,
-    /// GitNexus-compatible hint；当前接受但不改变排序。
+    /// GitNexus-compatible hint；参与流程排序的轻量上下文 boost。
     #[serde(default)]
     pub task_context: Option<String>,
-    /// GitNexus-compatible hint；当前接受但不改变排序。
+    /// GitNexus-compatible hint；参与流程排序的轻量上下文 boost。
     #[serde(default)]
     pub goal: Option<String>,
-    /// GitNexus-compatible字段；当前紧凑输出使用服务默认符号上限。
+    /// GitNexus-compatible字段；限制每条流程返回的命中符号数。
     #[serde(default)]
     pub max_symbols: Option<usize>,
-    /// GitNexus-compatible字段；当前 query 不内联完整源码。
+    /// GitNexus-compatible字段；true 时流程符号可内联源码片段。
     #[serde(default)]
     pub include_content: Option<bool>,
 }
@@ -260,15 +260,18 @@ async fn query(
         .clamp(1, ops::MAX_QUERY_LIMIT);
     let max_symbols = ops::clamp_process_symbol_limit(req.max_symbols);
     let include_content = req.include_content.unwrap_or(false);
-    let _ = (&req.task_context, &req.goal);
     run(b, move |b| {
         ops::query(
             b,
-            req.repo.as_deref(),
-            &req.query,
-            limit,
-            max_symbols,
-            include_content,
+            ops::QueryOptions {
+                repo: req.repo.as_deref(),
+                query: &req.query,
+                limit,
+                max_symbols,
+                include_content,
+                task_context: req.task_context.as_deref(),
+                goal: req.goal.as_deref(),
+            },
         )
     })
     .await

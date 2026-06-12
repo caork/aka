@@ -175,15 +175,18 @@ impl AkaMcpServer {
         let limit = clamp_limit(p.limit, ops::DEFAULT_QUERY_LIMIT);
         let max_symbols = ops::clamp_process_symbol_limit(p.max_symbols);
         let include_content = p.include_content.unwrap_or(false);
-        let _ = (&p.task_context, &p.goal);
         self.run(move |b| {
             ops::query(
                 b,
-                p.repo.as_deref(),
-                &p.query,
-                limit,
-                max_symbols,
-                include_content,
+                ops::QueryOptions {
+                    repo: p.repo.as_deref(),
+                    query: &p.query,
+                    limit,
+                    max_symbols,
+                    include_content,
+                    task_context: p.task_context.as_deref(),
+                    goal: p.goal.as_deref(),
+                },
             )
         })
         .await

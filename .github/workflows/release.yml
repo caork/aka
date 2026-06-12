@@ -2,7 +2,7 @@
 #   linux-binary : ubuntu 上构建 x86_64 linux 二进制 → 挂到同名 GitHub Release
 #   macos-binary : macOS 上构建 aarch64 macOS 二进制 → 挂到同名 GitHub Release
 #   windows-binary : windows 上构建 x86_64 Windows aka.exe → zip 挂到 Release
-#   macos-desktop : macOS 上构建 Tauri GUI aka.app → zip 挂到 Release
+#   macos-desktop : macOS 上构建 Tauri GUI aka.app → dmg + zip 挂到 Release
 #   windows-desktop : Windows 上构建 Tauri GUI NSIS 安装包 + portable zip → 挂到 Release
 #   client-packages : 打包 Claude Code / OpenCode 插件包与 clients 总包 → 挂到 Release
 #   docker-image : Dockerfile 自行 clone/build codebase-memory-mcp native engine，
@@ -179,13 +179,15 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || \
             gh release view "$GITHUB_REF_NAME" >/dev/null
-          gh release upload "$GITHUB_REF_NAME" dist/aka-desktop-*.app.zip --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/aka-desktop-*.dmg dist/aka-desktop-*.app.zip --clobber
 
       - uses: actions/upload-artifact@v4
         if: github.ref_type != 'tag'
         with:
           name: macos-desktop
-          path: dist/aka-desktop-*.app.zip
+          path: |
+            dist/aka-desktop-*.dmg
+            dist/aka-desktop-*.app.zip
 
   windows-desktop:
     runs-on: windows-latest
@@ -366,4 +368,10 @@ jobs:
           mkdir -p dist
           gh release download "$GITHUB_REF_NAME" --dir dist --skip-existing
           scripts/package-release.sh --checksums-only
-          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS --clobber
+          node scripts/release-manifest.mjs \
+            --version "${GITHUB_REF_NAME#v}" \
+            --tag "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir dist \
+            --out dist/latest.json
+          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS dist/latest.json --clobber

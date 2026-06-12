@@ -4,7 +4,8 @@
 //! but the producer is now the native C codebase-memory indexer instead of the
 //! previous parser sidecar.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -19,10 +20,15 @@ use serde_json::{json, Map, Value};
 use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION};
 
 const DEFAULT_CBM_MODE: &str = "fast";
-const PROCESS_MAX_STARTS: usize = 256;
-const PROCESS_MAX_COUNT: usize = 1000;
-const PROCESS_MAX_STEPS: usize = 8;
-const PROCESS_BRANCH_LIMIT: usize = 2;
+const PROCESS_MAX_STARTS: usize = 200;
+const PROCESS_MIN_COUNT: usize = 20;
+const PROCESS_MAX_COUNT: usize = 300;
+const PROCESS_MAX_STEPS: usize = 10;
+const PROCESS_BRANCH_LIMIT: usize = 4;
+const PROCESS_MIN_STEPS: usize = 3;
+const MIN_SYNTH_COMMUNITY_SIZE: usize = 2;
+const MIN_TRACE_CONFIDENCE: f64 = 0.5;
+const COMMUNITY_LABEL_PROPAGATION_PASSES: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -313,11 +319,11 @@ fn export_artifacts(
     no_chunks: bool,
 ) -> Result<ArtifactStats, EngineError> {
     let conn = open_cbm_db(db_path)?;
-    let processes = synthesize_processes(&conn, project)?;
+    let synth = synthesize_graph(&conn, project)?;
     let mut stats = ArtifactStats {
         files: count_files(&conn, project)?,
-        nodes: export_nodes(&conn, project, &out_dir.join("nodes.ndjson"), &processes)?,
-        edges: export_edges(&conn, project, &out_dir.join("edges.ndjson"), &processes)?,
+        nodes: export_nodes(&conn, project, &out_dir.join("nodes.ndjson"), &synth)?,
+        edges: export_edges(&conn, project, &out_dir.join("edges.ndjson"), &synth)?,
         chunks: 0,
     };
     if no_chunks {
@@ -360,7 +366,7 @@ fn export_nodes(
     conn: &Connection,
     project: &str,
     path: &Path,
-    processes: &[SynthProcess],
+    synth: &SynthGraph,
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
@@ -405,7 +411,13 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
-    for process in processes {
+    for community in &synth.communities {
+        let node = community.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
+    for process in &synth.processes {
         let node = process.node_rec();
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
@@ -418,7 +430,7 @@ fn export_edges(
     conn: &Connection,
     project: &str,
     path: &Path,
-    processes: &[SynthProcess],
+    synth: &SynthGraph,
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
@@ -462,7 +474,12 @@ fn export_edges(
         out.write_all(b"\n")?;
         count += 1;
     }
-    for edge in processes.iter().flat_map(SynthProcess::edge_recs) {
+    for edge in synth
+        .communities
+        .iter()
+        .flat_map(SynthCommunity::edge_recs)
+        .chain(synth.processes.iter().flat_map(SynthProcess::edge_recs))
+    {
         serde_json::to_writer(&mut out, &edge)?;
         out.write_all(b"\n")?;
         count += 1;
@@ -476,12 +493,88 @@ struct SynthNode {
     label: String,
     name: String,
     file_path: String,
+    language: String,
+    is_exported: bool,
+    ast_framework_multiplier: f64,
+    ast_framework_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SynthGraph {
+    communities: Vec<SynthCommunity>,
+    processes: Vec<SynthProcess>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct CommunityRef {
+    id: String,
+    label: String,
+}
+
+#[derive(Debug, Clone)]
+struct SynthCommunity {
+    id: String,
+    heuristic_label: String,
+    cohesion: f64,
+    members: Vec<SynthNode>,
+}
+
+impl SynthCommunity {
+    fn node_rec(&self) -> NodeRec {
+        let mut properties = Map::new();
+        properties.insert("name".into(), Value::String(self.heuristic_label.clone()));
+        properties.insert(
+            "heuristicLabel".into(),
+            Value::String(self.heuristic_label.clone()),
+        );
+        properties.insert("cohesion".into(), json!(self.cohesion));
+        properties.insert("symbolCount".into(), Value::from(self.members.len() as u64));
+        properties.insert(
+            "keywords".into(),
+            Value::Array(
+                community_keywords(&self.members)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+        properties.insert("enrichedBy".into(), Value::String("heuristic".into()));
+        properties.insert("source".into(), Value::String("aka-cbm-synth".into()));
+        NodeRec {
+            id: self.id.clone(),
+            label: "Community".into(),
+            properties,
+        }
+    }
+
+    fn edge_recs(&self) -> Vec<EdgeRec> {
+        self.members
+            .iter()
+            .map(|member| EdgeRec {
+                id: format!("{}:member:{:016x}", self.id, stable_hash(&member.aka_id)),
+                source_id: member.aka_id.clone(),
+                target_id: self.id.clone(),
+                edge_type: "MEMBER_OF".into(),
+                confidence: MIN_TRACE_CONFIDENCE,
+                reason: "aka community synthesis".into(),
+                step: None,
+                evidence: Some(json!({
+                    "source": "aka-cbm-synth",
+                    "kind": "community-membership",
+                    "heuristicLabel": self.heuristic_label.clone(),
+                    "cohesion": self.cohesion,
+                })),
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
 struct SynthProcess {
     id: String,
     name: String,
+    process_type: String,
+    communities: Vec<CommunityRef>,
     steps: Vec<SynthNode>,
 }
 
@@ -491,10 +584,50 @@ impl SynthProcess {
         let terminal = self.steps.last().expect("process has terminal");
         let mut properties = Map::new();
         properties.insert("name".into(), Value::String(self.name.clone()));
-        properties.insert("processType".into(), Value::String("call-chain".into()));
+        properties.insert(
+            "processType".into(),
+            Value::String(self.process_type.clone()),
+        );
+        properties.insert(
+            "communities".into(),
+            Value::Array(
+                self.communities
+                    .iter()
+                    .map(|c| json!({"id": c.id.clone(), "label": c.label.clone()}))
+                    .collect(),
+            ),
+        );
+        properties.insert(
+            "communityIds".into(),
+            Value::Array(
+                self.communities
+                    .iter()
+                    .map(|c| Value::String(c.id.clone()))
+                    .collect(),
+            ),
+        );
+        properties.insert(
+            "communityLabels".into(),
+            Value::Array(
+                self.communities
+                    .iter()
+                    .map(|c| Value::String(c.label.clone()))
+                    .collect(),
+            ),
+        );
         properties.insert("stepCount".into(), Value::from(self.steps.len() as u64));
         properties.insert("entryPointId".into(), Value::String(entry.aka_id.clone()));
         properties.insert("terminalId".into(), Value::String(terminal.aka_id.clone()));
+        properties.insert(
+            "trace".into(),
+            Value::Array(
+                self.steps
+                    .iter()
+                    .map(|step| Value::String(step.aka_id.clone()))
+                    .collect(),
+            ),
+        );
+        properties.insert("heuristicLabel".into(), Value::String(self.name.clone()));
         properties.insert("source".into(), Value::String("aka-cbm-synth".into()));
         NodeRec {
             id: self.id.clone(),
@@ -533,25 +666,58 @@ impl SynthProcess {
     }
 }
 
-fn synthesize_processes(
-    conn: &Connection,
-    project: &str,
-) -> Result<Vec<SynthProcess>, EngineError> {
-    let native_process_steps: u64 = conn.query_row(
-        "SELECT COUNT(*) \
-         FROM edges e \
-         JOIN nodes p ON p.id = e.target_id AND p.project = e.project \
-         WHERE e.project = ?1 AND p.label = 'Process' AND UPPER(e.type) = 'STEP_IN_PROCESS'",
-        [project],
+fn synthesize_graph(conn: &Connection, project: &str) -> Result<SynthGraph, EngineError> {
+    let native_communities = has_native_label(conn, project, "Community")?;
+    let native_processes = has_native_label(conn, project, "Process")?;
+    let nodes = load_synth_nodes(conn, project)?;
+    if nodes.is_empty() {
+        return Ok(SynthGraph::default());
+    }
+    let calls = load_call_graph(conn, project, &nodes)?;
+
+    let communities = if native_communities {
+        Vec::new()
+    } else {
+        synthesize_communities(&nodes, &calls.edges)
+    };
+    let community_memberships = if native_communities {
+        load_native_community_memberships(conn, project, &nodes)?
+    } else {
+        community_memberships_from_synth(&communities)
+    };
+    let processes = if native_processes {
+        Vec::new()
+    } else {
+        synthesize_processes_from_calls(
+            &nodes,
+            &calls.adjacency,
+            &calls.indegree,
+            &community_memberships,
+        )
+    };
+
+    Ok(SynthGraph {
+        communities,
+        processes,
+    })
+}
+
+fn has_native_label(conn: &Connection, project: &str, label: &str) -> Result<bool, EngineError> {
+    let count: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE project = ?1 AND label = ?2",
+        [project, label],
         |row| row.get(0),
     )?;
-    if native_process_steps > 0 {
-        return Ok(Vec::new());
-    }
+    Ok(count > 0)
+}
 
+fn load_synth_nodes(
+    conn: &Connection,
+    project: &str,
+) -> Result<BTreeMap<String, SynthNode>, EngineError> {
     let mut nodes = BTreeMap::new();
     let mut stmt = conn.prepare(
-        "SELECT id, label, name, qualified_name, file_path \
+        "SELECT id, label, name, qualified_name, file_path, properties \
          FROM nodes WHERE project = ?1 ORDER BY id",
     )?;
     let mut rows = stmt.query([project])?;
@@ -561,10 +727,33 @@ fn synthesize_processes(
         let name = text_col(row, 2)?;
         let qn = text_col(row, 3)?;
         let file_path = text_col(row, 4)?;
+        let props = parse_props(&text_col(row, 5)?);
         if !is_process_step_label(&label) || is_noisy_source_path(&file_path) {
             continue;
         }
         let aka_id = aka_node_id(cbm_id, &qn);
+        let language = props
+            .get("language")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let ast_framework_multiplier = props
+            .get("astFrameworkMultiplier")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        let ast_framework_reason = props
+            .get("astFrameworkReason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let is_exported = props
+            .get("isExported")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                props
+                    .get("visibility")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| v.eq_ignore_ascii_case("public"))
+            });
         nodes.insert(
             aka_id.clone(),
             SynthNode {
@@ -572,20 +761,34 @@ fn synthesize_processes(
                 label,
                 name,
                 file_path,
+                language,
+                is_exported,
+                ast_framework_multiplier,
+                ast_framework_reason,
             },
         );
     }
-    if nodes.is_empty() {
-        return Ok(Vec::new());
-    }
+    Ok(nodes)
+}
 
-    let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut indegree: BTreeMap<String, usize> = BTreeMap::new();
+#[derive(Debug, Clone, Default)]
+struct CallGraph {
+    adjacency: BTreeMap<String, BTreeSet<String>>,
+    indegree: BTreeMap<String, usize>,
+    edges: Vec<(String, String)>,
+}
+
+fn load_call_graph(
+    conn: &Connection,
+    project: &str,
+    nodes: &BTreeMap<String, SynthNode>,
+) -> Result<CallGraph, EngineError> {
+    let mut graph = CallGraph::default();
     let mut stmt = conn.prepare(
-        "SELECT e.source_id, e.target_id, s.qualified_name, t.qualified_name \
+        "SELECT e.source_id, e.target_id, e.properties, s.qualified_name, t.qualified_name \
          FROM edges e \
-         JOIN nodes s ON s.id = e.source_id \
-         JOIN nodes t ON t.id = e.target_id \
+         JOIN nodes s ON s.id = e.source_id AND s.project = e.project \
+         JOIN nodes t ON t.id = e.target_id AND t.project = e.project \
          WHERE e.project = ?1 AND UPPER(e.type) = 'CALLS' \
          ORDER BY e.id",
     )?;
@@ -593,140 +796,459 @@ fn synthesize_processes(
     while let Some(row) = rows.next()? {
         let source_id: i64 = row.get(0)?;
         let target_id: i64 = row.get(1)?;
-        let source_qn = text_col(row, 2)?;
-        let target_qn = text_col(row, 3)?;
+        let props = props_value(&text_col(row, 2)?);
+        if props
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .is_some_and(|confidence| confidence < MIN_TRACE_CONFIDENCE)
+        {
+            continue;
+        }
+        let source_qn = text_col(row, 3)?;
+        let target_qn = text_col(row, 4)?;
         let source = aka_node_id(source_id, &source_qn);
         let target = aka_node_id(target_id, &target_qn);
         if !nodes.contains_key(&source) || !nodes.contains_key(&target) || source == target {
             continue;
         }
-        adjacency
+        let inserted = graph
+            .adjacency
             .entry(source.clone())
             .or_default()
             .insert(target.clone());
-        *indegree.entry(target).or_default() += 1;
+        if inserted {
+            *graph.indegree.entry(target.clone()).or_default() += 1;
+            graph.edges.push((source, target));
+        }
     }
-    if adjacency.is_empty() {
-        return Ok(Vec::new());
+    Ok(graph)
+}
+
+fn load_native_community_memberships(
+    conn: &Connection,
+    project: &str,
+    nodes: &BTreeMap<String, SynthNode>,
+) -> Result<BTreeMap<String, Vec<CommunityRef>>, EngineError> {
+    let mut memberships: BTreeMap<String, BTreeSet<CommunityRef>> = BTreeMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT e.source_id, s.qualified_name, c.id, c.qualified_name, c.name, c.properties \
+         FROM edges e \
+         JOIN nodes s ON s.id = e.source_id AND s.project = e.project \
+         JOIN nodes c ON c.id = e.target_id AND c.project = e.project \
+         WHERE e.project = ?1 AND c.label = 'Community' AND UPPER(e.type) = 'MEMBER_OF' \
+         ORDER BY e.id",
+    )?;
+    let mut rows = stmt.query([project])?;
+    while let Some(row) = rows.next()? {
+        let source_id: i64 = row.get(0)?;
+        let source_qn = text_col(row, 1)?;
+        let community_id: i64 = row.get(2)?;
+        let community_qn = text_col(row, 3)?;
+        let community_name = text_col(row, 4)?;
+        let community_props = parse_props(&text_col(row, 5)?);
+        let source = aka_node_id(source_id, &source_qn);
+        if !nodes.contains_key(&source) {
+            continue;
+        }
+        let id = aka_node_id(community_id, &community_qn);
+        let label = community_props
+            .get("heuristicLabel")
+            .and_then(Value::as_str)
+            .or_else(|| community_props.get("label").and_then(Value::as_str))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| {
+                if community_name.is_empty() {
+                    &community_qn
+                } else {
+                    &community_name
+                }
+            })
+            .to_string();
+        memberships
+            .entry(source)
+            .or_default()
+            .insert(CommunityRef { id, label });
+    }
+    Ok(memberships
+        .into_iter()
+        .map(|(id, refs)| (id, refs.into_iter().collect()))
+        .collect())
+}
+
+fn synthesize_communities(
+    nodes: &BTreeMap<String, SynthNode>,
+    call_edges: &[(String, String)],
+) -> Vec<SynthCommunity> {
+    let labels = propagated_community_labels(nodes, call_edges);
+    let mut groups: BTreeMap<String, Vec<SynthNode>> = BTreeMap::new();
+    for node in nodes.values() {
+        groups
+            .entry(
+                labels
+                    .get(&node.aka_id)
+                    .cloned()
+                    .unwrap_or_else(|| community_key(&node.file_path)),
+            )
+            .or_default()
+            .push(node.clone());
+    }
+    if groups.is_empty() || nodes.len() < MIN_SYNTH_COMMUNITY_SIZE {
+        return Vec::new();
     }
 
-    let mut starts: Vec<String> = adjacency
-        .keys()
-        .filter(|id| *indegree.get(*id).unwrap_or(&0) == 0)
-        .cloned()
+    let mut node_group = BTreeMap::new();
+    for (key, members) in &groups {
+        for member in members {
+            node_group.insert(member.aka_id.clone(), key.clone());
+        }
+    }
+
+    let mut internal_calls: BTreeMap<String, usize> = BTreeMap::new();
+    let mut incident_calls: BTreeMap<String, usize> = BTreeMap::new();
+    for (source, target) in call_edges {
+        let Some(source_group) = node_group.get(source) else {
+            continue;
+        };
+        let Some(target_group) = node_group.get(target) else {
+            continue;
+        };
+        if source_group == target_group {
+            *internal_calls.entry(source_group.clone()).or_default() += 1;
+            *incident_calls.entry(source_group.clone()).or_default() += 1;
+        } else {
+            *incident_calls.entry(source_group.clone()).or_default() += 1;
+            *incident_calls.entry(target_group.clone()).or_default() += 1;
+        }
+    }
+
+    groups
+        .into_iter()
+        .filter(|(_, members)| members.len() >= MIN_SYNTH_COMMUNITY_SIZE)
+        .map(|(key, mut members)| {
+            members.sort_by(|a, b| {
+                a.file_path
+                    .cmp(&b.file_path)
+                    .then_with(|| a.name.cmp(&b.name))
+                    .then_with(|| a.aka_id.cmp(&b.aka_id))
+            });
+            let incident = *incident_calls.get(&key).unwrap_or(&0);
+            let internal = *internal_calls.get(&key).unwrap_or(&0);
+            let cohesion = if incident == 0 {
+                1.0
+            } else {
+                internal as f64 / incident as f64
+            };
+            let heuristic_label = community_label(&key, &members);
+            SynthCommunity {
+                id: format!("community:heuristic:{:016x}", stable_hash(&key)),
+                heuristic_label,
+                cohesion: round3(cohesion),
+                members,
+            }
+        })
+        .collect()
+}
+
+fn propagated_community_labels(
+    nodes: &BTreeMap<String, SynthNode>,
+    call_edges: &[(String, String)],
+) -> BTreeMap<String, String> {
+    let initial: BTreeMap<String, String> = nodes
+        .values()
+        .map(|node| (node.aka_id.clone(), community_key(&node.file_path)))
         .collect();
-    if starts.is_empty() {
-        starts = adjacency
-            .keys()
-            .filter(|id| is_hard_entry_name(&nodes[*id].name))
-            .cloned()
-            .collect();
+    if call_edges.is_empty() {
+        return initial;
     }
-    if starts.is_empty() {
-        starts = adjacency.keys().cloned().collect();
-    }
-    starts.sort_by(|a, b| {
-        let na = &nodes[a];
-        let nb = &nodes[b];
-        entry_score(nb, *indegree.get(b).unwrap_or(&0))
-            .cmp(&entry_score(na, *indegree.get(a).unwrap_or(&0)))
-            .then_with(|| na.file_path.cmp(&nb.file_path))
-            .then_with(|| na.name.cmp(&nb.name))
-            .then_with(|| a.cmp(b))
-    });
-    starts.truncate(PROCESS_MAX_STARTS);
 
-    let mut processes = Vec::new();
-    let mut seen = BTreeSet::new();
-    for start in starts {
-        let mut path = vec![start.clone()];
-        collect_chains(
-            &start,
-            &nodes,
-            &adjacency,
-            &mut path,
-            &mut seen,
-            &mut processes,
-        );
-        if processes.len() >= PROCESS_MAX_COUNT {
+    let mut initial_sizes: BTreeMap<String, usize> = BTreeMap::new();
+    for label in initial.values() {
+        *initial_sizes.entry(label.clone()).or_default() += 1;
+    }
+
+    let mut neighbors: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (source, target) in call_edges {
+        if !initial.contains_key(source) || !initial.contains_key(target) || source == target {
+            continue;
+        }
+        neighbors
+            .entry(source.clone())
+            .or_default()
+            .insert(target.clone());
+        neighbors
+            .entry(target.clone())
+            .or_default()
+            .insert(source.clone());
+    }
+
+    let mut labels = initial;
+    for _ in 0..COMMUNITY_LABEL_PROPAGATION_PASSES {
+        let mut next = labels.clone();
+        let mut changed = false;
+        for (node_id, current_label) in &labels {
+            let Some(node_neighbors) = neighbors.get(node_id) else {
+                continue;
+            };
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            for neighbor in node_neighbors {
+                if let Some(label) = labels.get(neighbor) {
+                    *counts.entry(label.clone()).or_default() += 1;
+                }
+            }
+            let Some((best_label, best_count)) = counts
+                .iter()
+                .max_by(|(label_a, count_a), (label_b, count_b)| {
+                    count_a.cmp(count_b).then_with(|| label_b.cmp(label_a))
+                })
+                .map(|(label, count)| (label.clone(), *count))
+            else {
+                continue;
+            };
+            let own_count = counts.get(current_label).copied().unwrap_or(0);
+            let own_initial_size = initial_sizes.get(current_label).copied().unwrap_or(0);
+            let should_adopt = best_label != *current_label
+                && best_count > own_count
+                && (best_count >= 2 || own_initial_size < MIN_SYNTH_COMMUNITY_SIZE);
+            if should_adopt {
+                next.insert(node_id.clone(), best_label);
+                changed = true;
+            }
+        }
+        labels = next;
+        if !changed {
             break;
         }
     }
-    Ok(processes)
+
+    labels
 }
 
-fn collect_chains(
-    current: &str,
+fn community_memberships_from_synth(
+    communities: &[SynthCommunity],
+) -> BTreeMap<String, Vec<CommunityRef>> {
+    let mut out = BTreeMap::new();
+    for community in communities {
+        let community_ref = CommunityRef {
+            id: community.id.clone(),
+            label: community.heuristic_label.clone(),
+        };
+        for member in &community.members {
+            out.entry(member.aka_id.clone())
+                .or_insert_with(Vec::new)
+                .push(community_ref.clone());
+        }
+    }
+    out
+}
+
+fn synthesize_processes_from_calls(
     nodes: &BTreeMap<String, SynthNode>,
     adjacency: &BTreeMap<String, BTreeSet<String>>,
-    path: &mut Vec<String>,
-    seen: &mut BTreeSet<String>,
-    out: &mut Vec<SynthProcess>,
-) {
-    if out.len() >= PROCESS_MAX_COUNT {
-        return;
+    indegree: &BTreeMap<String, usize>,
+    community_memberships: &BTreeMap<String, Vec<CommunityRef>>,
+) -> Vec<SynthProcess> {
+    if adjacency.is_empty() {
+        return Vec::new();
     }
-    let nexts = adjacency.get(current);
-    if path.len() >= PROCESS_MAX_STEPS || nexts.is_none_or(BTreeSet::is_empty) {
-        push_process(path, nodes, seen, out);
-        return;
+
+    let max_processes = dynamic_process_cap(nodes.len());
+    let mut starts = find_entry_points(nodes, adjacency, indegree);
+    if starts.is_empty() {
+        starts = adjacency.keys().cloned().collect();
+        starts.sort_by(|a, b| {
+            let na = &nodes[a];
+            let nb = &nodes[b];
+            na.file_path
+                .cmp(&nb.file_path)
+                .then_with(|| na.name.cmp(&nb.name))
+                .then_with(|| a.cmp(b))
+        });
     }
-    let mut advanced = false;
-    let mut ranked: Vec<&String> = nexts.unwrap().iter().collect();
-    ranked.sort_by(|a, b| {
-        let na = &nodes[*a];
-        let nb = &nodes[*b];
-        step_score(nb)
-            .cmp(&step_score(na))
-            .then_with(|| na.file_path.cmp(&nb.file_path))
-            .then_with(|| na.name.cmp(&nb.name))
-            .then_with(|| a.cmp(b))
-    });
-    for next in ranked.into_iter().take(PROCESS_BRANCH_LIMIT) {
-        if path.iter().any(|id| id == next) {
-            continue;
-        }
-        path.push(next.clone());
-        collect_chains(next, nodes, adjacency, path, seen, out);
-        path.pop();
-        advanced = true;
-        if out.len() >= PROCESS_MAX_COUNT {
-            return;
+    starts.truncate(PROCESS_MAX_STARTS);
+
+    let mut traces = Vec::new();
+    for start in starts {
+        traces.extend(trace_from_entry_point(&start, nodes, adjacency));
+        if traces.len() >= max_processes * 2 {
+            break;
         }
     }
-    if !advanced {
-        push_process(path, nodes, seen, out);
-    }
+    let mut traces = deduplicate_by_endpoints(deduplicate_traces(traces));
+    traces.sort_by_key(|trace| Reverse(trace.len()));
+    traces.truncate(max_processes);
+
+    traces
+        .into_iter()
+        .filter_map(|trace| process_from_trace(&trace, nodes, community_memberships))
+        .collect()
 }
 
-fn push_process(
+fn find_entry_points(
+    nodes: &BTreeMap<String, SynthNode>,
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+    indegree: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for (id, node) in nodes {
+        if !matches!(node.label.as_str(), "Function" | "Method") || is_test_file(&node.file_path) {
+            continue;
+        }
+        let Some(callees) = adjacency.get(id) else {
+            continue;
+        };
+        if callees.is_empty() {
+            continue;
+        }
+        let callers = *indegree.get(id).unwrap_or(&0);
+        let score = entry_score(node, callers, callees.len());
+        if score > 0.0 {
+            candidates.push((id.clone(), score));
+        }
+    }
+    candidates.sort_by(|(a_id, a_score), (b_id, b_score)| {
+        b_score.total_cmp(a_score).then_with(|| {
+            let a = &nodes[a_id];
+            let b = &nodes[b_id];
+            a.file_path
+                .cmp(&b.file_path)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a_id.cmp(b_id))
+        })
+    });
+    candidates.into_iter().map(|(id, _)| id).collect()
+}
+
+fn trace_from_entry_point(
+    entry_id: &str,
+    nodes: &BTreeMap<String, SynthNode>,
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<Vec<String>> {
+    let mut traces = Vec::new();
+    let mut queue = VecDeque::new();
+    queue.push_back((entry_id.to_string(), vec![entry_id.to_string()]));
+
+    while let Some((current, path)) = queue.pop_front() {
+        if traces.len() >= PROCESS_BRANCH_LIMIT * 3 {
+            break;
+        }
+        let callees = adjacency.get(&current);
+        if path.len() >= PROCESS_MAX_STEPS || callees.is_none_or(BTreeSet::is_empty) {
+            if path.len() >= PROCESS_MIN_STEPS {
+                traces.push(path);
+            }
+            continue;
+        }
+
+        let mut ranked: Vec<&String> = callees.expect("checked").iter().collect();
+        ranked.sort_by(|a, b| {
+            let na = &nodes[*a];
+            let nb = &nodes[*b];
+            step_score(nb)
+                .cmp(&step_score(na))
+                .then_with(|| na.file_path.cmp(&nb.file_path))
+                .then_with(|| na.name.cmp(&nb.name))
+                .then_with(|| a.cmp(b))
+        });
+        let mut advanced = false;
+        for next in ranked.into_iter().take(PROCESS_BRANCH_LIMIT) {
+            if path.iter().any(|id| id == next) {
+                continue;
+            }
+            let mut next_path = path.clone();
+            next_path.push(next.clone());
+            queue.push_back((next.clone(), next_path));
+            advanced = true;
+        }
+        if !advanced && path.len() >= PROCESS_MIN_STEPS {
+            traces.push(path);
+        }
+    }
+
+    traces
+}
+
+fn deduplicate_traces(mut traces: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    traces.sort_by_key(|trace| Reverse(trace.len()));
+    let mut unique: Vec<Vec<String>> = Vec::new();
+    for trace in traces {
+        if !unique
+            .iter()
+            .any(|existing| contains_trace(existing, &trace))
+        {
+            unique.push(trace);
+        }
+    }
+    unique
+}
+
+fn deduplicate_by_endpoints(mut traces: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    traces.sort_by_key(|trace| Reverse(trace.len()));
+    let mut seen_endpoints: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut out = Vec::new();
+    for trace in traces {
+        let (Some(first), Some(last)) = (trace.first(), trace.last()) else {
+            continue;
+        };
+        if seen_endpoints.insert((first.clone(), last.clone())) {
+            out.push(trace);
+        }
+    }
+    out
+}
+
+fn contains_trace(existing: &[String], candidate: &[String]) -> bool {
+    candidate.len() <= existing.len()
+        && existing
+            .windows(candidate.len())
+            .any(|window| window == candidate)
+}
+
+fn process_from_trace(
     path: &[String],
     nodes: &BTreeMap<String, SynthNode>,
-    seen: &mut BTreeSet<String>,
-    out: &mut Vec<SynthProcess>,
-) {
-    if path.len() < 2 || out.len() >= PROCESS_MAX_COUNT {
-        return;
+    community_memberships: &BTreeMap<String, Vec<CommunityRef>>,
+) -> Option<SynthProcess> {
+    if path.len() < PROCESS_MIN_STEPS {
+        return None;
     }
     let key = path.join(">");
-    if !seen.insert(key.clone()) {
-        return;
-    }
     let steps: Vec<SynthNode> = path
         .iter()
         .filter_map(|id| nodes.get(id).cloned())
         .collect();
-    if steps.len() < 2 {
-        return;
+    if steps.len() < PROCESS_MIN_STEPS {
+        return None;
     }
     let entry = steps.first().expect("steps").display_name();
     let terminal = steps.last().expect("steps").display_name();
     let id = format!("process:call-chain:{:016x}", stable_hash(&key));
-    out.push(SynthProcess {
+    let communities = process_communities(path, community_memberships);
+    let process_type = if communities.len() > 1 {
+        "cross_community"
+    } else {
+        "intra_community"
+    }
+    .to_string();
+    Some(SynthProcess {
         id,
         name: format!("{entry} → {terminal}"),
+        process_type,
+        communities,
         steps,
-    });
+    })
+}
+
+fn process_communities(
+    path: &[String],
+    community_memberships: &BTreeMap<String, Vec<CommunityRef>>,
+) -> Vec<CommunityRef> {
+    let mut communities = BTreeSet::new();
+    for node_id in path {
+        if let Some(node_communities) = community_memberships.get(node_id) {
+            communities.extend(node_communities.iter().cloned());
+        }
+    }
+    communities.into_iter().collect()
 }
 
 impl SynthNode {
@@ -739,19 +1261,32 @@ impl SynthNode {
     }
 }
 
-fn entry_score(node: &SynthNode, indegree: usize) -> i32 {
-    let name = node.name.to_ascii_lowercase();
-    let mut score = if indegree == 0 { 50 } else { 0 };
-    if is_hard_entry_name(&name) {
-        score += 100;
+fn dynamic_process_cap(symbol_count: usize) -> usize {
+    (symbol_count / 10)
+        .clamp(PROCESS_MIN_COUNT, PROCESS_MAX_COUNT)
+        .max(PROCESS_MIN_COUNT)
+}
+
+fn entry_score(node: &SynthNode, caller_count: usize, callee_count: usize) -> f64 {
+    if callee_count == 0 {
+        return 0.0;
     }
-    if name.starts_with("start") || name.starts_with("run") || name.starts_with("handle") {
-        score += 60;
-    }
-    if name.contains("request") || name.contains("route") || name.contains("handler") {
-        score += 30;
-    }
-    score + step_score(node)
+    let base_score = callee_count as f64 / (caller_count as f64 + 1.0);
+    let export_multiplier = if node.is_exported { 2.0 } else { 1.0 };
+    let name_multiplier = if is_utility_name(&node.name) {
+        0.3
+    } else if is_entry_name(&node.name, &node.language) {
+        1.5
+    } else {
+        1.0
+    };
+    let framework_multiplier = framework_multiplier_from_path(&node.file_path);
+    let ast_multiplier = if node.ast_framework_reason.is_some() {
+        node.ast_framework_multiplier.max(1.0)
+    } else {
+        node.ast_framework_multiplier
+    };
+    base_score * export_multiplier * name_multiplier * framework_multiplier * ast_multiplier
 }
 
 fn is_hard_entry_name(name: &str) -> bool {
@@ -759,6 +1294,138 @@ fn is_hard_entry_name(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "main" | "start" | "run" | "init" | "bootstrap"
     )
+}
+
+fn is_entry_name(name: &str, language: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    is_hard_entry_name(&lower)
+        || lower.starts_with("handle")
+        || lower.starts_with("process")
+        || lower.starts_with("execute")
+        || lower.starts_with("perform")
+        || lower.starts_with("dispatch")
+        || lower.starts_with("trigger")
+        || lower.starts_with("fire")
+        || lower.starts_with("emit")
+        || lower.starts_with("on")
+        || lower.ends_with("handler")
+        || lower.ends_with("controller")
+        || language_entry_name(&lower, language)
+}
+
+fn language_entry_name(lower_name: &str, language: &str) -> bool {
+    match language {
+        "python" => lower_name == "__main__" || lower_name.starts_with("view_"),
+        "go" => lower_name == "init" || lower_name == "servehttp",
+        "java" | "kotlin" | "csharp" => {
+            lower_name == "main"
+                || lower_name.ends_with("controller")
+                || lower_name.ends_with("handler")
+        }
+        "rust" => lower_name == "main" || lower_name.starts_with("run_"),
+        _ => false,
+    }
+}
+
+fn is_utility_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with('_')
+        || lower.starts_with("get")
+        || lower.starts_with("set")
+        || lower.starts_with("is")
+        || lower.starts_with("has")
+        || lower.starts_with("can")
+        || lower.starts_with("should")
+        || lower.starts_with("format")
+        || lower.starts_with("parse")
+        || lower.starts_with("validate")
+        || lower.starts_with("convert")
+        || lower.starts_with("transform")
+        || lower.starts_with("to")
+        || lower.starts_with("from")
+        || lower.starts_with("encode")
+        || lower.starts_with("decode")
+        || lower.starts_with("serialize")
+        || lower.starts_with("deserialize")
+        || lower.starts_with("clone")
+        || lower.starts_with("copy")
+        || lower.starts_with("merge")
+        || lower.starts_with("filter")
+        || lower.starts_with("map")
+        || lower.starts_with("reduce")
+        || matches!(
+            lower.as_str(),
+            "log" | "debug" | "error" | "warn" | "info" | "utils" | "helpers"
+        )
+        || lower.ends_with("helper")
+        || lower.ends_with("util")
+        || lower.ends_with("utils")
+}
+
+fn framework_multiplier_from_path(path: &str) -> f64 {
+    let p = path.replace('\\', "/").to_ascii_lowercase();
+    if p.contains("/pages/api/")
+        || p.contains("/app/api/")
+        || p.contains("/routes/")
+        || p.contains("/controllers/")
+        || p.contains("/handlers/")
+        || p.contains("/views/")
+        || p.ends_with("controller.ts")
+        || p.ends_with("controller.js")
+        || p.ends_with("controller.py")
+        || p.ends_with("handler.ts")
+        || p.ends_with("handler.js")
+        || p.ends_with("handler.py")
+    {
+        2.0
+    } else if is_utility_file(&p) {
+        0.6
+    } else {
+        1.0
+    }
+}
+
+fn is_test_file(path: &str) -> bool {
+    let p = path.replace('\\', "/").to_ascii_lowercase();
+    p.contains(".test.")
+        || p.contains(".spec.")
+        || p.contains("__tests__/")
+        || p.contains("__mocks__/")
+        || p.contains("/test/")
+        || p.contains("/tests/")
+        || p.contains("/testing/")
+        || p.ends_with("_test.py")
+        || p.contains("/test_")
+        || p.ends_with("_test.go")
+        || p.contains("/src/test/")
+        || p.ends_with("tests.swift")
+        || p.ends_with("test.swift")
+        || p.contains("uitests/")
+        || p.ends_with("tests.cs")
+        || p.ends_with("test.cs")
+        || p.contains(".tests/")
+        || p.contains(".test/")
+        || p.ends_with("test.php")
+        || p.ends_with("spec.php")
+        || p.ends_with("_spec.rb")
+        || p.ends_with("_test.rb")
+        || p.contains("/spec/")
+}
+
+fn is_utility_file(path: &str) -> bool {
+    let p = path.replace('\\', "/").to_ascii_lowercase();
+    p.contains("/utils/")
+        || p.contains("/util/")
+        || p.contains("/helpers/")
+        || p.contains("/helper/")
+        || p.contains("/common/")
+        || p.contains("/shared/")
+        || p.ends_with("/utils.ts")
+        || p.ends_with("/utils.js")
+        || p.ends_with("/helpers.ts")
+        || p.ends_with("/helpers.js")
+        || p.ends_with("_utils.py")
+        || p.ends_with("_helpers.py")
 }
 
 fn step_score(node: &SynthNode) -> i32 {
@@ -796,6 +1463,171 @@ fn is_noisy_source_path(path: &str) -> bool {
                 | "third-party"
         )
     }) || path.ends_with(".min.js")
+}
+
+fn community_key(file_path: &str) -> String {
+    let path = file_path.replace('\\', "/");
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect();
+    match segments.as_slice() {
+        [] => "(unknown)".into(),
+        [only] => file_stem_label(only),
+        [root, file] if looks_like_file(file) => (*root).to_string(),
+        [root, name, ..]
+            if matches!(
+                *root,
+                "apps" | "crates" | "libs" | "packages" | "services" | "tools"
+            ) =>
+        {
+            format!("{root}/{name}")
+        }
+        [root, name, ..]
+            if matches!(
+                *root,
+                "app" | "cmd" | "internal" | "lib" | "pkg" | "src" | "test" | "tests"
+            ) && !looks_like_file(name) =>
+        {
+            format!("{root}/{name}")
+        }
+        [root, ..] => (*root).to_string(),
+    }
+}
+
+fn looks_like_file(segment: &str) -> bool {
+    segment
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| !ext.is_empty())
+}
+
+fn community_label(key: &str, members: &[SynthNode]) -> String {
+    let folder = key
+        .split('/')
+        .rfind(|part| !part.is_empty() && *part != "(unknown)");
+    if let Some(folder) = folder {
+        return capitalize(folder);
+    }
+
+    let names: Vec<&str> = members
+        .iter()
+        .map(|node| node.name.as_str())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if names.len() > 2 {
+        let prefix = common_prefix(&names);
+        if prefix.len() > 2 {
+            return capitalize(&prefix);
+        }
+    }
+    "Cluster".into()
+}
+
+fn community_keywords(members: &[SynthNode]) -> Vec<String> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for member in members {
+        for token in keyword_tokens(&member.name) {
+            *counts.entry(token).or_default() += 2;
+        }
+        for segment in member
+            .file_path
+            .replace('\\', "/")
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+        {
+            if looks_like_file(segment) {
+                continue;
+            }
+            for token in keyword_tokens(segment) {
+                *counts.entry(token).or_default() += 1;
+            }
+        }
+    }
+    let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+    ranked.sort_by(|(a_token, a_count), (b_token, b_count)| {
+        b_count
+            .cmp(a_count)
+            .then_with(|| a_token.len().cmp(&b_token.len()))
+            .then_with(|| a_token.cmp(b_token))
+    });
+    ranked.into_iter().take(8).map(|(token, _)| token).collect()
+}
+
+fn keyword_tokens(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .flat_map(split_identifier)
+        .filter(|token| {
+            token.len() >= 3
+                && !matches!(
+                    token.as_str(),
+                    "src" | "lib" | "core" | "utils" | "common" | "shared" | "test" | "tests"
+                )
+        })
+        .collect()
+}
+
+fn split_identifier(raw: &str) -> Vec<String> {
+    let raw = raw.trim_matches('_');
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let chars: Vec<(usize, char)> = raw.char_indices().collect();
+    for i in 1..chars.len() {
+        let prev = chars[i - 1].1;
+        let current = chars[i].1;
+        let next = chars.get(i + 1).map(|(_, ch)| *ch);
+        let boundary = (prev.is_ascii_lowercase() && current.is_ascii_uppercase())
+            || (prev.is_ascii_uppercase()
+                && current.is_ascii_uppercase()
+                && next.is_some_and(|ch| ch.is_ascii_lowercase()))
+            || (prev.is_ascii_alphabetic() && current.is_ascii_digit())
+            || (prev.is_ascii_digit() && current.is_ascii_alphabetic());
+        if boundary {
+            let off = chars[i].0;
+            parts.push(raw[start..off].to_ascii_lowercase());
+            start = off;
+        }
+    }
+    parts.push(raw[start..].to_ascii_lowercase());
+    parts
+}
+
+fn file_stem_label(file_name: &str) -> String {
+    file_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(file_name)
+        .to_string()
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+fn common_prefix(strings: &[&str]) -> String {
+    let Some(first) = strings.iter().min() else {
+        return String::new();
+    };
+    let Some(last) = strings.iter().max() else {
+        return String::new();
+    };
+    first
+        .chars()
+        .zip(last.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a)
+        .collect()
+}
+
+fn round3(value: f64) -> f64 {
+    (value.clamp(0.0, 1.0) * 1000.0).round() / 1000.0
 }
 
 fn stable_hash(s: &str) -> u64 {
@@ -1060,7 +1892,7 @@ mod tests {
         insert_edge(&conn, 1, 1, 2, "CALLS");
         insert_edge(&conn, 2, 2, 3, "CALLS");
 
-        let processes = synthesize_processes(&conn, "demo").unwrap();
+        let processes = synthesize_graph(&conn, "demo").unwrap().processes;
         assert_eq!(processes.len(), 1);
         let p = &processes[0];
         assert_eq!(p.name, "main → parseConfig");
@@ -1071,10 +1903,18 @@ mod tests {
 
         let node = p.node_rec();
         assert_eq!(node.label, "Process");
-        assert_eq!(node.properties["processType"], "call-chain");
+        assert_eq!(node.properties["processType"], "intra_community");
         assert_eq!(node.properties["stepCount"], 3);
         assert_eq!(node.properties["entryPointId"], p.steps[0].aka_id);
         assert_eq!(node.properties["terminalId"], p.steps[2].aka_id);
+        assert_eq!(node.properties["trace"].as_array().expect("trace").len(), 3);
+        assert_eq!(
+            node.properties["communities"]
+                .as_array()
+                .expect("communities")
+                .len(),
+            1
+        );
 
         let edges = p.edge_recs();
         assert_eq!(
@@ -1090,6 +1930,145 @@ mod tests {
             .filter_map(|e| e.step)
             .collect();
         assert_eq!(steps, [1, 2, 3]);
+    }
+
+    #[test]
+    fn synthesizes_community_nodes_and_member_edges() {
+        let conn = test_conn();
+        insert_node(
+            &conn,
+            1,
+            "Function",
+            "main",
+            "src/main.ts::main",
+            "src/main.ts",
+        );
+        insert_node(
+            &conn,
+            2,
+            "Function",
+            "next",
+            "src/main.ts::next",
+            "src/main.ts",
+        );
+        insert_node(
+            &conn,
+            3,
+            "Function",
+            "store",
+            "src/store.ts::store",
+            "src/store.ts",
+        );
+        insert_edge(&conn, 1, 1, 2, "CALLS");
+        insert_edge(&conn, 2, 2, 3, "CALLS");
+
+        let synth = synthesize_graph(&conn, "demo").unwrap();
+        assert_eq!(synth.communities.len(), 1);
+        let main = synth
+            .communities
+            .iter()
+            .find(|c| c.heuristic_label == "Src")
+            .expect("src community");
+        assert_eq!(main.members.len(), 3);
+
+        let node = main.node_rec();
+        assert_eq!(node.label, "Community");
+        assert_eq!(node.properties["heuristicLabel"], "Src");
+        assert_eq!(node.properties["symbolCount"], 3);
+        assert_eq!(node.properties["source"], "aka-cbm-synth");
+        assert_eq!(main.edge_recs().len(), 3);
+        assert!(main
+            .edge_recs()
+            .iter()
+            .all(|edge| edge.edge_type == "MEMBER_OF"));
+
+        let process = synth.processes.first().expect("process");
+        assert_eq!(process.process_type, "intra_community");
+        assert_eq!(process.communities.len(), 1);
+    }
+
+    #[test]
+    fn marks_cross_module_processes_as_cross_community() {
+        let conn = test_conn();
+        insert_node(
+            &conn,
+            1,
+            "Function",
+            "main",
+            "src/api/main.ts::main",
+            "src/api/main.ts",
+        );
+        insert_node(
+            &conn,
+            2,
+            "Function",
+            "handle",
+            "src/api/handler.ts::handle",
+            "src/api/handler.ts",
+        );
+        insert_node(
+            &conn,
+            3,
+            "Function",
+            "save",
+            "src/db/store.ts::save",
+            "src/db/store.ts",
+        );
+        insert_node(
+            &conn,
+            4,
+            "Function",
+            "commit",
+            "src/db/store.ts::commit",
+            "src/db/store.ts",
+        );
+        insert_edge(&conn, 1, 1, 2, "CALLS");
+        insert_edge(&conn, 2, 2, 3, "CALLS");
+        insert_edge(&conn, 3, 3, 4, "CALLS");
+
+        let synth = synthesize_graph(&conn, "demo").unwrap();
+        assert_eq!(synth.communities.len(), 2);
+        let process = synth.processes.first().expect("process");
+        assert_eq!(process.process_type, "cross_community");
+        assert_eq!(process.communities.len(), 2);
+    }
+
+    #[test]
+    fn marks_single_community_processes_as_intra_community() {
+        let conn = test_conn();
+        insert_node(
+            &conn,
+            1,
+            "Function",
+            "main",
+            "src/main.ts::main",
+            "src/main.ts",
+        );
+        insert_node(
+            &conn,
+            2,
+            "Function",
+            "next",
+            "src/main.ts::next",
+            "src/main.ts",
+        );
+        insert_node(
+            &conn,
+            3,
+            "Function",
+            "done",
+            "src/main.ts::done",
+            "src/main.ts",
+        );
+        insert_edge(&conn, 1, 1, 2, "CALLS");
+        insert_edge(&conn, 2, 2, 3, "CALLS");
+
+        let processes = synthesize_graph(&conn, "demo").unwrap().processes;
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].process_type, "intra_community");
+        assert_eq!(processes[0].communities.len(), 1);
+        let node = processes[0].node_rec();
+        assert_eq!(node.properties["processType"], "intra_community");
     }
 
     #[test]
@@ -1115,12 +2094,12 @@ mod tests {
         insert_edge(&conn, 1, 2, 3, "CALLS");
         insert_edge(&conn, 2, 2, 1, "STEP_IN_PROCESS");
 
-        let processes = synthesize_processes(&conn, "demo").unwrap();
+        let processes = synthesize_graph(&conn, "demo").unwrap().processes;
         assert!(processes.is_empty());
     }
 
     #[test]
-    fn synthesizes_when_native_process_lacks_step_edges() {
+    fn skips_synthesis_when_engine_emits_process_nodes_without_step_edges() {
         let conn = test_conn();
         insert_node(
             &conn,
@@ -1148,8 +2127,125 @@ mod tests {
         );
         insert_edge(&conn, 1, 2, 3, "CALLS");
 
-        let processes = synthesize_processes(&conn, "demo").unwrap();
+        let processes = synthesize_graph(&conn, "demo").unwrap().processes;
+        assert!(processes.is_empty());
+    }
+
+    #[test]
+    fn skips_community_synthesis_when_engine_already_emits_communities() {
+        let conn = test_conn();
+        insert_node(&conn, 1, "Community", "native", "community:native", "");
+        insert_node(
+            &conn,
+            2,
+            "Function",
+            "main",
+            "src/main.ts::main",
+            "src/main.ts",
+        );
+        insert_node(
+            &conn,
+            3,
+            "Function",
+            "next",
+            "src/main.ts::next",
+            "src/main.ts",
+        );
+        insert_node(
+            &conn,
+            4,
+            "Function",
+            "done",
+            "src/main.ts::done",
+            "src/main.ts",
+        );
+        insert_edge(&conn, 1, 2, 3, "CALLS");
+        insert_edge(&conn, 2, 3, 4, "CALLS");
+        insert_edge(&conn, 3, 2, 1, "MEMBER_OF");
+        insert_edge(&conn, 4, 3, 1, "MEMBER_OF");
+
+        let synth = synthesize_graph(&conn, "demo").unwrap();
+        assert!(synth.communities.is_empty());
+        assert_eq!(synth.processes.len(), 1);
+        assert_eq!(synth.processes[0].process_type, "intra_community");
+        assert_eq!(synth.processes[0].communities.len(), 1);
+    }
+
+    #[test]
+    fn process_synthesis_uses_gitnexus_like_entry_scoring_and_dedup() {
+        let conn = test_conn();
+        insert_node(
+            &conn,
+            1,
+            "Function",
+            "validateInput",
+            "src/api/handler.ts::validateInput",
+            "src/api/handler.ts",
+        );
+        insert_node(
+            &conn,
+            2,
+            "Function",
+            "handleLogin",
+            "src/api/handler.ts::handleLogin",
+            "src/api/handler.ts",
+        );
+        insert_node(
+            &conn,
+            3,
+            "Function",
+            "loadUser",
+            "src/auth/user.ts::loadUser",
+            "src/auth/user.ts",
+        );
+        insert_node(
+            &conn,
+            4,
+            "Function",
+            "commitSession",
+            "src/auth/session.ts::commitSession",
+            "src/auth/session.ts",
+        );
+        insert_node(
+            &conn,
+            5,
+            "Function",
+            "handleLoginSpec",
+            "src/api/handler.test.ts::handleLoginSpec",
+            "src/api/handler.test.ts",
+        );
+        insert_node(
+            &conn,
+            6,
+            "Function",
+            "assertSession",
+            "src/api/handler.test.ts::assertSession",
+            "src/api/handler.test.ts",
+        );
+        insert_edge(&conn, 1, 2, 3, "CALLS");
+        insert_edge(&conn, 2, 3, 4, "CALLS");
+        insert_edge(&conn, 3, 1, 2, "CALLS");
+        insert_edge(&conn, 4, 5, 6, "CALLS");
+
+        let synth = synthesize_graph(&conn, "demo").unwrap();
+        let processes = synth.processes;
         assert_eq!(processes.len(), 1);
-        assert_eq!(processes[0].name, "main → next");
+        let process = &processes[0];
+        assert_eq!(process.name, "validateInput → commitSession");
+        assert_eq!(
+            process
+                .steps
+                .iter()
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>(),
+            ["validateInput", "handleLogin", "loadUser", "commitSession"]
+        );
+        assert!(
+            process
+                .steps
+                .iter()
+                .all(|step| !step.file_path.contains(".test.")),
+            "test-file entry points should not produce processes"
+        );
     }
 }
