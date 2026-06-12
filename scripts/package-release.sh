@@ -372,6 +372,24 @@ verify_macos_bundle() {
   fi
 }
 
+create_macos_dmg() {
+  local app_path dmg_path attempt
+  app_path="$1"
+  dmg_path="$2"
+
+  for attempt in 1 2 3; do
+    if hdiutil create -volname "AKA" -srcfolder "${app_path}" -ov -format UDZO "${dmg_path}"; then
+      return 0
+    fi
+    echo "warning: hdiutil create failed (attempt ${attempt}/3); retrying after cleanup..." >&2
+    hdiutil detach -quiet "/Volumes/AKA" 2>/dev/null || true
+    sleep $((attempt * 3))
+  done
+
+  echo "error: hdiutil create failed after 3 attempts" >&2
+  return 1
+}
+
 find_tauri_dmg() {
   local dmg_dir
   dmg_dir="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/dmg"
@@ -531,7 +549,7 @@ package_desktop() {
         [[ -f "${tauri_dmg}" ]] || { echo "error: Tauri 未产出 dmg" >&2; return 1; }
         cp "${tauri_dmg}" "${desktop_dmg}"
       else
-        hdiutil create -volname "AKA" -srcfolder "${app_path}" -ov -format UDZO "${desktop_dmg}"
+        create_macos_dmg "${app_path}" "${desktop_dmg}"
       fi
       verify_macos_bundle "${app_path}" "${desktop_dmg}" "${signed_release}"
       echo "==> ${desktop_dmg}"
