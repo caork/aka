@@ -91,7 +91,7 @@ export default function GraphView() {
   const [ego, setEgo] = useState<EgoState | null>(null);
   const [egoError, setEgoError] = useState<string | null>(null);
 
-  /** fallback for old backends without cluster overview support */
+  /** symbol-level LOD budget; cluster overview is only a fallback. */
   const renderBudget = repo?.renderMaxNodes ?? null;
   /** 仓库总节点数（来自 /api/repos stats），用于徽章 "已渲染 N / 总数" */
   const totalNodes = repo?.symbols ?? 0;
@@ -448,8 +448,8 @@ export default function GraphView() {
         }
       } else {
         const data =
-          (await loadClusterGraph(repoId, ctrl.signal).catch(() => null)) ??
-          (await loadRealGraph(repoId, renderBudget, ctrl.signal).catch(() => null));
+          (await loadRealGraph(repoId, renderBudget, ctrl.signal).catch(() => null)) ??
+          (await loadClusterGraph(repoId, ctrl.signal).catch(() => null));
         if (cancelled) return;
         rig.centerIndex = -1;
         if (data) {
@@ -723,7 +723,7 @@ export default function GraphView() {
               ) : (
                 <>
                   正在加载 <span className="mono font-semibold">{repoId}</span>{" "}
-                  社区图谱…
+                  图谱…
                 </>
               )}
             </span>

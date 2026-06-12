@@ -2671,6 +2671,61 @@ mod tests {
     }
 
     #[test]
+    fn auto_index_debounces_until_quick_state_is_stable() {
+        let base = RepoQuickState::default();
+        let changed = RepoQuickState {
+            files: BTreeMap::from([(
+                "src/lib.rs".into(),
+                QuickFingerprint {
+                    size: 42,
+                    modified: 100,
+                },
+            )]),
+        };
+        let mut state = AutoIndexState {
+            quick: base,
+            first_seen_dirty: None,
+            last_dirty_quick: None,
+        };
+        let t0 = Instant::now();
+
+        assert!(!auto_index_should_analyze(&mut state, changed.clone(), t0));
+        assert!(!auto_index_should_analyze(
+            &mut state,
+            changed.clone(),
+            t0 + Duration::from_secs(1)
+        ));
+        assert!(auto_index_should_analyze(
+            &mut state,
+            changed.clone(),
+            t0 + AUTO_INDEX_DEBOUNCE + Duration::from_millis(1)
+        ));
+        assert_eq!(state.quick, changed);
+        assert!(state.first_seen_dirty.is_none());
+        assert!(state.last_dirty_quick.is_none());
+    }
+
+    #[test]
+    fn quick_state_skips_generated_and_vcs_directories() {
+        let repo = temp_repo("auto-skip");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(repo.join("target/debug")).unwrap();
+        std::fs::create_dir_all(repo.join(".git/objects")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn keep() {}\n").unwrap();
+        std::fs::write(repo.join("node_modules/pkg/index.js"), "ignored").unwrap();
+        std::fs::write(repo.join("target/debug/app"), "ignored").unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ignored").unwrap();
+
+        let state = RepoQuickState::compute(&repo).unwrap();
+
+        assert!(state.files.contains_key("src/lib.rs"));
+        assert!(!state.files.contains_key("node_modules/pkg/index.js"));
+        assert!(!state.files.contains_key("target/debug/app"));
+        assert!(!state.files.contains_key(".git/HEAD"));
+    }
+
+    #[test]
     fn file_symbols_contract_shape_and_filtering() {
         // nodes_in_file 已按 start_line 升序返回（NULL 排最前）。
         let rows = vec![
