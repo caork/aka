@@ -14,7 +14,7 @@ import {
   fetchSource,
   type FileSymbol,
 } from "../repo-api";
-import { isDesktopRuntime } from "../desktop-api";
+import { isDesktopRuntime, openEditorUrl } from "../desktop-api";
 import { useAppStore } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
@@ -286,6 +286,10 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const lang = LANG_BY_EXT[ext] ?? (ext ? ext.toUpperCase() : null);
   const desktop = isDesktopRuntime();
+  const handleOpenEditor = useCallback(() => {
+    if (!editorHref) return;
+    void openEditorUrl(editorHref);
+  }, [editorHref]);
 
   const segments = path.split("/").filter(Boolean);
   const gutterWidth = `${Math.max(4, String(Math.max(totalLines, load.phase === "ok" ? load.lines.length : 0)).length) + 2}ch`;
@@ -358,14 +362,15 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
         />
 
         {editorHref ? (
-          <a
-            href={editorHref}
+          <button
+            type="button"
+            onClick={handleOpenEditor}
             className="themed-hover focus-ring flex-none rounded-[8px] px-2.5 py-1.5 text-[12px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
             style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }}
             data-testid="code-open-editor"
           >
             在编辑器打开
-          </a>
+          </button>
         ) : (
           <span
             className="flex-none cursor-not-allowed rounded-[8px] px-2.5 py-1.5 text-[12px] font-medium text-ink-3 opacity-60"

@@ -16,3 +16,11 @@ export function asDesktopError(e: unknown, fallback: string): Error {
   if (e instanceof Error) return e;
   return new Error(fallback);
 }
+
+export async function openEditorUrl(url: string): Promise<void> {
+  if (isDesktopRuntime()) {
+    await invokeDesktop("open_editor_url", { url });
+    return;
+  }
+  window.location.href = url;
+}

@@ -412,6 +412,13 @@ async fn open_url(url: String) -> Result<serde_json::Value, String> {
     Ok(json!({ "ok": true }))
 }
 
+#[tauri::command]
+async fn open_editor_url(url: String) -> Result<serde_json::Value, String> {
+    let url = validate_editor_url(&url)?.to_string();
+    spawn_url_opener(&url).map_err(|e| format!("open editor failed: {e}"))?;
+    Ok(json!({ "ok": true }))
+}
+
 fn validate_external_url(url: &str) -> Result<&str, String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -422,6 +429,20 @@ fn validate_external_url(url: &str) -> Result<&str, String> {
     }
     if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
         return Err("only http(s) urls can be opened".into());
+    }
+    Ok(trimmed)
+}
+
+fn validate_editor_url(url: &str) -> Result<&str, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("editor url is required".into());
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("editor url contains invalid control characters".into());
+    }
+    if !trimmed.starts_with("vscode://file/") {
+        return Err("only vscode://file/ urls can be opened".into());
     }
     Ok(trimmed)
 }
@@ -486,6 +507,7 @@ pub fn run() {
             clear_app_data,
             app_version,
             open_url,
+            open_editor_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

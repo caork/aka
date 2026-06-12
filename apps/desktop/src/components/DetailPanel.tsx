@@ -13,6 +13,7 @@ import {
   type ContextRef,
   type SymbolContext,
 } from "../search-api";
+import { openEditorUrl } from "../desktop-api";
 import { useAppStore, type DetailTarget } from "../store";
 import EgoMiniGraph from "./EgoMiniGraph";
 
@@ -695,7 +696,7 @@ function ActionButton({
   );
 }
 
-/** 链接型操作（vscode:// 在浏览器与 Tauri webview 中均可经 anchor 触发）。 */
+/** 打开源码位置；Tauri 内走系统 opener，避免 webview 拦截 vscode:// scheme。 */
 function ActionLink({
   href,
   testId,
@@ -718,14 +719,15 @@ function ActionLink({
     );
   }
   return (
-    <a
-      href={href}
+    <button
+      type="button"
+      onClick={() => void openEditorUrl(href)}
       className="themed-hover focus-ring rounded-[10px] px-3 py-2 text-center text-[12.5px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
       style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }}
       data-testid={testId}
     >
       {children}
-    </a>
+    </button>
   );
 }
 
