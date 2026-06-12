@@ -131,7 +131,7 @@ export default function CodeWorkspace() {
       {/* 左栏：文件树 / 搜索结果 */}
       <div
         ref={railRef}
-        className="themed-border relative flex h-full flex-none flex-col border-r"
+        className="code-rail themed-border relative flex h-full flex-none flex-col border-r"
         style={{ width: railWidth, minWidth: MIN_RAIL_WIDTH, maxWidth: MAX_RAIL_WIDTH }}
         data-testid="code-rail"
       >
@@ -140,7 +140,7 @@ export default function CodeWorkspace() {
           role="separator"
           aria-orientation="vertical"
           aria-label="调整文件浏览栏宽度"
-          className="group absolute inset-y-0 right-[-5px] z-30 w-2.5 cursor-col-resize touch-none"
+          className="code-rail-resize-handle group absolute bottom-0 right-[-5px] top-0 z-30 w-2.5 cursor-col-resize touch-none"
           data-testid="code-rail-resize-handle"
           onPointerDown={(e) => {
             e.preventDefault();

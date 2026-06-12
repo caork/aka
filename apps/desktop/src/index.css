@@ -217,6 +217,14 @@ html[data-platform="macos"] .app-content > * {
   height: 100%;
 }
 
+html[data-platform="macos"] .code-rail {
+  padding-top: var(--titlebar-height);
+}
+
+html[data-platform="macos"] .code-rail-resize-handle {
+  top: var(--titlebar-height);
+}
+
 /* ---------------------------------------------------------------------------
    glass surfaces
    --------------------------------------------------------------------------- */
