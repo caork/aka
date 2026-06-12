@@ -37,6 +37,34 @@ export async function loadRealGraph(
   }
 }
 
+/** 簇级/社区级总览；不支持或失败时返回 null。 */
+export async function loadClusterGraph(
+  repo: string,
+  signal?: AbortSignal,
+): Promise<GraphData | null> {
+  try {
+    const json = isDesktopRuntime()
+      ? await invokeDesktop<GraphJSON>("graph_clusters", { repo })
+      : await loadClusterGraphHttp(repo, signal);
+    return parseGraphBody(json, false);
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    return null;
+  }
+}
+
+async function loadClusterGraphHttp(
+  repo: string,
+  signal?: AbortSignal,
+): Promise<GraphJSON> {
+  const lr = await fetch(
+    apiUrl(`/api/graph/clusters?repo=${encodeURIComponent(repo)}`),
+    { signal: signal ?? AbortSignal.timeout(20_000) },
+  );
+  if (!lr.ok) throw new Error(String(lr.status));
+  return (await lr.json()) as GraphJSON;
+}
+
 async function loadRealGraphHttp(
   repo: string,
   budget: number,
@@ -87,11 +115,11 @@ async function loadEgoGraphHttp(
   return (await lr.json()) as GraphJSON;
 }
 
-function parseGraphBody(json: GraphJSON): GraphData | null {
+function parseGraphBody(json: GraphJSON, shuffleEdges = true): GraphData | null {
   if (!json.nodes?.length) return null;
   /* renderer 的 edgeFraction 远景采样假设边序无偏；服务端按源节点
      排序输出，这里洗牌一次（确定性 LCG，刷新结果稳定）。 */
-  shuffleEdgePairs(json.edges);
+  if (shuffleEdges) shuffleEdgePairs(json.edges);
   return parseGraphJSON(json);
 }
 

@@ -170,7 +170,25 @@ pub fn run_analyze_with_progress(
     }
     let artifact = open_artifact_after_emit(&artifact_dir, &stats)?;
     eprintln!("aka ▸ 构建索引 …");
-    let idx = indexer::index_artifact(&artifact, &paths)?;
+    let idx = match previous_state.as_ref() {
+        Some(previous) if !delta.is_empty() => match indexer::index_artifact_incremental(
+            &artifact,
+            &paths,
+            &delta,
+            previous,
+            &current_state,
+        )? {
+            indexer::IncrementalIndexOutcome::Applied(idx) => {
+                eprintln!("  ✓ 增量替换完成");
+                idx
+            }
+            indexer::IncrementalIndexOutcome::FullRebuildRequired(reason) => {
+                eprintln!("  · 增量不可用，回退全量：{reason}");
+                indexer::index_artifact(&artifact, &paths)?
+            }
+        },
+        _ => indexer::index_artifact(&artifact, &paths)?,
+    };
     save_parse_cache_snapshot(&paths, &artifact, &current_state, delta.clone())?;
 
     if let Some(cb) = progress.as_mut() {
@@ -185,7 +203,7 @@ pub fn run_analyze_with_progress(
         .with_context(|| format!("save index state {}", paths.index_state_path().display()))?;
 
     let summary = format!(
-        "aka ▸ {} 就绪：{} 节点 / {} 边（悬空跳过 {}）/ {} 切块入索引；delta {}{}",
+        "aka ▸ {} 就绪：{} 节点 / {} 边（悬空跳过 {}）/ {} 切块{}；delta {}{}",
         repo.file_name()
             .map(|n| n.to_string_lossy())
             .unwrap_or_default(),
@@ -193,6 +211,11 @@ pub fn run_analyze_with_progress(
         idx.edges,
         idx.dangling_edges,
         idx.chunks,
+        if idx.incremental {
+            "保留/替换"
+        } else {
+            "入索引"
+        },
         delta.summary(),
         if idx.bad_lines > 0 {
             format!("；坏行 {}", idx.bad_lines)

@@ -17,6 +17,7 @@
 #                                             macOS Tauri GUI app DMG
 #   dist/aka-desktop-<ver>-<host-triple>.app.zip
 #                                             macOS Tauri GUI app（zip 内 AKA.app）
+#   dist/aka-desktop-<ver>-macos-open.sh      macOS 无公证包打开助手（去 quarantine）
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe
 #                                             Windows Tauri GUI NSIS installer
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-portable.zip
@@ -117,6 +118,69 @@ first_existing_file() {
     printf '%s\n' "${candidate}"
     return 0
   done
+  return 1
+}
+
+create_zip_archive() {
+  local archive exclude_patterns=()
+  archive="$1"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --exclude)
+        [[ $# -ge 2 ]] || { echo "error: --exclude 需要参数" >&2; return 1; }
+        exclude_patterns+=("$2")
+        shift 2
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  if command -v zip >/dev/null 2>&1; then
+    local zip_args=()
+    if [[ ${#exclude_patterns[@]} -gt 0 ]]; then
+      local pattern
+      for pattern in "${exclude_patterns[@]}"; do
+        zip_args+=(-x "${pattern}")
+      done
+    fi
+    zip -q -X -r "${archive}" "$@" "${zip_args[@]}"
+    return
+  fi
+  if command -v 7z >/dev/null 2>&1; then
+    local seven_zip_args=()
+    if [[ ${#exclude_patterns[@]} -gt 0 ]]; then
+      local pattern
+      for pattern in "${exclude_patterns[@]}"; do
+        seven_zip_args+=("-xr!${pattern}")
+      done
+    fi
+    7z a -tzip "${archive}" "$@" "${seven_zip_args[@]}" >/dev/null
+    return
+  fi
+  if command -v powershell.exe >/dev/null 2>&1 || command -v powershell >/dev/null 2>&1 || command -v pwsh >/dev/null 2>&1; then
+    local ps zip_path item args=()
+    ps="$(command -v powershell.exe 2>/dev/null || command -v powershell 2>/dev/null || command -v pwsh)"
+    zip_path="${archive}"
+    if command -v cygpath >/dev/null 2>&1; then
+      zip_path="$(cygpath -w "${archive}")"
+      for item in "$@"; do
+        args+=("$(cygpath -w "${item}")")
+      done
+    else
+      args=("$@")
+    fi
+    AKA_ZIP_DEST="${zip_path}" "${ps}" -NoProfile -Command \
+      "Compress-Archive -Path @(\$args) -DestinationPath \$env:AKA_ZIP_DEST -Force" \
+      -- "${args[@]}"
+    return
+  fi
+  echo "error: 找不到可用的 zip 工具（需要 zip、7z 或 PowerShell Compress-Archive）" >&2
   return 1
 }
 
@@ -242,12 +306,87 @@ prepare_desktop_resources() {
   copy_engine_resource "${platform}"
 }
 
+macos_notarization_credentials_present() {
+  if [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+    return 0
+  fi
+  if [[ -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_KEY_PATH:-}" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+macos_signing_credentials_present() {
+  [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]] || [[ -n "${APPLE_CERTIFICATE:-}" && -n "${APPLE_CERTIFICATE_PASSWORD:-}" ]]
+}
+
+macos_signed_release_requested() {
+  case "${AKA_MACOS_SIGN:-auto}" in
+    1|true|TRUE|yes|YES|required) return 0 ;;
+    0|false|FALSE|no|NO|never) return 1 ;;
+    auto)
+      macos_signing_credentials_present && macos_notarization_credentials_present
+      return
+      ;;
+    *)
+      echo "error: AKA_MACOS_SIGN 只能是 auto/1/0/true/false/required/never，当前为 ${AKA_MACOS_SIGN}" >&2
+      return 1
+      ;;
+  esac
+}
+
+require_macos_signing_env() {
+  if ! macos_signing_credentials_present; then
+    echo "error: macOS release 要求签名，但缺少签名证书环境变量。" >&2
+    echo "       需要 APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD，或预装证书并设置 APPLE_SIGNING_IDENTITY。" >&2
+    return 1
+  fi
+  if ! macos_notarization_credentials_present; then
+    echo "error: macOS release 要求公证，但缺少 Apple notarization 环境变量。" >&2
+    echo "       需要 APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID，或 APPLE_API_ISSUER + APPLE_API_KEY + APPLE_API_KEY_PATH。" >&2
+    return 1
+  fi
+}
+
+codesign_ad_hoc_app() {
+  local app_path
+  app_path="$1"
+  echo "==> 本地 ad-hoc codesign: ${app_path}"
+  codesign --force --deep --sign - "${app_path}"
+}
+
+verify_macos_bundle() {
+  local app_path dmg_path signed_release
+  app_path="$1"
+  dmg_path="$2"
+  signed_release="$3"
+
+  codesign --verify --deep --strict --verbose=4 "${app_path}"
+  hdiutil verify "${dmg_path}"
+
+  if [[ "${signed_release}" -eq 1 ]]; then
+    spctl --assess --type execute --verbose=4 "${app_path}"
+    spctl --assess --type open --context context:primary-signature --verbose=4 "${dmg_path}"
+  else
+    echo "==> 本地包为 ad-hoc/未公证构建；hdiutil 与 codesign 校验通过，但 Gatekeeper 仍会拒绝公网下载的产物。"
+  fi
+}
+
+find_tauri_dmg() {
+  local dmg_dir
+  dmg_dir="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/dmg"
+  find "${dmg_dir}" -maxdepth 1 -type f -name '*.dmg' | sort | tail -n 1
+}
+
 package_clients() {
   PLUGIN_ZIP="${DIST_DIR}/aka-claude-code-plugin-${VERSION}.zip"
   rm -f "${PLUGIN_ZIP}"
   (
     cd "${REPO_ROOT}/clients/claude-code"
-    zip -r -X -q "${PLUGIN_ZIP}" . -x "*.DS_Store" -x "*/.DS_Store"
+    create_zip_archive "${PLUGIN_ZIP}" \
+      --exclude "*.DS_Store" \
+      --exclude "*/.DS_Store" \
+      -- .
   )
   echo "==> ${PLUGIN_ZIP}"
 
@@ -262,7 +401,12 @@ package_clients() {
   rm -f "${OPENCODE_ZIP}"
   (
     cd "${REPO_ROOT}/clients/opencode"
-    zip -r -X -q "${OPENCODE_ZIP}" . -x "*.DS_Store" -x "*/.DS_Store" -x "._*" -x "*/._*"
+    create_zip_archive "${OPENCODE_ZIP}" \
+      --exclude "*.DS_Store" \
+      --exclude "*/.DS_Store" \
+      --exclude "._*" \
+      --exclude "*/._*" \
+      -- .
   )
   echo "==> ${OPENCODE_ZIP}"
 
@@ -334,7 +478,7 @@ package_binary() {
     strip "${stage}/${bin_name}"
   fi
   if [[ "${archive_kind}" = "zip" ]]; then
-    (cd "${stage}" && zip -q -X -r "${bin_archive}" "${bin_name}")
+    (cd "${stage}" && create_zip_archive "${bin_archive}" "${bin_name}")
   else
     COPYFILE_DISABLE=1 tar -czf "${bin_archive}" -C "${stage}" "${bin_name}"
   fi
@@ -344,7 +488,7 @@ package_binary() {
 }
 
 package_desktop() {
-  local host_os host_arch desktop_triple desktop_platform app_path desktop_dmg desktop_zip
+  local host_os host_arch desktop_triple desktop_platform app_path desktop_dmg desktop_zip helper_script signed_release tauri_dmg
   host_os="$(uname -s)"
   host_arch="$(uname -m)"
 
@@ -356,20 +500,40 @@ package_desktop() {
         *) echo "error: 不支持的 macOS 架构 ${host_arch}" >&2; return 1 ;;
       esac
       desktop_platform="$(platform_from_triple "${desktop_triple}")"
+      signed_release=0
+      if macos_signed_release_requested; then
+        require_macos_signing_env
+        signed_release=1
+      fi
 
       if [[ "${SKIP_BUILD}" -eq 0 ]]; then
         prepare_desktop_resources "${desktop_triple}"
-        echo "==> npm run tauri -- build --bundles app --ci --no-sign"
-        (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- build --bundles app --ci --no-sign)
+        if [[ "${signed_release}" -eq 1 ]]; then
+          echo "==> npm run tauri -- build --bundles app,dmg --ci"
+          (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- build --bundles app,dmg --ci)
+        else
+          echo "==> npm run tauri -- build --bundles app --ci --no-sign"
+          (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- build --bundles app --ci --no-sign)
+        fi
       fi
 
       app_path="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/macos/AKA.app"
       [[ -d "${app_path}" ]] || { echo "error: 找不到 ${app_path}（先去掉 --skip-build 构建一次）" >&2; return 1; }
       assert_app_bundle_engine "${app_path}" "${desktop_platform}"
+      if [[ "${signed_release}" -eq 0 ]]; then
+        codesign_ad_hoc_app "${app_path}"
+      fi
 
       desktop_dmg="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.dmg"
       rm -f "${desktop_dmg}"
-      hdiutil create -volname "AKA" -srcfolder "${app_path}" -ov -format UDZO "${desktop_dmg}"
+      if [[ "${signed_release}" -eq 1 ]]; then
+        tauri_dmg="$(find_tauri_dmg)"
+        [[ -f "${tauri_dmg}" ]] || { echo "error: Tauri 未产出 dmg" >&2; return 1; }
+        cp "${tauri_dmg}" "${desktop_dmg}"
+      else
+        hdiutil create -volname "AKA" -srcfolder "${app_path}" -ov -format UDZO "${desktop_dmg}"
+      fi
+      verify_macos_bundle "${app_path}" "${desktop_dmg}" "${signed_release}"
       echo "==> ${desktop_dmg}"
 
       desktop_zip="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.app.zip"
@@ -377,6 +541,11 @@ package_desktop() {
       COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "${app_path}" "${desktop_zip}"
       assert_zip_has_engine "${desktop_zip}" "${desktop_platform}" "AKA.app/Contents/Resources"
       echo "==> ${desktop_zip}"
+
+      helper_script="${DIST_DIR}/aka-desktop-${VERSION}-macos-open.sh"
+      cp "${REPO_ROOT}/scripts/open-macos-dmg.sh" "${helper_script}"
+      chmod +x "${helper_script}"
+      echo "==> ${helper_script}"
       ;;
     *)
       echo "error: --desktop/--desktop-only 当前只打包本机 macOS GUI；Windows GUI 请用 --desktop-windows。" >&2
@@ -421,7 +590,7 @@ package_windows_desktop() {
   engine_src="${TAURI_RESOURCES_DIR}/engine"
   assert_engine_resource_dir "win-x64" "${engine_src}"
   cp -R "${engine_src}" "${stage}/engine"
-  (cd "${stage}" && zip -q -X -r "${portable_zip}" AKA.exe engine)
+  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe engine)
   assert_zip_has_engine "${portable_zip}" "win-x64" ""
   rm -rf "${stage}"
   echo "==> ${portable_zip}"

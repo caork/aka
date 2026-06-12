@@ -29,6 +29,8 @@ export interface GraphJSON {
   classes: string[];
   nodes: GraphJSONNode[];
   edges: number[];
+  edge_weights?: number[];
+  cluster_labels?: string[];
 }
 
 export interface Bounds {
@@ -105,8 +107,14 @@ export function parseGraphJSON(json: GraphJSON): GraphData {
 
   const edges = Uint32Array.from(json.edges);
   const edgeCount = edges.length >> 1;
-  const degrees = computeDegrees(edges, n);
-  const clusterMeta = computeClusterMeta(positions, clusters, degrees, n);
+  const degrees = computeDegrees(edges, n, json.edge_weights);
+  const clusterMeta = computeClusterMeta(
+    positions,
+    clusters,
+    degrees,
+    n,
+    json.cluster_labels,
+  );
 
   return {
     count: n,
@@ -126,9 +134,16 @@ export function parseGraphJSON(json: GraphJSON): GraphData {
   };
 }
 
-export function computeDegrees(edges: Uint32Array, nodeCount: number): Uint32Array {
+export function computeDegrees(
+  edges: Uint32Array,
+  nodeCount: number,
+  edgeWeights?: number[],
+): Uint32Array {
   const degrees = new Uint32Array(nodeCount);
-  for (let e = 0; e < edges.length; e++) degrees[edges[e]]++;
+  for (let e = 0; e < edges.length; e++) {
+    const weight = edgeWeights?.[e >> 1] ?? 1;
+    degrees[edges[e]] += Math.max(1, Math.round(weight));
+  }
   return degrees;
 }
 
@@ -137,6 +152,7 @@ export function computeClusterMeta(
   clusters: Uint32Array,
   degrees: Uint32Array,
   count: number,
+  clusterLabels?: string[],
 ): ClusterMeta[] {
   let maxCluster = 0;
   for (let i = 0; i < count; i++) {
@@ -158,7 +174,7 @@ export function computeClusterMeta(
   for (let c = 0; c < k; c++) {
     if (num[c] === 0) continue;
     meta.push({
-      name: `cluster ${c}`,
+      name: clusterLabels?.[c] ?? `cluster ${c}`,
       x: sumX[c] / num[c],
       y: sumY[c] / num[c],
       weight: weight[c],

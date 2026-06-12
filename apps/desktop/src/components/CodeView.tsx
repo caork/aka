@@ -14,6 +14,7 @@ import {
   fetchSource,
   type FileSymbol,
 } from "../repo-api";
+import { isDesktopRuntime } from "../desktop-api";
 import { useAppStore } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
@@ -25,7 +26,11 @@ const MAX_AUTO_CHUNKS = 25;
 
 type LoadState =
   | { phase: "loading" }
-  | { phase: "error"; kind: "unsupported" | "binary" | "offline" }
+  | {
+      phase: "error";
+      kind: "unsupported" | "binary" | "missing" | "error" | "offline";
+      message?: string;
+    }
   | {
       phase: "ok";
       lines: string[];
@@ -136,7 +141,11 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
           if (stale) return;
           if (res.state !== "ok") {
             if (all.length === 0) {
-              setLoad({ phase: "error", kind: res.state });
+              setLoad({
+                phase: "error",
+                kind: res.state,
+                message: res.state === "error" ? res.message : undefined,
+              });
             } else {
               /* 中途失败——保留已加载部分，可手动重试「加载更多」 */
               setLoad({
@@ -276,6 +285,7 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
     : null;
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const lang = LANG_BY_EXT[ext] ?? (ext ? ext.toUpperCase() : null);
+  const desktop = isDesktopRuntime();
 
   const segments = path.split("/").filter(Boolean);
   const gutterWidth = `${Math.max(4, String(Math.max(totalLines, load.phase === "ok" ? load.lines.length : 0)).length) + 2}ch`;
@@ -360,7 +370,7 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
           <span
             className="flex-none cursor-not-allowed rounded-[8px] px-2.5 py-1.5 text-[12px] font-medium text-ink-3 opacity-60"
             style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
-            title="源码绝对路径不可用（需 aka serve 在线）"
+            title={desktop ? "源码绝对路径不可用" : "源码绝对路径不可用（需 aka serve 在线）"}
             data-testid="code-open-editor"
           >
             在编辑器打开
@@ -370,7 +380,9 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
 
       {/* ---- 代码区 ---- */}
       {load.phase === "loading" && <CodeSkeleton />}
-      {load.phase === "error" && <CodeEmpty kind={load.kind} path={path} />}
+      {load.phase === "error" && (
+        <CodeEmpty kind={load.kind} detail={load.message} path={path} />
+      )}
       {load.phase === "ok" && (
         <div
           ref={scrollRef}
@@ -585,17 +597,28 @@ function CodeSkeleton() {
 
 function CodeEmpty({
   kind,
+  detail,
   path,
 }: {
-  kind: "unsupported" | "binary" | "offline";
+  kind: "unsupported" | "binary" | "missing" | "error" | "offline";
+  detail?: string;
   path: string;
 }) {
+  const desktop = isDesktopRuntime();
   const message =
     kind === "binary"
       ? "非文本文件，无法预览"
       : kind === "unsupported"
-        ? "当前后端不支持源码预览（需更新 aka serve）"
-        : "无法连接本地 aka serve（127.0.0.1:4111）";
+        ? desktop
+          ? "当前内置后端不支持源码预览（请更新 aka）"
+          : "当前后端不支持源码预览（需更新 aka serve）"
+        : kind === "missing"
+          ? "源码文件不存在或索引已过期"
+          : kind === "error"
+            ? detail || "源码读取失败"
+            : desktop
+              ? "无法连接桌面内置后端"
+              : "无法连接本地 aka serve（127.0.0.1:4111）";
   return (
     <div
       className="flex min-h-0 flex-1 items-center justify-center"

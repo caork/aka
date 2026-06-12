@@ -301,6 +301,10 @@ export type SourceResult =
   | { state: "unsupported" }
   /** 400 —— 非文本文件 */
   | { state: "binary" }
+  /** 文件清单来自旧索引或仓库工作区已变化，源码文件已不存在。 */
+  | { state: "missing" }
+  /** 桌面内置后端/HTTP 后端返回了可展示的读取错误。 */
+  | { state: "error"; message: string }
   | { state: "offline" };
 
 export async function fetchSource(
@@ -313,8 +317,8 @@ export async function fetchSource(
   const params = new URLSearchParams({ repo, path });
   if (start !== undefined) params.set("start", String(start));
   if (end !== undefined) params.set("end", String(end));
-  try {
-    if (isDesktopRuntime()) {
+  if (isDesktopRuntime()) {
+    try {
       const source = await invokeDesktop<SourceSlice>("source", {
         repo,
         path,
@@ -322,23 +326,74 @@ export async function fetchSource(
         end,
       });
       return { state: "ok", source };
+    } catch (e) {
+      return sourceResultFromDesktopError(e);
     }
+  }
+  try {
     const r = await fetch(apiUrl(`/api/source?${params.toString()}`), {
       signal: signal ?? AbortSignal.timeout(6000),
     });
-    if (r.status === 404 || r.status === 501) return { state: "unsupported" };
+    if (r.status === 501) return { state: "unsupported" };
+    if (r.status === 404) return await sourceResultFromHttpError(r);
     if (r.status === 400) return { state: "binary" };
-    if (!r.ok) return { state: "offline" };
+    if (!r.ok) return await sourceResultFromHttpError(r);
     const source = (await r.json()) as SourceSlice;
     return { state: "ok", source };
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") throw e;
-    if (typeof e === "string") {
-      if (e.includes("not supported")) return { state: "unsupported" };
-      if (e.includes("invalid file")) return { state: "binary" };
-    }
     return { state: "offline" };
   }
+}
+
+function sourceResultFromDesktopError(e: unknown): SourceResult {
+  const message = desktopErrorMessage(e);
+  if (message.includes("not supported")) return { state: "unsupported" };
+  if (message.includes("invalid file")) return { state: "binary" };
+  if (
+    message.includes("file not found") ||
+    message.includes("not a regular file") ||
+    message.includes("repo not registered")
+  ) {
+    return { state: "missing" };
+  }
+  return { state: "error", message: conciseError(message) };
+}
+
+async function sourceResultFromHttpError(r: Response): Promise<SourceResult> {
+  const message = await responseErrorMessage(r);
+  if (message.includes("invalid file")) return { state: "binary" };
+  if (message.includes("file not found") || message.includes("not a regular file")) {
+    return { state: "missing" };
+  }
+  if (r.status >= 500) return { state: "error", message: conciseError(message) };
+  return { state: "offline" };
+}
+
+function desktopErrorMessage(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+async function responseErrorMessage(r: Response): Promise<string> {
+  try {
+    const text = (await r.text()).trim();
+    if (!text) return `HTTP ${r.status}`;
+    try {
+      const body = JSON.parse(text) as { error?: unknown };
+      if (typeof body.error === "string" && body.error.trim()) return body.error;
+    } catch {
+      /* 非 JSON 错误体，直接展示文本摘要。 */
+    }
+    return text;
+  } catch {
+    return `HTTP ${r.status}`;
+  }
+}
+
+function conciseError(message: string): string {
+  return message.trim().replace(/\s+/g, " ").slice(0, 180) || "源码读取失败";
 }
 
 /* ---- 仓库文件清单（GET /api/files，合同：按 path 升序，symbols=定义数） ---- */

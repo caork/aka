@@ -558,6 +558,12 @@ pub trait Backend: Send + Sync + 'static {
         anyhow::bail!("graph_lod not supported by this backend")
     }
 
+    /// 簇级总览（GraphJSON 同形）：每个 Community/Cluster 一个节点，边为簇间聚合权重。
+    fn graph_clusters(&self, repo: &str) -> anyhow::Result<serde_json::Value> {
+        let _ = repo;
+        anyhow::bail!("graph_clusters not supported by this backend")
+    }
+
     // ── 仓库管理（导入 / 更新 / 删除 / 设置）──────────────────────
     // 默认全部 bail "not supported"——只有真实 Backend（aka-cli）覆写。
     // 导入 / 更新都是 202 语义：调用立即返回仓库名，分析任务在后台执行，

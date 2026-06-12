@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { Camera } from "../graph/camera";
-import { loadEgoGraph, loadRealGraph } from "../graph/source";
+import { loadClusterGraph, loadEgoGraph, loadRealGraph } from "../graph/source";
 import type { GraphData } from "../graph/format";
 import { SpatialGrid } from "../graph/grid";
 import { LabelOverlay } from "../graph/labels";
@@ -91,7 +91,7 @@ export default function GraphView() {
   const [ego, setEgo] = useState<EgoState | null>(null);
   const [egoError, setEgoError] = useState<string | null>(null);
 
-  /** per-repo 渲染节点预算（null = 默认 50_000，loadRealGraph 内部 clamp） */
+  /** fallback for old backends without cluster overview support */
   const renderBudget = repo?.renderMaxNodes ?? null;
   /** 仓库总节点数（来自 /api/repos stats），用于徽章 "已渲染 N / 总数" */
   const totalNodes = repo?.symbols ?? 0;
@@ -447,9 +447,9 @@ export default function GraphView() {
           setEgo(null);
         }
       } else {
-        const data = await loadRealGraph(repoId, renderBudget, ctrl.signal).catch(
-          () => null,
-        );
+        const data =
+          (await loadClusterGraph(repoId, ctrl.signal).catch(() => null)) ??
+          (await loadRealGraph(repoId, renderBudget, ctrl.signal).catch(() => null));
         if (cancelled) return;
         rig.centerIndex = -1;
         if (data) {
@@ -533,6 +533,9 @@ export default function GraphView() {
       return;
     }
     const d = rig.data;
+    if (d.id(i).startsWith("cluster:")) {
+      return;
+    }
     openDetail({
       id: d.id(i),
       name: d.name(i),
@@ -720,7 +723,7 @@ export default function GraphView() {
               ) : (
                 <>
                   正在加载 <span className="mono font-semibold">{repoId}</span>{" "}
-                  图谱…
+                  社区图谱…
                 </>
               )}
             </span>

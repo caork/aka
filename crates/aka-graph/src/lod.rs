@@ -99,6 +99,25 @@ pub struct ClusterGraph {
     pub edges: Vec<ClusterEdge>,
 }
 
+/// GraphJSON 同形的簇级总览：每个 Community/Cluster 是一个可渲染节点。
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterLodGraph {
+    pub classes: Vec<String>,
+    pub nodes: Vec<LodNode>,
+    /// 扁平 (s, t) 对，引用 nodes 的 `i`。
+    pub edges: Vec<u32>,
+    /// 与 `edges` 的 pair 一一对应；权重 = 簇间聚合边条数。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_weights: Vec<u32>,
+    /// `nodes[].c` 对应的真实簇名，供前端复用 GraphJSON 时显示标签。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cluster_labels: Vec<String>,
+    /// 原图节点总数。
+    pub total_nodes: u64,
+    /// 实际返回的聚合节点数（= clusters 数）。
+    pub returned_nodes: u64,
+}
+
 impl GraphStore {
     /// 截断 LOD 快照：节点超过 `max_nodes` 时按度数（size 降序）取 top，
     /// 只保留两端都入选的边。需先 `compute_layout`。
@@ -258,6 +277,68 @@ impl GraphStore {
         Ok(ClusterGraph { nodes, edges })
     }
 
+    /// GraphJSON 同形的簇级总览：每簇一个节点，边带聚合权重。
+    pub fn cluster_lod_snapshot(&self) -> Result<ClusterLodGraph> {
+        let cg = self.cluster_graph()?;
+        let mut dense_of_cluster: HashMap<u32, u32> = HashMap::new();
+        for (i, node) in cg.nodes.iter().enumerate() {
+            dense_of_cluster.insert(node.cluster, i as u32);
+        }
+
+        let mut incident_weight: HashMap<u32, u32> = HashMap::new();
+        for edge in &cg.edges {
+            *incident_weight.entry(edge.s).or_insert(0) += edge.w;
+            *incident_weight.entry(edge.t).or_insert(0) += edge.w;
+        }
+
+        let classes = vec!["Community".to_string()];
+        let mut cluster_labels = Vec::with_capacity(cg.nodes.len());
+        let nodes = cg
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| {
+                cluster_labels.push(node.label.clone());
+                LodNode {
+                    i: i as u32,
+                    id: format!("cluster:{}", node.cluster),
+                    x: node.x,
+                    y: node.y,
+                    s: cluster_overview_size(
+                        node.count,
+                        incident_weight.get(&node.cluster).copied().unwrap_or(0),
+                    ),
+                    c: i as u32,
+                    l: 0,
+                    name: node.label.clone(),
+                }
+            })
+            .collect();
+
+        let mut edges = Vec::with_capacity(cg.edges.len() * 2);
+        let mut edge_weights = Vec::with_capacity(cg.edges.len());
+        for edge in &cg.edges {
+            let (Some(&s), Some(&t)) =
+                (dense_of_cluster.get(&edge.s), dense_of_cluster.get(&edge.t))
+            else {
+                continue;
+            };
+            edges.push(s);
+            edges.push(t);
+            edge_weights.push(edge.w);
+        }
+
+        Ok(ClusterLodGraph {
+            classes,
+            nodes,
+            edges,
+            edge_weights,
+            cluster_labels,
+            total_nodes: self.node_count()?,
+            returned_nodes: cg.nodes.len() as u64,
+        })
+    }
+
     fn ensure_layout(&self) -> Result<()> {
         let positions: i64 = self
             .conn()
@@ -269,4 +350,10 @@ impl GraphStore {
         }
         Ok(())
     }
+}
+
+fn cluster_overview_size(count: u32, incident_weight: u32) -> f32 {
+    let count_term = (1.0 + f64::from(count)).ln() * 1.35;
+    let edge_term = (1.0 + f64::from(incident_weight)).ln() * 0.35;
+    (1.0 + count_term + edge_term) as f32
 }

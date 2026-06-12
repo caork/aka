@@ -11,6 +11,7 @@
 //! - `POST   /api/symbol/context`      — 符号 360° 上下文 `{ repo?, symbol }`
 //! - `GET    /api/graph/lod`           — 图 LOD 数据 `?repo=&max_nodes=`（缺省用 per-repo
 //!   render_max_nodes 设置，没有则 50_000；一律 clamp 到硬上限；Backend 不支持时 501）
+//! - `GET    /api/graph/clusters`      — 簇级聚合图 `?repo=`（GraphJSON 同形）
 //! - `POST   /api/repos/import`        — 导入 `{kind:"git",url,name?}` 或 `{kind:"local",path}` → 202
 //! - `POST   /api/repos/import-zip`    — multipart（name + file）→ 202
 //! - `POST   /api/repos/{name}/update` — git pull+analyze / local 重 analyze → 202（zip 来源 400）
@@ -81,6 +82,7 @@ pub fn router(backend: Arc<dyn Backend>) -> Router {
         .route("/api/symbol/context", post(symbol_context))
         .route("/api/node", get(node_detail))
         .route("/api/graph/lod", get(graph_lod))
+        .route("/api/graph/clusters", get(graph_clusters))
         .route("/api/graph/ego", get(graph_ego))
         .route("/api/source", get(source_slice))
         .route("/api/file/symbols", get(file_symbols))
@@ -448,6 +450,16 @@ fn clamp_render_budget(n: usize) -> usize {
 async fn graph_lod(State(b): State<AppState>, Query(p): Query<LodParams>) -> Response {
     let max_nodes = p.max_nodes.map(clamp_render_budget);
     run_managed(b, StatusCode::OK, move |b| b.graph_lod(&p.repo, max_nodes)).await
+}
+
+#[derive(Deserialize)]
+struct ClusterParams {
+    repo: String,
+}
+
+/// 图簇级聚合总览 — 与 /api/graph/lod 同形，节点为 Community/Cluster。
+async fn graph_clusters(State(b): State<AppState>, Query(p): Query<ClusterParams>) -> Response {
+    run_managed(b, StatusCode::OK, move |b| b.graph_clusters(&p.repo)).await
 }
 
 // ---- 仓库管理 + 节点详情 / ego 子图 ----

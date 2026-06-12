@@ -81,6 +81,8 @@ struct Fields {
     name: Field,
     text: Field,
     file_path: Field,
+    /// Exact, untokenized path for file-scoped deletes; old indexes may lack it.
+    path_exact: Option<Field>,
     label: Field,
     /// 路径噪声分类字段；旧版索引（schema 无 `path_class`）打开时为 `None`。
     path_class: Option<Field>,
@@ -148,6 +150,7 @@ fn build_schema() -> Schema {
             .set_indexing_options(path_indexing)
             .set_stored(),
     );
+    builder.add_text_field("path_exact", STRING | STORED);
     builder.add_text_field("label", STRING | STORED);
     builder.add_text_field("path_class", STRING | STORED);
     builder.add_text_field("kind", STRING | STORED);
@@ -164,6 +167,7 @@ fn resolve_fields(schema: &Schema) -> Fields {
         name: field("name"),
         text: field("text"),
         file_path: field("file_path"),
+        path_exact: schema.get_field("path_exact").ok(),
         label: field("label"),
         path_class: schema.get_field("path_class").ok(),
         kind: schema.get_field("kind").ok(),
@@ -226,6 +230,9 @@ impl SearchIndexWriter {
             }
             if let Some(fp) = node.file_path() {
                 doc.add_text(self.fields.file_path, fp);
+                if let Some(path_exact) = self.fields.path_exact {
+                    doc.add_text(path_exact, fp);
+                }
                 if let Some(path_class) = self.fields.path_class {
                     doc.add_text(path_class, path_class_value(fp));
                 }
@@ -258,6 +265,9 @@ impl SearchIndexWriter {
                 truncate_utf8(&chunk.text, TEXT_STORE_LIMIT),
             );
             doc.add_text(self.fields.file_path, &chunk.file_path);
+            if let Some(path_exact) = self.fields.path_exact {
+                doc.add_text(path_exact, &chunk.file_path);
+            }
             if let Some(path_class) = self.fields.path_class {
                 doc.add_text(path_class, path_class_value(&chunk.file_path));
             }
@@ -275,6 +285,27 @@ impl SearchIndexWriter {
             self.writer.add_document(doc)?;
         }
         Ok(())
+    }
+
+    /// Whether this index schema supports exact file-scoped deletion.
+    ///
+    /// Indexes created before `path_exact` existed cannot safely delete by the
+    /// tokenized `file_path` field, so callers should fall back to a full rebuild.
+    pub fn supports_file_deletes(&self) -> bool {
+        self.fields.path_exact.is_some()
+    }
+
+    /// Delete all committed and same-transaction documents owned by `file_path`.
+    ///
+    /// Returns `Ok(false)` when opening an old index whose schema lacks the
+    /// exact path field; callers should rebuild the search index in that case.
+    pub fn delete_file(&mut self, file_path: &str) -> Result<bool> {
+        let Some(path_exact) = self.fields.path_exact else {
+            return Ok(false);
+        };
+        self.writer
+            .delete_term(Term::from_field_text(path_exact, file_path));
+        Ok(true)
     }
 
     /// 提交写入（tantivy 后台自动做段合并）。写锁在 `self` drop 时释放。

@@ -222,6 +222,14 @@ async fn graph_lod(
 }
 
 #[tauri::command]
+async fn graph_clusters(
+    backend: State<'_, BackendState>,
+    repo: String,
+) -> Result<serde_json::Value, String> {
+    run_backend(backend, move |b| b.graph_clusters(&repo)).await
+}
+
+#[tauri::command]
 async fn graph_ego(
     backend: State<'_, BackendState>,
     repo: String,
@@ -462,6 +470,7 @@ pub fn run() {
             query,
             symbol_context,
             graph_lod,
+            graph_clusters,
             graph_ego,
             node_detail,
             source,
