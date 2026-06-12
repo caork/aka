@@ -760,6 +760,12 @@ function SourcePreview({
   if (source.state === "binary") {
     return <SourceUnavailable note="非文本文件，无法预览" />;
   }
+  if (source.state === "missing") {
+    return <SourceUnavailable note="源码文件不存在或索引已过期" />;
+  }
+  if (source.state === "error") {
+    return <SourceUnavailable note={`源码读取失败——${source.message}`} />;
+  }
   if (source.state === "offline") {
     return <SourceUnavailable note="源码不可用——aka serve 离线" />;
   }

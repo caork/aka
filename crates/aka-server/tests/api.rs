@@ -478,6 +478,20 @@ impl Backend for ManagedBackend {
         // 回显收到的预算，便于断言 server 侧 clamp / 透传语义。
         Ok(json!({ "repo": repo, "max_nodes": max_nodes, "total_nodes": 42, "returned_nodes": 1 }))
     }
+    fn graph_clusters(&self, repo: &str) -> anyhow::Result<Value> {
+        Ok(json!({
+            "repo": repo,
+            "classes": ["Community"],
+            "nodes": [
+                { "i": 0, "id": "cluster:0", "x": 0.0, "y": 0.0, "s": 3.0, "c": 0, "l": 0, "name": "core" }
+            ],
+            "edges": [],
+            "edge_weights": [],
+            "cluster_labels": ["core"],
+            "total_nodes": 42,
+            "returned_nodes": 1
+        }))
+    }
     fn read_source(
         &self,
         repo: &str,
@@ -731,6 +745,23 @@ async fn lod_max_nodes_clamped_and_default_is_none() {
         let v = body_json(res).await;
         assert_eq!(v["max_nodes"], expect, "max_nodes={q} 应 clamp 成 {expect}");
     }
+}
+
+#[tokio::test]
+async fn graph_clusters_endpoint_returns_cluster_overview() {
+    let res = managed()
+        .oneshot(
+            Request::get("/api/graph/clusters?repo=fixture")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["classes"], json!(["Community"]));
+    assert_eq!(v["nodes"][0]["id"], "cluster:0");
+    assert_eq!(v["cluster_labels"], json!(["core"]));
 }
 
 #[tokio::test]

@@ -220,7 +220,7 @@ impl EngineRunner {
 
         emit_phase(&mut on_event, "codebase-memory:export-artifacts", 0, 0);
         let (project, db_path) = find_single_project_db(&cache_root)?;
-        let stats = export_artifacts(repo, out_dir, &db_path, &project, no_chunks)?;
+        let stats = export_artifacts(repo, out_dir, &db_path, &project, no_chunks, &mut on_event)?;
         let done = EngineEvent::Done {
             stats: stats.clone(),
         };
@@ -352,21 +352,87 @@ fn export_artifacts(
     db_path: &Path,
     project: &str,
     no_chunks: bool,
+    on_event: &mut impl FnMut(&EngineEvent),
 ) -> Result<ArtifactStats, EngineError> {
     let conn = open_cbm_db(db_path)?;
-    let synth = synthesize_graph(&conn, project, repo)?;
-    let mut stats = ArtifactStats {
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:inspect-db",
+        0,
+        0,
+    );
+    let db_counts = ArtifactStats {
         files: count_files(&conn, project)?,
-        nodes: export_nodes(&conn, project, &out_dir.join("nodes.ndjson"), &synth)?,
-        edges: export_edges(&conn, project, &out_dir.join("edges.ndjson"), &synth)?,
+        nodes: count_nodes(&conn, project)?,
+        edges: count_edges(&conn, project)?,
+        chunks: count_chunkable_nodes(&conn, project)?,
+    };
+
+    emit_phase(
+        on_event,
+        format!(
+            "codebase-memory:export-artifacts:synthesize-graph ({} nodes / {} edges)",
+            db_counts.nodes, db_counts.edges
+        ),
+        0,
+        0,
+    );
+    let synth = synthesize_graph_with_progress(&conn, project, repo, on_event)?;
+
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:nodes",
+        0,
+        db_counts.nodes,
+    );
+    let nodes = export_nodes(
+        &conn,
+        project,
+        &out_dir.join("nodes.ndjson"),
+        &synth,
+        db_counts.nodes,
+        on_event,
+    )?;
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:edges",
+        0,
+        db_counts.edges,
+    );
+    let edges = export_edges(
+        &conn,
+        project,
+        &out_dir.join("edges.ndjson"),
+        &synth,
+        db_counts.edges,
+        on_event,
+    )?;
+    let mut stats = ArtifactStats {
+        files: db_counts.files,
+        nodes,
+        edges,
         chunks: 0,
     };
     if no_chunks {
         let _ = std::fs::remove_file(out_dir.join("chunks.ndjson"));
     } else {
-        stats.chunks = export_chunks(&conn, project, repo, &out_dir.join("chunks.ndjson"))?;
+        emit_phase(
+            on_event,
+            "codebase-memory:export-artifacts:chunks",
+            0,
+            db_counts.chunks,
+        );
+        stats.chunks = export_chunks(
+            &conn,
+            project,
+            repo,
+            &out_dir.join("chunks.ndjson"),
+            db_counts.chunks,
+            on_event,
+        )?;
     }
 
+    emit_phase(on_event, "codebase-memory:export-artifacts:manifest", 0, 0);
     let manifest = Manifest {
         contract_version: CONTRACT_VERSION,
         engine_version: format!("codebase-memory-mcp+aka ({})", db_path.display()),
@@ -379,6 +445,32 @@ fn export_artifacts(
     let file = File::create(manifest_path)?;
     serde_json::to_writer_pretty(BufWriter::new(file), &manifest)?;
     Ok(stats)
+}
+
+fn count_nodes(conn: &Connection, project: &str) -> Result<u64, rusqlite::Error> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE project = ?1",
+        [project],
+        |row| row.get(0),
+    )
+}
+
+fn count_edges(conn: &Connection, project: &str) -> Result<u64, rusqlite::Error> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM edges WHERE project = ?1",
+        [project],
+        |row| row.get(0),
+    )
+}
+
+fn count_chunkable_nodes(conn: &Connection, project: &str) -> Result<u64, rusqlite::Error> {
+    conn.query_row(
+        "SELECT COUNT(*) \
+         FROM nodes \
+         WHERE project = ?1 AND file_path != '' AND label NOT IN ('File','Folder','Project','Package','Module')",
+        [project],
+        |row| row.get(0),
+    )
 }
 
 fn count_files(conn: &Connection, project: &str) -> Result<u64, rusqlite::Error> {
@@ -402,6 +494,8 @@ fn export_nodes(
     project: &str,
     path: &Path,
     synth: &SynthGraph,
+    total: u64,
+    on_event: &mut impl FnMut(&EngineEvent),
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
@@ -453,6 +547,7 @@ fn export_nodes(
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
         count += 1;
+        emit_export_progress(on_event, "nodes", count, total);
     }
     for community in &synth.communities {
         let node = community.node_rec();
@@ -478,6 +573,7 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    emit_export_progress(on_event, "nodes", count, total);
     Ok(count)
 }
 
@@ -486,6 +582,8 @@ fn export_edges(
     project: &str,
     path: &Path,
     synth: &SynthGraph,
+    total: u64,
+    on_event: &mut impl FnMut(&EngineEvent),
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
@@ -528,6 +626,7 @@ fn export_edges(
         serde_json::to_writer(&mut out, &edge)?;
         out.write_all(b"\n")?;
         count += 1;
+        emit_export_progress(on_event, "edges", count, total);
     }
     for edge in synth
         .communities
@@ -541,7 +640,24 @@ fn export_edges(
         out.write_all(b"\n")?;
         count += 1;
     }
+    emit_export_progress(on_event, "edges", count, total);
     Ok(count)
+}
+
+fn emit_export_progress(
+    on_event: &mut impl FnMut(&EngineEvent),
+    name: &'static str,
+    count: u64,
+    total: u64,
+) {
+    if count == 0 || count.is_multiple_of(1_000) || (total > 0 && count >= total) {
+        emit_phase(
+            on_event,
+            format!("codebase-memory:export-artifacts:{name}"),
+            count,
+            total,
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -923,31 +1039,71 @@ impl SynthProcess {
     }
 }
 
-fn synthesize_graph(
+fn synthesize_graph_with_progress(
     conn: &Connection,
     project: &str,
     repo: &Path,
+    on_event: &mut impl FnMut(&EngineEvent),
 ) -> Result<SynthGraph, EngineError> {
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:synthesize:native-labels",
+        0,
+        0,
+    );
     let native_communities = has_native_label(conn, project, "Community")?;
     let native_processes = has_native_label(conn, project, "Process")?;
     let native_routes = load_native_app_nodes(conn, project, "Route")?;
     let native_tools = load_native_app_nodes(conn, project, "Tool")?;
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:synthesize:nodes",
+        0,
+        0,
+    );
     let nodes = load_synth_nodes(conn, project)?;
     if nodes.is_empty() {
         return Ok(SynthGraph::default());
     }
+    emit_phase(
+        on_event,
+        format!(
+            "codebase-memory:export-artifacts:synthesize:calls ({} process-step nodes)",
+            nodes.len()
+        ),
+        0,
+        0,
+    );
     let calls = load_call_graph(conn, project, &nodes)?;
 
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:synthesize:communities",
+        0,
+        0,
+    );
     let communities = if native_communities {
         Vec::new()
     } else {
         synthesize_communities(&nodes, &calls.edges)
     };
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:synthesize:community-memberships",
+        0,
+        0,
+    );
     let community_memberships = if native_communities {
         load_native_community_memberships(conn, project, &nodes)?
     } else {
         community_memberships_from_synth(&communities)
     };
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:synthesize:processes",
+        0,
+        0,
+    );
     let processes = if native_processes {
         Vec::new()
     } else {
@@ -958,7 +1114,19 @@ fn synthesize_graph(
             &community_memberships,
         )
     };
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:synthesize:routes",
+        0,
+        0,
+    );
     let routes = synthesize_routes_from_sources(repo, &nodes, &processes, &native_routes);
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:synthesize:tools",
+        0,
+        0,
+    );
     let tools = synthesize_tools_from_sources(repo, &nodes, &processes, &native_tools);
 
     Ok(SynthGraph {
@@ -967,6 +1135,16 @@ fn synthesize_graph(
         routes,
         tools,
     })
+}
+
+#[cfg(test)]
+fn synthesize_graph(
+    conn: &Connection,
+    project: &str,
+    repo: &Path,
+) -> Result<SynthGraph, EngineError> {
+    fn sink(_: &EngineEvent) {}
+    synthesize_graph_with_progress(conn, project, repo, &mut sink)
 }
 
 fn has_native_label(conn: &Connection, project: &str, label: &str) -> Result<bool, EngineError> {
@@ -1094,7 +1272,12 @@ fn load_call_graph(
          FROM edges e \
          JOIN nodes s ON s.id = e.source_id AND s.project = e.project \
          JOIN nodes t ON t.id = e.target_id AND t.project = e.project \
-         WHERE e.project = ?1 AND UPPER(e.type) = 'CALLS' \
+         WHERE e.project = ?1 \
+           AND e.type = 'CALLS' \
+           AND s.label IN ('Function','Method','Class','Interface','Struct','Enum','Trait','Type') \
+           AND t.label IN ('Function','Method','Class','Interface','Struct','Enum','Trait','Type') \
+           AND s.file_path != '' \
+           AND t.file_path != '' \
          ORDER BY e.id",
     )?;
     let mut rows = stmt.query([project])?;
@@ -1140,7 +1323,7 @@ fn load_native_community_memberships(
          FROM edges e \
          JOIN nodes s ON s.id = e.source_id AND s.project = e.project \
          JOIN nodes c ON c.id = e.target_id AND c.project = e.project \
-         WHERE e.project = ?1 AND c.label = 'Community' AND UPPER(e.type) = 'MEMBER_OF' \
+         WHERE e.project = ?1 AND c.label = 'Community' AND e.type = 'MEMBER_OF' \
          ORDER BY e.id",
     )?;
     let mut rows = stmt.query([project])?;
@@ -1562,7 +1745,7 @@ fn synthesize_routes_from_sources(
     processes: &[SynthProcess],
     native_routes: &[NativeAppNode],
 ) -> Vec<SynthRoute> {
-    let mut by_file = nodes_by_file(nodes);
+    let mut by_file = web_nodes_by_file(nodes);
     let mut routes: BTreeMap<(String, String), SynthRoute> = BTreeMap::new();
     for native in native_routes {
         let route = route_from_path(&native.file_path)
@@ -1666,7 +1849,7 @@ fn synthesize_tools_from_sources(
     processes: &[SynthProcess],
     native_tools: &[NativeAppNode],
 ) -> Vec<SynthTool> {
-    let mut by_file = nodes_by_file(nodes);
+    let mut by_file = web_nodes_by_file(nodes);
     let mut tools: BTreeMap<(String, String), SynthTool> = BTreeMap::new();
     for native in native_tools {
         tools.insert(
@@ -1763,6 +1946,33 @@ fn nodes_by_file(nodes: &BTreeMap<String, SynthNode>) -> BTreeMap<String, Vec<&S
         });
     }
     by_file
+}
+
+fn web_nodes_by_file(nodes: &BTreeMap<String, SynthNode>) -> BTreeMap<String, Vec<&SynthNode>> {
+    nodes_by_file(nodes)
+        .into_iter()
+        .filter(|(file_path, file_nodes)| {
+            is_js_ts_source_path(file_path)
+                || file_nodes
+                    .iter()
+                    .any(|node| is_js_ts_language(&node.language))
+        })
+        .collect()
+}
+
+fn is_js_ts_source_path(file_path: &str) -> bool {
+    let lower = file_path.to_ascii_lowercase();
+    matches!(
+        Path::new(&lower).extension().and_then(|ext| ext.to_str()),
+        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts")
+    )
+}
+
+fn is_js_ts_language(language: &str) -> bool {
+    matches!(
+        language.to_ascii_lowercase().as_str(),
+        "javascript" | "typescript" | "tsx" | "jsx"
+    )
 }
 
 fn read_repo_text(repo: &Path, file_path: &str) -> Option<String> {
@@ -1911,7 +2121,7 @@ fn attach_route_consumers(
     if routes.is_empty() {
         return;
     }
-    let by_file = nodes_by_file(nodes);
+    let by_file = web_nodes_by_file(nodes);
     let route_names: Vec<String> = routes.keys().map(|(route, _)| route.clone()).collect();
     for (file_path, file_nodes) in by_file {
         let Some(text) = read_repo_text(repo, &file_path) else {
@@ -1920,11 +2130,7 @@ fn attach_route_consumers(
         let Some(consumer) = pick_handler_node(&file_nodes) else {
             continue;
         };
-        for route in &route_names {
-            let occurrences = count_route_fetches(&text, route);
-            if occurrences == 0 {
-                continue;
-            }
+        for (route, occurrences) in route_fetch_counts(&text, &route_names) {
             let keys = extract_accessed_keys_near_route(&text, route);
             for candidate in routes.values_mut().filter(|r| &r.route == route) {
                 if candidate.file_path == file_path {
@@ -1954,22 +2160,39 @@ fn attach_route_consumers(
     }
 }
 
-fn count_route_fetches(text: &str, route: &str) -> u32 {
-    let mut count = 0u32;
-    for idx in literal_occurrences(text, route) {
-        let start = idx.saturating_sub(80);
-        let prefix = &text[start..idx];
-        if prefix.contains("fetch(")
-            || prefix.contains("axios.")
-            || prefix.contains(".get(")
-            || prefix.contains(".post(")
-            || prefix.contains("http.")
-            || prefix.contains("client.")
-        {
-            count = count.saturating_add(1);
+fn route_fetch_counts<'a>(text: &str, route_names: &'a [String]) -> Vec<(&'a String, u32)> {
+    if route_names.is_empty() {
+        return Vec::new();
+    }
+    let fetch_windows = fetch_literal_windows(text);
+    if fetch_windows.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for route in route_names {
+        let mut count = 0u32;
+        for window in &fetch_windows {
+            count = count.saturating_add(window.matches(route.as_str()).count() as u32);
+        }
+        if count > 0 {
+            out.push((route, count));
         }
     }
-    count
+    out
+}
+
+fn fetch_literal_windows(text: &str) -> Vec<&str> {
+    let mut windows = Vec::new();
+    for marker in ["fetch(", "axios.", ".get(", ".post(", "http.", "client."] {
+        let mut offset = 0usize;
+        while let Some(pos) = text[offset..].find(marker) {
+            let start = offset + pos;
+            let end = (start + 600).min(text.len());
+            windows.push(&text[start..end]);
+            offset = start + marker.len();
+        }
+    }
+    windows
 }
 
 fn literal_occurrences(text: &str, needle: &str) -> Vec<usize> {
@@ -2800,6 +3023,8 @@ fn export_chunks(
     project: &str,
     repo: &Path,
     path: &Path,
+    total: u64,
+    on_event: &mut impl FnMut(&EngineEvent),
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
@@ -2833,7 +3058,9 @@ fn export_chunks(
         serde_json::to_writer(&mut out, &chunk)?;
         out.write_all(b"\n")?;
         count += 1;
+        emit_export_progress(on_event, "chunks", count, total);
     }
+    emit_export_progress(on_event, "chunks", count, total);
     Ok(count)
 }
 
@@ -3042,6 +3269,10 @@ mod tests {
         dir
     }
 
+    fn synthesize_graph_quiet(conn: &Connection, repo: &Path) -> Result<SynthGraph, EngineError> {
+        synthesize_graph(conn, "demo", repo)
+    }
+
     #[test]
     fn synthesizes_call_chain_processes_from_cbm_calls() {
         let conn = test_conn();
@@ -3072,7 +3303,7 @@ mod tests {
         insert_edge(&conn, 1, 1, 2, "CALLS");
         insert_edge(&conn, 2, 2, 3, "CALLS");
 
-        let processes = synthesize_graph(&conn, "demo", std::path::Path::new("."))
+        let processes = synthesize_graph_quiet(&conn, std::path::Path::new("."))
             .unwrap()
             .processes;
         assert_eq!(processes.len(), 1);
@@ -3144,7 +3375,7 @@ mod tests {
         insert_edge(&conn, 1, 1, 2, "CALLS");
         insert_edge(&conn, 2, 2, 3, "CALLS");
 
-        let synth = synthesize_graph(&conn, "demo", std::path::Path::new(".")).unwrap();
+        let synth = synthesize_graph_quiet(&conn, std::path::Path::new(".")).unwrap();
         assert_eq!(synth.communities.len(), 1);
         let main = synth
             .communities
@@ -3208,7 +3439,7 @@ mod tests {
         insert_edge(&conn, 2, 2, 3, "CALLS");
         insert_edge(&conn, 3, 3, 4, "CALLS");
 
-        let synth = synthesize_graph(&conn, "demo", std::path::Path::new(".")).unwrap();
+        let synth = synthesize_graph_quiet(&conn, std::path::Path::new(".")).unwrap();
         assert_eq!(synth.communities.len(), 2);
         let process = synth.processes.first().expect("process");
         assert_eq!(process.process_type, "cross_community");
@@ -3245,7 +3476,7 @@ mod tests {
         insert_edge(&conn, 1, 1, 2, "CALLS");
         insert_edge(&conn, 2, 2, 3, "CALLS");
 
-        let processes = synthesize_graph(&conn, "demo", std::path::Path::new("."))
+        let processes = synthesize_graph_quiet(&conn, std::path::Path::new("."))
             .unwrap()
             .processes;
         assert_eq!(processes.len(), 1);
@@ -3278,7 +3509,7 @@ mod tests {
         insert_edge(&conn, 1, 2, 3, "CALLS");
         insert_edge(&conn, 2, 2, 1, "STEP_IN_PROCESS");
 
-        let processes = synthesize_graph(&conn, "demo", std::path::Path::new("."))
+        let processes = synthesize_graph_quiet(&conn, std::path::Path::new("."))
             .unwrap()
             .processes;
         assert!(processes.is_empty());
@@ -3313,7 +3544,7 @@ mod tests {
         );
         insert_edge(&conn, 1, 2, 3, "CALLS");
 
-        let processes = synthesize_graph(&conn, "demo", std::path::Path::new("."))
+        let processes = synthesize_graph_quiet(&conn, std::path::Path::new("."))
             .unwrap()
             .processes;
         assert!(processes.is_empty());
@@ -3352,7 +3583,7 @@ mod tests {
         insert_edge(&conn, 3, 2, 1, "MEMBER_OF");
         insert_edge(&conn, 4, 3, 1, "MEMBER_OF");
 
-        let synth = synthesize_graph(&conn, "demo", std::path::Path::new(".")).unwrap();
+        let synth = synthesize_graph_quiet(&conn, std::path::Path::new(".")).unwrap();
         assert!(synth.communities.is_empty());
         assert_eq!(synth.processes.len(), 1);
         assert_eq!(synth.processes[0].process_type, "intra_community");
@@ -3415,7 +3646,7 @@ mod tests {
         insert_edge(&conn, 3, 1, 2, "CALLS");
         insert_edge(&conn, 4, 5, 6, "CALLS");
 
-        let synth = synthesize_graph(&conn, "demo", std::path::Path::new(".")).unwrap();
+        let synth = synthesize_graph_quiet(&conn, std::path::Path::new(".")).unwrap();
         let processes = synth.processes;
         assert_eq!(processes.len(), 1);
         let process = &processes[0];
@@ -3480,7 +3711,7 @@ mod tests {
         );
         insert_edge(&conn, 1, 1, 2, "CALLS");
 
-        let synth = synthesize_graph(&conn, "demo", &repo).unwrap();
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
         assert_eq!(synth.routes.len(), 1);
         let route = &synth.routes[0];
         assert_eq!(route.route, "/api/config");
@@ -3516,7 +3747,7 @@ mod tests {
             "src/mcp/server.ts",
         );
 
-        let synth = synthesize_graph(&conn, "demo", &repo).unwrap();
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
         assert_eq!(synth.tools.len(), 1);
         let tool = &synth.tools[0];
         assert_eq!(tool.name, "index_repo");

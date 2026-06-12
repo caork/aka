@@ -62,6 +62,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "==> removing quarantine from ${DMG}"
+xattr -dr com.apple.quarantine "${DMG}" 2>/dev/null || true
+
 echo "==> verifying ${DMG}"
 hdiutil verify "${DMG}" >/dev/null
 
@@ -74,7 +77,7 @@ DEST_APP="${INSTALL_DIR}/AKA.app"
 
 echo "==> installing ${DEST_APP}"
 rm -rf "${DEST_APP}"
-ditto "${SRC_APP}" "${DEST_APP}"
+ditto --noqtn "${SRC_APP}" "${DEST_APP}"
 
 echo "==> removing Gatekeeper quarantine"
 xattr -dr com.apple.quarantine "${DEST_APP}" 2>/dev/null || true

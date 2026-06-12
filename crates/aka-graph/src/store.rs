@@ -78,6 +78,17 @@ pub struct IngestStats {
     pub dangling_edges: u64,
 }
 
+/// File-scoped deletion statistics for incremental index replacement.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeleteFileStats {
+    /// Nodes removed from `nodes`.
+    pub nodes: u64,
+    /// Incident edges removed from `edges`.
+    pub edges: u64,
+    /// Layout rows removed from `positions` before the full layout tables were cleared.
+    pub positions: u64,
+}
+
 /// positions 表一行（compute_layout 的产物）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PositionRow {
@@ -287,6 +298,54 @@ impl GraphStore {
                 stats.edges += 1;
             }
         }
+        tx.commit()?;
+        Ok(stats)
+    }
+
+    /// Delete all graph rows owned by a single source file.
+    ///
+    /// Incremental replacement is intentionally file-scoped: collect matching
+    /// `nodes.rowid`s first, delete every incident edge, delete layout rows for
+    /// those nodes, then remove the nodes. Since layout clusters depend on the
+    /// full graph, the remaining `positions` and `clusters` tables are cleared
+    /// and callers should run `compute_layout` after re-ingesting replacements.
+    pub fn delete_file(&mut self, file_path: &str) -> Result<DeleteFileStats> {
+        let tx = self.conn.transaction()?;
+        let rowids = {
+            let mut stmt = tx.prepare("SELECT rowid FROM nodes WHERE file_path = ?1")?;
+            let rows = stmt.query_map([file_path], |row| row.get::<_, i64>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if rowids.is_empty() {
+            tx.execute("DELETE FROM positions", [])?;
+            tx.execute("DELETE FROM clusters", [])?;
+            tx.commit()?;
+            return Ok(DeleteFileStats::default());
+        }
+
+        let mut stats = DeleteFileStats {
+            nodes: rowids.len() as u64,
+            ..DeleteFileStats::default()
+        };
+        {
+            let mut del_edges =
+                tx.prepare_cached("DELETE FROM edges WHERE source = ?1 OR target = ?1")?;
+            let mut del_positions = tx.prepare_cached("DELETE FROM positions WHERE node = ?1")?;
+            for rowid in &rowids {
+                stats.edges += del_edges.execute([rowid])? as u64;
+                stats.positions += del_positions.execute([rowid])? as u64;
+            }
+        }
+        {
+            let mut del_nodes = tx.prepare_cached("DELETE FROM nodes WHERE rowid = ?1")?;
+            for rowid in &rowids {
+                del_nodes.execute([rowid])?;
+            }
+        }
+
+        // Remaining coordinates/clusters are stale after node/edge removal.
+        tx.execute("DELETE FROM positions", [])?;
+        tx.execute("DELETE FROM clusters", [])?;
         tx.commit()?;
         Ok(stats)
     }
@@ -602,5 +661,76 @@ mod tests {
         drop(store);
         let store = GraphStore::open(&path).unwrap();
         assert_eq!(store.edge_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_file_removes_nodes_incident_edges_and_stale_layout() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let nodes = vec![
+            NodeRec {
+                id: "a".into(),
+                label: "Function".into(),
+                properties: json!({"name": "a", "filePath": "src/a.rs", "startLine": 0})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            },
+            NodeRec {
+                id: "b".into(),
+                label: "Function".into(),
+                properties: json!({"name": "b", "filePath": "src/b.rs", "startLine": 0})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            },
+            NodeRec {
+                id: "c".into(),
+                label: "Function".into(),
+                properties: json!({"name": "c", "filePath": "src/b.rs", "startLine": 1})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            },
+        ];
+        let edges = vec![
+            EdgeRec {
+                id: "a-b".into(),
+                source_id: "a".into(),
+                target_id: "b".into(),
+                edge_type: "CALLS".into(),
+                confidence: 1.0,
+                reason: String::new(),
+                step: None,
+                evidence: None,
+            },
+            EdgeRec {
+                id: "b-c".into(),
+                source_id: "b".into(),
+                target_id: "c".into(),
+                edge_type: "CALLS".into(),
+                confidence: 1.0,
+                reason: String::new(),
+                step: None,
+                evidence: None,
+            },
+        ];
+        store.ingest(nodes.into_iter(), edges.into_iter()).unwrap();
+        let adj = crate::Adjacency::build(&store).unwrap();
+        crate::compute_layout(&store, &adj).unwrap();
+        assert_eq!(store.positions().unwrap().len(), 3);
+
+        let stats = store.delete_file("src/b.rs").unwrap();
+
+        assert_eq!(stats.nodes, 2);
+        assert_eq!(stats.edges, 2);
+        assert_eq!(store.node_count().unwrap(), 1);
+        assert_eq!(store.edge_count().unwrap(), 0);
+        assert!(store.node_by_id("a").unwrap().is_some());
+        assert!(store.node_by_id("b").unwrap().is_none());
+        assert!(store.node_by_id("c").unwrap().is_none());
+        assert!(
+            store.positions().unwrap().is_empty(),
+            "layout tables must be cleared for recompute"
+        );
     }
 }

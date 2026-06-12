@@ -357,6 +357,74 @@ fn reopen_then_search_and_append() {
     assert_eq!(hits[0].node_id, "fn:freshlyAddedSymbol");
 }
 
+#[test]
+fn delete_file_removes_exact_path_documents_before_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+        assert!(writer.supports_file_deletes());
+        writer
+            .add_nodes(
+                vec![
+                    node("fn:oldAlpha", "Function", "oldAlpha", "src/a.rs"),
+                    node("fn:stableBeta", "Function", "stableBeta", "src/b.rs"),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+        writer
+            .add_chunks(
+                vec![
+                    chunk(
+                        "fn:oldAlpha",
+                        "src/a.rs",
+                        "fn oldAlpha() { obsolete_token() }",
+                    ),
+                    chunk(
+                        "fn:stableBeta",
+                        "src/b.rs",
+                        "fn stableBeta() { keeper_token() }",
+                    ),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
+    {
+        let mut writer = SearchIndexWriter::open(dir.path()).unwrap();
+        assert!(writer.delete_file("src/a.rs").unwrap());
+        writer
+            .add_nodes(std::iter::once(node(
+                "fn:newAlpha",
+                "Function",
+                "newAlpha",
+                "src/a.rs",
+            )))
+            .unwrap();
+        writer
+            .add_chunks(std::iter::once(chunk(
+                "fn:newAlpha",
+                "src/a.rs",
+                "fn newAlpha() { replacement_token() }",
+            )))
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
+    let index = SearchIndex::open(dir.path()).unwrap();
+    assert!(index.search("obsolete", 10).unwrap().is_empty());
+    assert_eq!(
+        index.search("replacement token", 10).unwrap()[0].node_id,
+        "fn:newAlpha"
+    );
+    assert_eq!(
+        index.search("keeper token", 10).unwrap()[0].node_id,
+        "fn:stableBeta"
+    );
+}
+
 /// 缺陷回归：读路径不得持有 tantivy 写锁。
 /// 旧实现里 `SearchIndex::open` 无条件创建 `IndexWriter`，第二个读句柄
 /// （如 serve 运行时再起 mcp 进程）必报 `LockBusy`。

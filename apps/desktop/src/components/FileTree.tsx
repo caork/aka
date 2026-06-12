@@ -116,6 +116,8 @@ export default function FileTree() {
 
   const repo = repos.find((r) => r.id === repoId) ?? null;
   const repoName = repo?.name ?? repoId;
+  const repoStatus = repo?.status;
+  const repoDetail = repo?.detail;
   const activePath = codeTarget?.path ?? null;
 
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
@@ -124,8 +126,8 @@ export default function FileTree() {
   const autoFor = useRef<string | null>(null);
 
   useEffect(() => {
-    if (repo?.status === "indexing" || repo?.status === "failed") {
-      setLoad({ phase: "pending", status: repo.status, detail: repo.detail });
+    if (repoStatus === "indexing" || repoStatus === "failed") {
+      setLoad({ phase: "pending", status: repoStatus, detail: repoDetail });
       return;
     }
     if (!repoId) {
@@ -162,7 +164,7 @@ export default function FileTree() {
       stale = true;
       ctrl.abort();
     };
-  }, [repoId, repo, repo?.status, repo?.detail]);
+  }, [repoId, repoName, repoStatus, repoDetail, Boolean(repo)]);
 
   const tree = useMemo(
     () => (load.phase === "ok" ? buildTree(load.files) : []),

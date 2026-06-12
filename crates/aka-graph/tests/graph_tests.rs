@@ -719,6 +719,28 @@ fn lod_snapshot_shape_and_truncation() {
     assert!(matches!(bare.lod_snapshot(10), Err(GraphError::Invalid(_))));
 }
 
+#[test]
+fn cluster_lod_snapshot_uses_real_cluster_labels_and_weights() {
+    let store = mini_store();
+    let adj = Adjacency::build(&store).unwrap();
+    compute_layout(&store, &adj).unwrap();
+
+    let snap = store.cluster_lod_snapshot().unwrap();
+    assert_eq!(snap.classes, vec!["Community"]);
+    assert_eq!(snap.nodes.len(), 3);
+    assert_eq!(snap.returned_nodes, 3);
+    assert_eq!(snap.total_nodes, 10);
+    assert_eq!(
+        snap.cluster_labels,
+        vec!["community-two", "community-one", "src"]
+    );
+    let names: Vec<_> = snap.nodes.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, vec!["community-two", "community-one", "src"]);
+    assert!(snap.nodes.iter().all(|n| n.id.starts_with("cluster:")));
+    assert_eq!(snap.edges.len(), snap.edge_weights.len() * 2);
+    assert!(snap.edge_weights.iter().all(|&w| w > 0));
+}
+
 // ── ego 子图 ─────────────────────────────────────────────────────
 
 #[test]

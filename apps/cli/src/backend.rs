@@ -1721,6 +1721,14 @@ impl Backend for AkaBackend {
         Ok(serde_json::to_value(lod)?)
     }
 
+    fn graph_clusters(&self, repo: &str) -> Result<serde_json::Value> {
+        let handles = self.targets(Some(repo))?;
+        let handle = handles.first().context("repo handle")?;
+        let store = handle.store.lock().expect("store lock");
+        let clusters = store.cluster_lod_snapshot()?;
+        Ok(serde_json::to_value(clusters)?)
+    }
+
     fn analyze(&self, repo_path: &str) -> Result<String> {
         let summary = crate::run_analyze(PathBuf::from(repo_path), self.engine_dir(), false)
             .map_err(|e| anyhow!("{e:#}"))?;
