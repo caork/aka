@@ -108,7 +108,11 @@ type LoadState =
 
 /* ============================== 组件 ============================== */
 
-export default function FileTree() {
+export default function FileTree({
+  onContentExpand,
+}: {
+  onContentExpand?: () => void;
+}) {
   const repoId = useAppStore((s) => s.selectedRepoId);
   const repos = useAppStore((s) => s.repos);
   const codeTarget = useAppStore((s) => s.codeTarget);
@@ -178,9 +182,10 @@ export default function FileTree() {
       if (prev.size > 0) return prev;
       const next = new Set(prev);
       for (const n of tree) if (n.type === "dir") next.add(n.path);
+      if (next.size > prev.size) onContentExpand?.();
       return next;
     });
-  }, [load.phase, tree]);
+  }, [load.phase, tree, onContentExpand]);
 
   /* 活动文件变化时展开其祖先链 */
   useEffect(() => {
@@ -192,15 +197,19 @@ export default function FileTree() {
     setExpanded((prev) => {
       const next = new Set(prev);
       for (const p of anc) next.add(p);
+      if (next.size > prev.size) onContentExpand?.();
       return next;
     });
-  }, [activePath, tree, load.phase]);
+  }, [activePath, tree, load.phase, onContentExpand]);
 
   const toggle = (path: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
-      else next.add(path);
+      else {
+        next.add(path);
+        onContentExpand?.();
+      }
       return next;
     });
 
@@ -217,7 +226,7 @@ export default function FileTree() {
         )}
       </div>
 
-      <div className="scroll-area min-h-0 flex-1 px-1.5 pb-3">
+      <div className="scroll-area min-h-0 flex-1 overflow-x-hidden px-1.5 pb-3">
         {load.phase === "loading" && <TreeSkeleton />}
         {load.phase === "pending" && (
           <div className="px-3 py-6 text-center text-[12px] leading-relaxed text-ink-3">
@@ -243,17 +252,24 @@ export default function FileTree() {
           </div>
         )}
         {load.phase === "ok" &&
-          tree.map((node) => (
-            <TreeRow
-              key={node.path}
-              node={node}
-              depth={0}
-              expanded={expanded}
-              activePath={activePath}
-              onToggle={toggle}
-              onOpenFile={(path) => openCode({ repo: repoName, path })}
-            />
-          ))}
+          tree.length > 0 && (
+            <div className="inline-block min-w-full">
+              {tree.map((node) => (
+                <TreeRow
+                  key={node.path}
+                  node={node}
+                  depth={0}
+                  expanded={expanded}
+                  activePath={activePath}
+                  onToggle={toggle}
+                  onOpenFile={(path) => {
+                    openCode({ repo: repoName, path });
+                    onContentExpand?.();
+                  }}
+                />
+              ))}
+            </div>
+          )}
       </div>
     </div>
   );
@@ -284,7 +300,7 @@ function TreeRow({
       <div>
         <button
           onClick={() => onToggle(node.path)}
-          className="themed-hover focus-ring group flex w-full items-center gap-1 rounded-[7px] py-[5px] pr-2 text-left transition-colors duration-150 ease-out"
+          className="themed-hover focus-ring group flex min-w-full w-max items-center gap-1 rounded-[7px] py-[5px] pr-2 text-left transition-colors duration-150 ease-out"
           style={{ paddingLeft: pad }}
           data-testid="tree-dir"
         >
@@ -314,7 +330,7 @@ function TreeRow({
   return (
     <button
       onClick={() => onOpenFile(node.path)}
-      className="focus-ring group flex w-full items-center gap-1.5 rounded-[7px] py-[5px] pr-2 text-left transition-colors duration-150 ease-out"
+      className="focus-ring group flex min-w-full w-max items-center gap-1.5 rounded-[7px] py-[5px] pr-2 text-left transition-colors duration-150 ease-out"
       style={{
         paddingLeft: pad + 4,
         background: active ? "var(--accent-fill)" : undefined,

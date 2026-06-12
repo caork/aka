@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import CodeView from "./CodeView";
 import FileTree from "./FileTree";
 import IndexingPanel from "./IndexingPanel";
@@ -12,6 +12,7 @@ const RAIL_WIDTH_KEY = "aka.codeRailWidth";
 const DEFAULT_RAIL_WIDTH = 256;
 const MIN_RAIL_WIDTH = 220;
 const MAX_RAIL_WIDTH = 520;
+const AUTO_RAIL_PADDING = 28;
 
 function clampRailWidth(width: number): number {
   const viewportCap =
@@ -47,6 +48,8 @@ function persistRailWidth(width: number) {
  * 右侧连接抽屉（图谱邻居）由 App 的 DetailPanel 叠加渲染。
  */
 export default function CodeWorkspace() {
+  const railRef = useRef<HTMLDivElement>(null);
+  const measureFrameRef = useRef<number | null>(null);
   const codeTarget = useAppStore((s) => s.codeTarget);
   const query = useAppStore((s) => s.query);
   const repos = useAppStore((s) => s.repos);
@@ -59,6 +62,24 @@ export default function CodeWorkspace() {
   const selectedRepo = repos.find((repo) => repo.id === selectedRepoId) ?? null;
   const showIndexing =
     selectedRepo?.status === "indexing" || selectedRepo?.status === "failed";
+
+  const growRailToContent = useCallback(() => {
+    if (measureFrameRef.current !== null) {
+      cancelAnimationFrame(measureFrameRef.current);
+    }
+    measureFrameRef.current = requestAnimationFrame(() => {
+      measureFrameRef.current = null;
+      const rail = railRef.current;
+      if (!rail) return;
+      const contentWidth = rail.scrollWidth + AUTO_RAIL_PADDING;
+      setRailWidth((width) => {
+        const next = clampRailWidth(Math.ceil(contentWidth));
+        if (next <= width) return width;
+        persistRailWidth(next);
+        return next;
+      });
+    });
+  }, []);
 
   useEffect(() => {
     if (!resizing) return;
@@ -84,6 +105,14 @@ export default function CodeWorkspace() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (measureFrameRef.current !== null) {
+        cancelAnimationFrame(measureFrameRef.current);
+      }
+    };
+  }, []);
+
   if (repos.length === 0) {
     return (
       <div className="flex h-full items-center justify-center px-6" data-testid="empty-repos">
@@ -101,11 +130,12 @@ export default function CodeWorkspace() {
     <div className="flex h-full overflow-hidden">
       {/* 左栏：文件树 / 搜索结果 */}
       <div
+        ref={railRef}
         className="themed-border relative flex h-full flex-none flex-col border-r"
         style={{ width: railWidth, minWidth: MIN_RAIL_WIDTH, maxWidth: MAX_RAIL_WIDTH }}
         data-testid="code-rail"
       >
-        {searching ? <SearchPanel compact /> : <FileTree />}
+        {searching ? <SearchPanel compact /> : <FileTree onContentExpand={growRailToContent} />}
         <div
           role="separator"
           aria-orientation="vertical"
