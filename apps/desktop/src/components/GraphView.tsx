@@ -625,7 +625,7 @@ export default function GraphView() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
             transition={spring}
-            className="glass absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center gap-2 py-1.5 pl-1.5 pr-3.5"
+            className="glass absolute left-1/2 top-4 z-30 flex -translate-x-1/2 items-center gap-2 py-1.5 pl-1.5 pr-3.5"
             data-graph-ui
             data-testid="ego-breadcrumb"
           >
@@ -659,7 +659,7 @@ export default function GraphView() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
             transition={spring}
-            className="glass absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center gap-2.5 px-3.5 py-2"
+            className="glass absolute left-1/2 top-4 z-30 flex -translate-x-1/2 items-center gap-2.5 px-3.5 py-2"
             data-graph-ui
             data-testid="ego-error"
           >

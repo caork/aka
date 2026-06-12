@@ -42,7 +42,7 @@ export default function App() {
         }}
       >
         <div
-          className="window-drag-region absolute top-0 z-30"
+          className="window-drag-region absolute top-0 z-[1]"
           style={{ left: 92, right: 180 }}
           onMouseDown={startWindowDrag}
           data-tauri-drag-region
@@ -53,7 +53,7 @@ export default function App() {
           <RepoDropdown />
         </div>
 
-        <div className="absolute right-3 top-3 z-20 flex items-center gap-2">
+        <div className="absolute right-3 top-3 z-30 flex items-center gap-2">
           <SearchBubble />
           <SegmentedControl value={view} onChange={setView} />
         </div>
