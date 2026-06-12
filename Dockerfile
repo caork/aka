@@ -42,7 +42,7 @@ FROM debian:bookworm AS engine-builder
 ARG CBM_REPO=https://github.com/DeusData/codebase-memory-mcp.git
 ARG CBM_REF=2b67abfd543a807e392a0de31f7d5b9a2bcd7177
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates git build-essential pkg-config && \
+    apt-get install -y --no-install-recommends ca-certificates git build-essential pkg-config zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 RUN git clone "${CBM_REPO}" codebase-memory-mcp && \
