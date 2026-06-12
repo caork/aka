@@ -16,8 +16,10 @@ pub use aka_core::{
     clamp_render_nodes, DEFAULT_RENDER_MAX_NODES, MAX_RENDER_NODES, MIN_RENDER_NODES,
 };
 pub use backend::{
-    Backend, CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, ProcessHit,
-    QueryEnrichment, RepoInfo, RepoProgress, RepoSettingsUpdate, SearchHit, SymbolRef,
+    Backend, ChangeDetection, ChangedRange, ChangedSymbol, CodeLineMatch, CodeSearchHit,
+    CodeSearchResult, DirectoryCount, ImpactDirection, ProcessHit, QueryEnrichment, RepoInfo,
+    RepoProgress, RepoSettingsUpdate, RouteConsumer, RouteMapEntry, SearchHit, SymbolRef,
+    SymbolSelector, ToolMapEntry,
 };
 pub use service::AkaMcpServer;
 

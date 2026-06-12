@@ -29,8 +29,9 @@ Rust workspace 承担存储、搜索、服务、UI；CBM 作为 native C binary 
 
 ## 服务层（Rust）
 
-- MCP：rmcp（官方 SDK），stdio + Streamable HTTP。九个工具：list_repos / query / search_code / context / find_definition / search_references / impact / analyze / augment（cypher 已砍）。
-- HTTP：axum，承接 query/repos/graph-stream REST 面，给远程模式和浏览器。
+- MCP：rmcp（官方 SDK），stdio + Streamable HTTP。十四个工具：list_repos / query / search_code / context / find_definition / search_references / impact / detect_changes / route_map / tool_map / shape_check / api_impact / analyze / augment（cypher 已砍）。
+- GitNexus-like 能力：query/context/impact 会消费合成 Community/Process，新增 detect_changes/route_map/tool_map/shape_check/api_impact 消费 Route/Tool/FETCHES/HANDLES_ROUTE/HANDLES_TOOL/ENTRY_POINT_OF/STEP_IN_PROCESS 等索引语义，覆盖流程分组、改动到流程映射、API 路由/工具入口和响应形状检查。它是面向 agent 工作流的保守兼容层，不提供完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义。
+- HTTP：axum，承接 query/repos/graph-stream/search-code/detect-changes/route-map/tool-map/shape-check/api-impact REST 面，给远程模式和浏览器。
 - augmentation（编辑器 hook 增强）：BM25-only 路径，目标 <100ms。
 
 ## 桌面 + 前端（Tauri 2）

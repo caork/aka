@@ -17,8 +17,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use aka_mcp::{
-    Backend, CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, ProcessHit,
-    QueryEnrichment, RepoInfo, SearchHit, SymbolRef,
+    Backend, ChangeDetection, ChangedRange, ChangedSymbol, CodeLineMatch, CodeSearchHit,
+    CodeSearchResult, DirectoryCount, ProcessHit, QueryEnrichment, RepoInfo, RouteConsumer,
+    RouteMapEntry, SearchHit, SymbolRef, ToolMapEntry,
 };
 
 #[derive(Debug, Clone)]
@@ -89,6 +90,22 @@ const NODES: &[FixtureNode] = &[
         file: "src/main.rs",
         line: 1,
     },
+    FixtureNode {
+        id: "fixture:fn:duplicate_lib",
+        name: "duplicate",
+        label: "Function",
+        repo: "fixture",
+        file: "src/a.rs",
+        line: 2,
+    },
+    FixtureNode {
+        id: "fixture:fn:duplicate_ui",
+        name: "duplicate",
+        label: "Function",
+        repo: "fixture",
+        file: "src/b.rs",
+        line: 9,
+    },
 ];
 
 const EDGES: &[FixtureEdge] = &[
@@ -148,6 +165,65 @@ const PROCESSES: &[FixtureProcess] = &[
         steps: &[(0, 1), (1, 2), (4, 3)],
     },
 ];
+
+fn fixture_routes(repo: Option<&str>, route: Option<&str>) -> Vec<RouteMapEntry> {
+    if repo.is_some_and(|r| r != "fixture") {
+        return Vec::new();
+    }
+    let entry = RouteMapEntry {
+        id: "fixture:route:/api/config".into(),
+        route: "/api/config".into(),
+        handler: "src/routes/config.rs".into(),
+        middleware: vec!["withAuth".into()],
+        response_keys: vec!["data".into(), "pagination".into()],
+        error_keys: vec!["error".into()],
+        consumers: vec![
+            RouteConsumer {
+                name: "ConfigPanel".into(),
+                file_path: "src/ui/config_panel.tsx".into(),
+                accessed_keys: vec!["data".into(), "missing".into()],
+                fetch_count: Some(1),
+            },
+            RouteConsumer {
+                name: "ConfigList".into(),
+                file_path: "src/ui/config_list.tsx".into(),
+                accessed_keys: vec!["pagination".into()],
+                fetch_count: Some(2),
+            },
+        ],
+        flows: vec!["main → read_file".into()],
+        properties: None,
+    };
+    [entry]
+        .into_iter()
+        .filter(|r| route.is_none_or(|needle| r.route.contains(needle)))
+        .collect()
+}
+
+fn fixture_tools(repo: Option<&str>, tool: Option<&str>) -> Vec<ToolMapEntry> {
+    if repo.is_some_and(|r| r != "fixture") {
+        return Vec::new();
+    }
+    let handler = NODES
+        .iter()
+        .find(|n| n.name == "handle_request")
+        .map(|n| FixtureBackend::hit(n, 1.0, false))
+        .into_iter()
+        .collect();
+    let entry = ToolMapEntry {
+        id: "fixture:tool:index_repo".into(),
+        name: "index_repo".into(),
+        file_path: "src/tools/index_repo.rs".into(),
+        description: "Index a repository and build the code graph.".into(),
+        handlers: handler,
+        flows: vec!["main → write_output".into()],
+        properties: None,
+    };
+    [entry]
+        .into_iter()
+        .filter(|t| tool.is_none_or(|needle| t.name.contains(needle)))
+        .collect()
+}
 
 /// 内存假数据 Backend。`FixtureBackend::fixture()` 即可用。
 #[derive(Debug, Default, Clone)]
@@ -416,6 +492,51 @@ impl Backend for FixtureBackend {
         Ok(format!(
             "fixture analyze: queued indexing for {repo_path} (nodes=5 edges=4, no-op)"
         ))
+    }
+
+    fn detect_changes(
+        &self,
+        repo: Option<&str>,
+        scope: &str,
+        base_ref: Option<&str>,
+    ) -> anyhow::Result<ChangeDetection> {
+        let repo_name = repo.unwrap_or("fixture");
+        let range = ChangedRange {
+            file_path: "src/handler.rs".into(),
+            start_line: 12,
+            end_line: 13,
+        };
+        Ok(ChangeDetection {
+            repo: repo_name.into(),
+            scope: scope.into(),
+            base_ref: base_ref.map(str::to_string),
+            ranges: vec![range.clone()],
+            symbols: vec![ChangedSymbol {
+                node_id: "fixture:fn:handle_request".into(),
+                name: "handle_request".into(),
+                label: "Function".into(),
+                file_path: "src/handler.rs".into(),
+                start_line: 12,
+                end_line: 14,
+                ranges: vec![range],
+            }],
+        })
+    }
+
+    fn route_map(
+        &self,
+        repo: Option<&str>,
+        route: Option<&str>,
+    ) -> anyhow::Result<Vec<RouteMapEntry>> {
+        Ok(fixture_routes(repo, route))
+    }
+
+    fn tool_map(
+        &self,
+        repo: Option<&str>,
+        tool: Option<&str>,
+    ) -> anyhow::Result<Vec<ToolMapEntry>> {
+        Ok(fixture_tools(repo, tool))
     }
 
     fn processes_of(&self, repo: Option<&str>, node_id: &str) -> anyhow::Result<Vec<ProcessHit>> {

@@ -99,7 +99,7 @@ impl ChunkRec {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactStats {
     #[serde(default)]
     pub files: u64,

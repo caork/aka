@@ -63,6 +63,30 @@ fn fallback_resource_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
+fn bundled_engine_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "codebase-memory-mcp.exe"
+    } else {
+        "codebase-memory-mcp"
+    }
+}
+
+fn has_native_engine(dir: &std::path::Path) -> bool {
+    let bin = bundled_engine_bin_name();
+    dir.join(bin).is_file()
+        || dir.join("bin").join(bin).is_file()
+        || dir.join("build/c").join(bin).is_file()
+}
+
+fn bundled_engine_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
+    [
+        resource_dir.join("engine"),
+        resource_dir.join("resources").join("engine"),
+    ]
+    .into_iter()
+    .find(|dir| has_native_engine(dir))
+}
+
 #[derive(Debug, Deserialize)]
 struct ImportRequest {
     kind: String,
@@ -131,18 +155,13 @@ fn configure_desktop_runtime(app: &tauri::App) -> anyhow::Result<AkaBackend> {
         .path()
         .resource_dir()
         .unwrap_or_else(|_| fallback_resource_dir());
-    let bundled_engine = resource_dir.join("engine");
-    let has_bundled_engine = bundled_engine.join("codebase-memory-mcp").exists()
-        || bundled_engine.join("codebase-memory-mcp.exe").exists()
-        || bundled_engine.join("build/c/codebase-memory-mcp").exists()
-        || bundled_engine
-            .join("build/c/codebase-memory-mcp.exe")
-            .exists();
-    Ok(if has_bundled_engine {
-        AkaBackend::with_engine_dir(bundled_engine)
-    } else {
-        AkaBackend::new()
-    })
+    Ok(
+        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+            AkaBackend::with_engine_dir(engine_dir)
+        } else {
+            AkaBackend::new()
+        },
+    )
 }
 
 #[tauri::command]
@@ -161,15 +180,18 @@ async fn query(
         .unwrap_or(ops::DEFAULT_QUERY_LIMIT)
         .clamp(1, ops::MAX_QUERY_LIMIT);
     run_backend(backend, move |b| {
-        ops::query(b.as_ref(), ops::QueryOptions {
-            repo: repo.as_deref(),
-            query: &query,
-            limit,
-            max_symbols: ops::DEFAULT_QUERY_PROCESS_SYMBOL_LIMIT,
-            include_content: false,
-            task_context: None,
-            goal: None,
-        })
+        ops::query(
+            b.as_ref(),
+            ops::QueryOptions {
+                repo: repo.as_deref(),
+                query: &query,
+                limit,
+                max_symbols: ops::DEFAULT_QUERY_PROCESS_SYMBOL_LIMIT,
+                include_content: false,
+                task_context: None,
+                goal: None,
+            },
+        )
     })
     .await
 }

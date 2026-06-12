@@ -1,11 +1,13 @@
 ---
 name: aka-code-graph
-description: 用 aka 代码知识图谱（MCP 工具 list_repos/query/search_code/context/find_definition/search_references/impact/analyze/augment）高效检索和理解已索引仓库。当需要在大代码库里找符号定义、搜实现、评估改动影响面（blast radius）、或快速建立对陌生符号的全景认知时使用。比逐文件 grep/read 更省 token、更准。
+description: 用 aka 代码知识图谱（14 个 MCP 工具：list_repos/query/search_code/context/find_definition/search_references/impact/detect_changes/route_map/tool_map/shape_check/api_impact/analyze/augment）高效检索和理解已索引仓库。当需要在大代码库里找符号定义、搜实现、评估改动影响面（blast radius）、检查当前改动、或查看 API route/tool 映射时使用。比逐文件 grep/read 更省 token、更准。
 ---
 
 # aka 代码知识图谱使用策略
 
-aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM25 全文索引。九个 MCP 工具覆盖三类任务：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**分析**（impact），外加 **管理**（list_repos/analyze）。
+aka 把仓库解析成「符号节点 + 调用/引用/应用语义边」的图，并建了 BM25 全文索引。十四个 MCP 工具覆盖四类任务：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**影响分析**（impact/detect_changes/api_impact/shape_check）、**应用映射**（route_map/tool_map），外加 **管理**（list_repos/analyze）。
+
+其中 Route/Tool/FETCHES/HANDLES_ROUTE/HANDLES_TOOL/ENTRY_POINT_OF/STEP_IN_PROCESS 等是 GitNexus-like 的索引语义：可用于流程分组、API/工具入口、消费者和响应字段检查，但不是完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义层。索引缺少相应节点/边/字段时，相关工具会返回空结果或提示缺数据。
 
 ## 第一步：永远先 list_repos
 
@@ -25,6 +27,10 @@ aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM
 | "Foo 是干嘛的、谁调它、它调谁"（陌生符号建立全景） | `context`（一次拿到定义+callers+callees+引用） | 连续调三四个单项工具 |
 | "谁直接用了 Foo"（一跳引用清单） | `search_references` | impact（多跳，结果更大） |
 | "改/删 Foo 会波及哪些代码"（重构前评估） | `impact`（传 `depth`，默认够用，最大 10） | search_references（只看一跳会低估） |
+| "当前 git 改动碰到了哪些符号/流程" | `detect_changes`（scope: unstaged/staged/all/compare） | 手动 diff 后凭感觉判断 |
+| "改 API route 前看 handler、消费者、响应字段、流程" | `route_map`，再 `api_impact` | 只 grep 路由字符串 |
+| "检查消费者访问的字段是否在 route 响应里" | `shape_check` | 把空结果当成无风险证明 |
+| "查 MCP/RPC/agent tool 定义和 handler" | `tool_map` | 只搜工具名 |
 | 编辑器钩子/自动补充上下文（要快要省） | `augment`（top-3 命中 + 各自一跳邻居） | context（更重） |
 
 经验法则：
@@ -33,6 +39,8 @@ aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM
 - **要 grep-like 证据 → search_code。** 它返回原始匹配行、上下文和顶层目录分布；适合确认字符串/配置/API path 是否真的出现。
 - **探索陌生符号首选 context**，一次调用顶四次，token 最划算。
 - **动手重构前必跑 impact**：结果里 `depth` 是反向依赖的跳数，depth=1 是直接调用方（必须逐个检查），depth≥2 是传递波及（扫一眼判断是否行为变化会穿透）。`count` 很大时说明是热点符号，考虑兼容性包装而非直接改签名。
+- **提交前或接手别人改动时跑 detect_changes**：默认看 `unstaged`，也可用 `staged`、`all`、`compare + base_ref`。它把 diff hunk 映射到已索引符号，并列出受影响流程。
+- **API/工具类改动先看应用语义图**：`route_map` 看 Route 节点、handler、middleware、consumers、responseKeys/errorKeys 和 flows；`tool_map` 看 Tool 节点、定义文件、description、handlers 和 flows。`shape_check` 依赖 Route responseKeys/errorKeys 与 FETCHES 访问字段元数据；空结果通常表示索引没有足够 shape 数据，不等于没有 API 风险。
 
 ## 怎么读输出
 
@@ -42,7 +50,12 @@ aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM
 - **find_definition**：返回 `{defs:[{id, name, label, file, line, score, snip?}]}` — 知道确切符号名时用它定位定义。
 - **源码行命中**（search_code）：`{hits:[{id,name,label,file,line,score,matches:[{line,text,matched}]}], directories:[{dir,count}]}` — `matched=true` 是原始命中行，`matched=false` 是上下文；`directories` 用于判断命中集中在哪个模块。
 - **图引用**（search_references/impact）：`{id, name, label, file, line, edge, depth}` — `edge` 是关系类型（CALLS/IMPORTS…），`depth` 是跳数。
-- **context**：分组返回 `defs` / `callers` / `callees` / `refs` 四段。
+- **context**：分组返回 `defs` / `callers` / `callees` / `refs` / `processes`。
+- **detect_changes**：返回 `{changed_ranges, changed_symbols, changed_count, affected_processes}`；`affected_processes` 里看 `first_affected_step` 和 `affected_symbols`。
+- **route_map**：返回 `{routes,total,message?}`；每个 route 含 `route/handler/middleware/responseKeys/errorKeys/consumers/flows`。
+- **tool_map**：返回 `{tools,total,message?}`；每个 tool 含 `name/filePath/description/handlers/flows`。
+- **shape_check**：返回 `{routes,total,routesWithShapes,mismatches?,message}`；`status:"MISMATCH"` 和 consumer `mismatched` 是需要核查的字段。
+- **api_impact**：传 `route` 或 `file`，返回单个 `route` 或多条 `routes`；重点看 `consumers`、`mismatches`、`executionFlows`、`impactSummary.riskLevel`。
 
 拿到 `file:line` 后只 Read 命中的那一小段，不要整文件读——这是用 aka 的全部意义。
 
@@ -52,4 +65,6 @@ aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM
 - ❌ 用 query 找确切符号名（用 find_definition）。
 - ❌ 用自然语言长句喂 query（用代码里会出现的关键词）。
 - ❌ 重构只看 search_references 一跳就动手（用 impact）。
+- ❌ 把 Route/Tool/shape 工具的空结果当成"没有调用方/没有风险"（可能只是索引缺少应用语义数据）。
+- ❌ 把 GitNexus-like 能力描述成完整 GitNexus/Cypher 等价实现。
 - ❌ 拿到命中后仍然整文件 Read（只读 file:line 附近）。

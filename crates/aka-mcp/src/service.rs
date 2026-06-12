@@ -14,7 +14,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, ImpactDirection, SymbolSelector};
 use crate::ops;
 
 /// aka 的 MCP 服务（tools-only）。
@@ -87,8 +87,18 @@ pub struct SymbolParams {
     /// Repository name. Omit to look across all indexed repositories.
     #[serde(default)]
     pub repo: Option<String>,
-    /// Exact symbol name (function, class, method...).
-    pub symbol: String,
+    /// Exact symbol name (function, class, method...). `name` is accepted for GitNexus parity.
+    #[serde(default, alias = "name", alias = "target")]
+    pub symbol: Option<String>,
+    /// Direct graph node id returned as `id` by query/find/context.
+    #[serde(default, alias = "target_uid")]
+    pub uid: Option<String>,
+    /// Optional repo-relative file path for disambiguating common names.
+    #[serde(default)]
+    pub file_path: Option<String>,
+    /// Optional node kind/label filter, for example Function, Class, Method, Route.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -96,8 +106,18 @@ pub struct ReferencesParams {
     /// Repository name. Omit to look across all indexed repositories.
     #[serde(default)]
     pub repo: Option<String>,
-    /// Exact symbol name whose references to list.
-    pub symbol: String,
+    /// Exact symbol name whose references to list. `name`/`target` are accepted for GitNexus parity.
+    #[serde(default, alias = "name", alias = "target")]
+    pub symbol: Option<String>,
+    /// Direct graph node id returned as `id` by query/find/context.
+    #[serde(default, alias = "target_uid")]
+    pub uid: Option<String>,
+    /// Optional repo-relative file path for disambiguating common names.
+    #[serde(default)]
+    pub file_path: Option<String>,
+    /// Optional node kind/label filter.
+    #[serde(default)]
+    pub kind: Option<String>,
     /// Max references to return (default 25, max 100).
     #[serde(default)]
     pub limit: Option<usize>,
@@ -108,8 +128,21 @@ pub struct ImpactParams {
     /// Repository name. Omit to look across all indexed repositories.
     #[serde(default)]
     pub repo: Option<String>,
-    /// Exact symbol name to compute the blast radius for.
-    pub symbol: String,
+    /// Exact symbol name to compute the blast radius for. `name`/`target` are accepted for GitNexus parity.
+    #[serde(default, alias = "name", alias = "target")]
+    pub symbol: Option<String>,
+    /// Direct graph node id returned as `id` by query/find/context.
+    #[serde(default, alias = "target_uid")]
+    pub uid: Option<String>,
+    /// Optional repo-relative file path for disambiguating common names.
+    #[serde(default)]
+    pub file_path: Option<String>,
+    /// Optional node kind/label filter.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// upstream = dependents/callers (default), downstream = dependencies/callees, both = union.
+    #[serde(default)]
+    pub direction: Option<String>,
     /// How many reverse-dependency hops to traverse (default 2).
     #[serde(default)]
     pub depth: Option<u32>,
@@ -122,6 +155,19 @@ pub struct ImpactParams {
 pub struct AnalyzeParams {
     /// Absolute path of the repository to (re)index.
     pub repo_path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DetectChangesParams {
+    /// Repository name. Omit only when exactly one indexed repository exists.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// What to analyze: unstaged (default), staged, all, or compare.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Branch/commit for compare scope, for example main.
+    #[serde(default)]
+    pub base_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -152,6 +198,72 @@ pub struct CodeSearchParams {
     /// Optional substring filter on repo-relative file path.
     #[serde(default)]
     pub path_filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RouteMapParams {
+    /// Repository name. Omit when only one indexed repository exists.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Optional route path substring, for example /api/users.
+    #[serde(default)]
+    pub route: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ToolMapParams {
+    /// Repository name. Omit when only one indexed repository exists.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Optional tool name substring.
+    #[serde(default)]
+    pub tool: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ApiImpactParams {
+    /// Repository name. Omit when only one indexed repository exists.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Route path substring, for example /api/users.
+    #[serde(default)]
+    pub route: Option<String>,
+    /// Handler file substring, used when route is unknown.
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+impl SymbolParams {
+    fn selector(&self) -> SymbolSelector {
+        SymbolSelector {
+            symbol: self.symbol.clone(),
+            uid: self.uid.clone(),
+            file_path: self.file_path.clone(),
+            kind: self.kind.clone(),
+        }
+    }
+}
+
+impl ReferencesParams {
+    fn selector(&self) -> SymbolSelector {
+        SymbolSelector {
+            symbol: self.symbol.clone(),
+            uid: self.uid.clone(),
+            file_path: self.file_path.clone(),
+            kind: self.kind.clone(),
+        }
+    }
+}
+
+impl ImpactParams {
+    fn selector(&self) -> SymbolSelector {
+        SymbolSelector {
+            symbol: self.symbol.clone(),
+            uid: self.uid.clone(),
+            file_path: self.file_path.clone(),
+            kind: self.kind.clone(),
+        }
+    }
 }
 
 // ---- 工具 ----
@@ -225,7 +337,8 @@ impl AkaMcpServer {
         &self,
         Parameters(p): Parameters<SymbolParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.run(move |b| ops::context(b, p.repo.as_deref(), &p.symbol))
+        let selector = p.selector();
+        self.run(move |b| ops::context_select(b, p.repo.as_deref(), &selector))
             .await
     }
 
@@ -236,7 +349,8 @@ impl AkaMcpServer {
         &self,
         Parameters(p): Parameters<SymbolParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.run(move |b| ops::find_definition(b, p.repo.as_deref(), &p.symbol))
+        let selector = p.selector();
+        self.run(move |b| ops::find_definition_select(b, p.repo.as_deref(), &selector))
             .await
     }
 
@@ -248,7 +362,8 @@ impl AkaMcpServer {
         Parameters(p): Parameters<ReferencesParams>,
     ) -> Result<CallToolResult, McpError> {
         let limit = clamp_limit(p.limit, ops::DEFAULT_REFS_LIMIT);
-        self.run(move |b| ops::references(b, p.repo.as_deref(), &p.symbol, limit))
+        let selector = p.selector();
+        self.run(move |b| ops::references_select(b, p.repo.as_deref(), &selector, limit))
             .await
     }
 
@@ -261,8 +376,13 @@ impl AkaMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let depth = p.depth.unwrap_or(ops::DEFAULT_IMPACT_DEPTH).clamp(1, 10);
         let limit = clamp_limit(p.limit, ops::DEFAULT_IMPACT_LIMIT);
-        self.run(move |b| ops::impact(b, p.repo.as_deref(), &p.symbol, depth, limit))
-            .await
+        let direction = ImpactDirection::parse(p.direction.as_deref())
+            .map_err(|e| McpError::invalid_params(format!("{e:#}"), None))?;
+        let selector = p.selector();
+        self.run(move |b| {
+            ops::impact_select(b, p.repo.as_deref(), &selector, direction, depth, limit)
+        })
+        .await
     }
 
     #[tool(
@@ -273,6 +393,64 @@ impl AkaMcpServer {
         Parameters(p): Parameters<AnalyzeParams>,
     ) -> Result<CallToolResult, McpError> {
         self.run(move |b| ops::analyze(b, &p.repo_path)).await
+    }
+
+    #[tool(
+        description = "Analyze git changes in an indexed repository. Maps changed diff hunks to indexed symbols and reports affected execution flows. Use before committing or refactoring to check whether the touched symbols/processes match expectations."
+    )]
+    pub async fn detect_changes(
+        &self,
+        Parameters(p): Parameters<DetectChangesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let scope = p.scope.unwrap_or_else(|| "unstaged".into());
+        self.run(move |b| ops::detect_changes(b, p.repo.as_deref(), &scope, p.base_ref.as_deref()))
+            .await
+    }
+
+    #[tool(
+        description = "Show API route mappings: route nodes, handler files, middleware, consumers, response-shape keys, and linked execution flows when available. Use before editing route handlers or API consumers."
+    )]
+    pub async fn route_map(
+        &self,
+        Parameters(p): Parameters<RouteMapParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(move |b| ops::route_map(b, p.repo.as_deref(), p.route.as_deref()))
+            .await
+    }
+
+    #[tool(
+        description = "Show MCP/RPC tool definitions: tool nodes, definition files, descriptions, handlers, and linked execution flows when available."
+    )]
+    pub async fn tool_map(
+        &self,
+        Parameters(p): Parameters<ToolMapParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(move |b| ops::tool_map(b, p.repo.as_deref(), p.tool.as_deref()))
+            .await
+    }
+
+    #[tool(
+        description = "Check API response shapes against consumer property accesses. Requires Route responseKeys/errorKeys plus FETCHES edge key metadata; returns an explicit empty message when the index lacks shape data."
+    )]
+    pub async fn shape_check(
+        &self,
+        Parameters(p): Parameters<RouteMapParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(move |b| ops::shape_check(b, p.repo.as_deref(), p.route.as_deref()))
+            .await
+    }
+
+    #[tool(
+        description = "Pre-change impact report for an API route handler: consumers, response-shape mismatches, middleware, linked execution flows, and risk level. Pass route or file."
+    )]
+    pub async fn api_impact(
+        &self,
+        Parameters(p): Parameters<ApiImpactParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(move |b| {
+            ops::api_impact(b, p.repo.as_deref(), p.route.as_deref(), p.file.as_deref())
+        })
+        .await
     }
 
     #[tool(

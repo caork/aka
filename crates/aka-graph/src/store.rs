@@ -120,6 +120,16 @@ impl NodeRow {
     }
 }
 
+/// 沿某条边抵达的节点（带边类型和 reason）。用于服务层做 GitNexus-like
+/// route/tool map，而不暴露 GraphStore 内部 SQLite 连接。
+#[derive(Debug, Clone)]
+pub struct LinkedNodeRow {
+    pub node: NodeRow,
+    pub edge_type: String,
+    pub reason: String,
+    pub step: Option<u32>,
+}
+
 impl GraphStore {
     /// 新建（或打开已存在的）图库文件并确保 schema 就绪。
     pub fn create(db: &Path) -> Result<Self> {
@@ -301,6 +311,95 @@ impl GraphStore {
              LIMIT ?3"
         ))?;
         let rows = stmt.query_map(params![pattern, name, limit as i64], NodeRow::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 按 label 列出节点；`name_contains` 为大小写敏感子串过滤，保持与
+    /// GitNexus `CONTAINS` 语义接近。用于 Route/Tool 这类应用语义节点。
+    pub fn nodes_by_label(
+        &self,
+        label: &str,
+        name_contains: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<NodeRow>> {
+        let pattern = name_contains.map(|s| format!("%{}%", escape_like(s)));
+        let sql = match pattern.as_ref() {
+            Some(_) => format!(
+                "SELECT {NODE_COLS} FROM nodes \
+                 WHERE label = ?1 AND name LIKE ?2 ESCAPE '\\' \
+                 ORDER BY name ASC, rowid ASC LIMIT ?3"
+            ),
+            None => format!(
+                "SELECT {NODE_COLS} FROM nodes \
+                 WHERE label = ?1 ORDER BY name ASC, rowid ASC LIMIT ?2"
+            ),
+        };
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = if let Some(pattern) = pattern {
+            stmt.query_map(params![label, pattern, limit as i64], NodeRow::from_row)?
+        } else {
+            stmt.query_map(params![label, limit as i64], NodeRow::from_row)?
+        };
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn incoming_linked_nodes(
+        &self,
+        target_rowid: i64,
+        edge_types: &[&str],
+    ) -> Result<Vec<LinkedNodeRow>> {
+        self.linked_nodes(target_rowid, edge_types, false)
+    }
+
+    pub fn outgoing_linked_nodes(
+        &self,
+        source_rowid: i64,
+        edge_types: &[&str],
+    ) -> Result<Vec<LinkedNodeRow>> {
+        self.linked_nodes(source_rowid, edge_types, true)
+    }
+
+    fn linked_nodes(
+        &self,
+        rowid: i64,
+        edge_types: &[&str],
+        outgoing: bool,
+    ) -> Result<Vec<LinkedNodeRow>> {
+        if edge_types.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", edge_types.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (edge_anchor, node_side) = if outgoing {
+            ("e.source", "e.target")
+        } else {
+            ("e.target", "e.source")
+        };
+        let linked_node_cols = "nodes.rowid, nodes.id, nodes.label, nodes.name, nodes.file_path, \
+             nodes.start_line, nodes.end_line, nodes.props";
+        let sql = format!(
+            "SELECT {linked_node_cols}, t.name, e.reason, e.step \
+             FROM edges e \
+             JOIN edge_types t ON t.type_id = e.type_id \
+             JOIN nodes ON nodes.rowid = {node_side} \
+             WHERE {edge_anchor} = ?1 AND t.name IN ({placeholders}) \
+             ORDER BY t.name ASC, nodes.file_path ASC, nodes.start_line ASC, nodes.rowid ASC"
+        );
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(edge_types.len() + 1);
+        params_vec.push(&rowid);
+        for ty in edge_types {
+            params_vec.push(ty);
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_vec.as_slice(), |row| {
+            Ok(LinkedNodeRow {
+                node: NodeRow::from_row(row)?,
+                edge_type: row.get(8)?,
+                reason: row.get(9)?,
+                step: row.get(10)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use aka_core::{
-    load_index_state, registry::now_unix, save_index_state, ArtifactDir, EngineEvent, EngineRunner,
-    IndexState, Registry, RepoEntry, RepoPaths,
+    build_parse_cache_manifest, load_index_state, registry::now_unix, save_index_state,
+    save_parse_cache_manifest, ArtifactDir, EngineEvent, EngineRunner, IndexDelta, IndexState,
+    Registry, RepoEntry, RepoPaths,
 };
 use anyhow::{Context, Result};
 
@@ -85,7 +86,10 @@ pub fn run_analyze_with_progress(
 
     let current_state = IndexState::compute(&repo, engine_sha.clone(), no_chunks)
         .with_context(|| format!("compute file hashes for {}", repo.display()))?;
-    if can_reuse_existing_index(&paths, &current_state)? {
+    let previous_state = load_index_state(&paths.index_state_path())
+        .with_context(|| format!("load index state {}", paths.index_state_path().display()))?;
+    let delta = current_state.delta_from(previous_state.as_ref());
+    if can_reuse_existing_index(&paths, previous_state.as_ref(), &current_state)? {
         if let Some(cb) = progress.as_mut() {
             cb(&EngineEvent::Phase {
                 phase: "Reusing unchanged index".into(),
@@ -94,15 +98,17 @@ pub fn run_analyze_with_progress(
             });
         }
         let artifact = ArtifactDir::open(&artifact_dir)?;
+        save_parse_cache_snapshot(&paths, &artifact, &current_state, delta.clone())?;
         register(&repo, &paths, &artifact, engine_sha)?;
         return Ok(format!(
-            "aka ▸ {} 未变化：复用现有索引（{} 节点 / {} 边 / {} 切块）",
+            "aka ▸ {} 未变化：复用现有索引（{} 节点 / {} 边 / {} 切块；delta {}）",
             repo.file_name()
                 .map(|n| n.to_string_lossy())
                 .unwrap_or_default(),
             artifact.manifest.stats.nodes,
             artifact.manifest.stats.edges,
             artifact.manifest.stats.chunks,
+            delta.summary(),
         ));
     }
 
@@ -115,7 +121,11 @@ pub fn run_analyze_with_progress(
     std::fs::create_dir_all(&engine_cache_dir)
         .with_context(|| format!("create engine cache dir {}", engine_cache_dir.display()))?;
     std::fs::create_dir_all(paths.parse_cache_dir())?;
-    eprintln!("aka ▸ engine 解析 {} …", repo.display());
+    eprintln!(
+        "aka ▸ engine 解析 {} …（文件 delta {}）",
+        repo.display(),
+        delta.summary()
+    );
 
     let mut last_phase = String::new();
     let stats = runner.analyze(
@@ -161,6 +171,7 @@ pub fn run_analyze_with_progress(
     let artifact = open_artifact_after_emit(&artifact_dir, &stats)?;
     eprintln!("aka ▸ 构建索引 …");
     let idx = indexer::index_artifact(&artifact, &paths)?;
+    save_parse_cache_snapshot(&paths, &artifact, &current_state, delta.clone())?;
 
     if let Some(cb) = progress.as_mut() {
         cb(&EngineEvent::Phase {
@@ -174,7 +185,7 @@ pub fn run_analyze_with_progress(
         .with_context(|| format!("save index state {}", paths.index_state_path().display()))?;
 
     let summary = format!(
-        "aka ▸ {} 就绪：{} 节点 / {} 边（悬空跳过 {}）/ {} 切块入索引{}",
+        "aka ▸ {} 就绪：{} 节点 / {} 边（悬空跳过 {}）/ {} 切块入索引；delta {}{}",
         repo.file_name()
             .map(|n| n.to_string_lossy())
             .unwrap_or_default(),
@@ -182,6 +193,7 @@ pub fn run_analyze_with_progress(
         idx.edges,
         idx.dangling_edges,
         idx.chunks,
+        delta.summary(),
         if idx.bad_lines > 0 {
             format!("；坏行 {}", idx.bad_lines)
         } else {
@@ -191,10 +203,12 @@ pub fn run_analyze_with_progress(
     Ok(summary)
 }
 
-fn can_reuse_existing_index(paths: &RepoPaths, current_state: &IndexState) -> Result<bool> {
-    let Some(previous) = load_index_state(&paths.index_state_path())
-        .with_context(|| format!("load index state {}", paths.index_state_path().display()))?
-    else {
+fn can_reuse_existing_index(
+    paths: &RepoPaths,
+    previous: Option<&IndexState>,
+    current_state: &IndexState,
+) -> Result<bool> {
+    let Some(previous) = previous else {
         return Ok(false);
     };
     if !previous.is_reusable_for(current_state) {
@@ -204,6 +218,24 @@ fn can_reuse_existing_index(paths: &RepoPaths, current_state: &IndexState) -> Re
         return Ok(false);
     }
     Ok(ArtifactDir::open(paths.artifact_dir()).is_ok())
+}
+
+fn save_parse_cache_snapshot(
+    paths: &RepoPaths,
+    artifact: &ArtifactDir,
+    current_state: &IndexState,
+    delta: IndexDelta,
+) -> Result<()> {
+    let manifest = build_parse_cache_manifest(artifact, current_state, delta)?;
+    save_parse_cache_manifest(&paths.parse_cache_manifest_path(), &manifest).with_context(
+        || {
+            format!(
+                "save parse-cache manifest {}",
+                paths.parse_cache_manifest_path().display()
+            )
+        },
+    )?;
+    Ok(())
 }
 
 fn register(

@@ -10,13 +10,23 @@ use crate::store::GraphStore;
 pub const CALLS_TYPE: &str = "CALLS";
 
 /// impact 反向 BFS 允许的边类型集合。
-pub const IMPACT_EDGE_TYPES: [&str; 6] = [
+pub const IMPACT_EDGE_TYPES: [&str; 16] = [
     "CALLS",
     "IMPORTS",
     "EXTENDS",
+    "INHERITS",
     "IMPLEMENTS",
     "HAS_METHOD",
+    "HAS_PROPERTY",
     "MEMBER_OF",
+    "READS",
+    "WRITES",
+    "ACCESSES",
+    "OVERRIDES",
+    "METHOD_OVERRIDES",
+    "METHOD_IMPLEMENTS",
+    "HTTP_CALLS",
+    "FETCHES",
 ];
 
 /// 一跳邻居（neighbors 查询结果）。

@@ -47,7 +47,8 @@ export async function checkForAppUpdate(
     throw new Error("发布清单缺少 version/latestVersion 字段");
   }
 
-  const assets = collectAssets(manifest);
+  const currentPlatform = currentReleasePlatform();
+  const assets = sortAssetsForPlatform(collectAssets(manifest), currentPlatform);
   return {
     currentVersion,
     latestVersion,
@@ -68,7 +69,7 @@ export async function checkForAppUpdate(
     ]),
     fetchedAt: new Date().toISOString(),
     assets,
-    currentPlatform: currentReleasePlatform(),
+    currentPlatform,
   };
 }
 
@@ -272,11 +273,12 @@ function assetFromUnknown(
   const platform = inferPlatform(searchText);
   const kind = inferKind(searchText);
   if (!platform || !kind) return null;
+  const label = object ? readFirstString(object, ["label", "title"]) : undefined;
 
   return {
     platform,
     kind,
-    label: platform === "macos" ? "macOS DMG" : "Windows EXE",
+    label: label ?? (platform === "macos" ? "macOS DMG" : "Windows EXE"),
     url,
     name,
     size: object ? readNumber(object, ["size", "sizeBytes", "size_bytes"]) : undefined,
@@ -289,6 +291,7 @@ function readUrl(object: JsonObject): string | undefined {
     "url",
     "downloadUrl",
     "download_url",
+    "browserDownloadUrl",
     "browser_download_url",
     "href",
   ]);
@@ -344,6 +347,20 @@ function currentReleasePlatform(): ReleaseInfo["currentPlatform"] {
   if (platform.includes("win") || userAgent.includes("windows")) return "windows";
   if (platform.includes("linux") || userAgent.includes("linux")) return "linux";
   return "unknown";
+}
+
+function sortAssetsForPlatform(
+  assets: ReleaseAsset[],
+  currentPlatform: ReleaseInfo["currentPlatform"],
+): ReleaseAsset[] {
+  return [...assets].sort((a, b) => {
+    const aCurrent = a.platform === currentPlatform ? 0 : 1;
+    const bCurrent = b.platform === currentPlatform ? 0 : 1;
+    if (aCurrent !== bCurrent) return aCurrent - bCurrent;
+    const platformOrder = a.platform.localeCompare(b.platform);
+    if (platformOrder !== 0) return platformOrder;
+    return a.kind.localeCompare(b.kind);
+  });
 }
 
 function compareVersions(a: string, b: string): number {

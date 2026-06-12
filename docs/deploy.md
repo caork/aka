@@ -115,8 +115,15 @@ docker load -i aka-0.1.0-linux-amd64.docker.tar.gz       # 走 release 资产（
 - `latest.json` — 桌面端更新清单，可同步到 `https://aka.hawkingrad.com/releases/latest.json`
 
 桌面端 Settings → Updates 会读取 hawkingrad 的 `latest.json`。CI 在 tag release 的 checksums 阶段通过
-`scripts/release-manifest.mjs` 生成该文件，至少包含 `version`、`releaseUrl`、`publishedAt`、
-`assets[]`，其中 macOS DMG 与 Windows setup EXE 会被识别为可下载更新包。
+`scripts/release-manifest.mjs` 生成该文件，至少包含 `schemaVersion`、`version`/`latestVersion`、
+`releaseUrl`、`publishedAt`/`pub_date`、`downloads` 与 `assets[]`。`downloads` 按
+`downloads.macos.dmg`、`downloads.windows.exe` 组织，`assets[]` 保留扁平列表兼容旧客户端；每个资产包含
+`platform`、`kind`、`name`、`url`/`downloadUrl`、`size` 与可选 `sha256`。`SHA256SUMS` 只覆盖发布资产，
+不包含 `SHA256SUMS` 自身和 `latest.json`。
+
+桌面包必须内置 native `codebase-memory-mcp` engine。`scripts/package-release.sh` 会在准备 Tauri 资源、
+生成 macOS `.app.zip`、生成 Windows portable zip 前后校验 `engine/codebase-memory-mcp` 或
+`engine/codebase-memory-mcp.exe`，避免把旧的 JS/node engine 目录打进包里却没有 native binary。
 
 `aka-<版本>-...` 裸二进制是 CLI/server 包，能启动 `aka serve` / `aka mcp` / 查询既有索引，但不会打开 GUI；
 桌面窗口请下载 `aka-desktop-<版本>-...`。完整 `aka analyze` 需要 `codebase-memory-mcp` 原生二进制：

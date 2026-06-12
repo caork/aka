@@ -206,7 +206,7 @@ export default function AppSettingsModal({
                     key={asset.url}
                     asset={asset}
                     current={asset.platform === release.currentPlatform}
-                    disabled={!release.hasUpdate || openingUrl !== null}
+                    disabled={openingUrl !== null}
                     opening={openingUrl === asset.url}
                     onOpen={() => void openReleaseUrl(asset.url)}
                   />

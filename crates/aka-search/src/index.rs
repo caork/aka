@@ -606,13 +606,24 @@ fn is_symbol_label(label: &str) -> bool {
             | "Const"
             | "Variable"
             | "Route"
+            | "Tool"
+            | "Resource"
     )
 }
 
 fn is_primary_code_symbol(label: &str) -> bool {
     matches!(
         label,
-        "Function" | "Method" | "Class" | "Interface" | "Struct" | "Enum" | "Trait" | "Type"
+        "Function"
+            | "Method"
+            | "Class"
+            | "Interface"
+            | "Struct"
+            | "Enum"
+            | "Trait"
+            | "Type"
+            | "Route"
+            | "Tool"
     )
 }
 

@@ -30,22 +30,35 @@ for (const name of files) {
   if (!fs.statSync(fullPath).isFile()) continue;
   const info = assetInfo(name);
   if (!info) continue;
+  const url = `${baseUrl}/${encodeURIComponent(name)}`;
   assets.push({
     ...info,
     name,
-    url: `${baseUrl}/${encodeURIComponent(name)}`,
+    url,
+    downloadUrl: url,
+    browserDownloadUrl: url,
     size: fs.statSync(fullPath).size,
     sha256: checksums.get(name),
   });
 }
 
+if (assets.length === 0) {
+  console.error(`no desktop update assets found in ${dir}`);
+  process.exit(1);
+}
+
+const downloads = groupedDownloads(assets);
 const manifest = {
+  schemaVersion: 1,
   version,
+  latestVersion: version,
   tag,
   releaseUrl,
   publishedAt,
+  pub_date: publishedAt,
   notes: `AKA ${version}`,
-  platforms: Object.fromEntries(assets.map((asset) => [asset.platform, asset])),
+  downloads,
+  platforms: downloads,
   assets,
 };
 
@@ -67,13 +80,43 @@ function cleanVersion(value) {
 }
 
 function assetInfo(name) {
-  if (/aka-desktop-.+-(aarch64|x86_64)-apple-darwin\.dmg$/.test(name)) {
-    return { platform: "macos", kind: "dmg", label: "macOS DMG" };
+  const mac = name.match(/aka-desktop-.+-(aarch64|x86_64)-apple-darwin\.dmg$/);
+  if (mac) {
+    const arch = mac[1] === "aarch64" ? "arm64" : "x64";
+    return {
+      platform: "macos",
+      kind: "dmg",
+      arch,
+      target: `${mac[1]}-apple-darwin`,
+      label: arch === "arm64" ? "macOS DMG (Apple Silicon)" : "macOS DMG (Intel)",
+    };
   }
   if (/aka-desktop-.+-x86_64-pc-windows-msvc-setup\.exe$/.test(name)) {
-    return { platform: "windows", kind: "exe", label: "Windows EXE" };
+    return {
+      platform: "windows",
+      kind: "exe",
+      arch: "x64",
+      target: "x86_64-pc-windows-msvc",
+      label: "Windows Setup EXE",
+    };
   }
   return null;
+}
+
+function groupedDownloads(assets) {
+  const out = {};
+  for (const asset of assets) {
+    out[asset.platform] ??= {};
+    const existing = out[asset.platform][asset.kind];
+    if (!existing) {
+      out[asset.platform][asset.kind] = asset;
+    } else if (Array.isArray(existing)) {
+      existing.push(asset);
+    } else {
+      out[asset.platform][asset.kind] = [existing, asset];
+    }
+  }
+  return out;
 }
 
 function readChecksums(file) {

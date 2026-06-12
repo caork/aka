@@ -90,6 +90,46 @@ impl GraphStore {
         Ok(out)
     }
 
+    /// 一个入口节点触发的流程：沿出边 ENTRY_POINT_OF 找 Process 节点。
+    ///
+    /// Route/Tool 这类应用语义节点通常不会是 STEP_IN_PROCESS 的步骤，
+    /// 但 GitNexus 会用 `Route|Tool -[ENTRY_POINT_OF]-> Process` 表达它们
+    /// 触发哪些执行流。
+    pub fn entry_processes_of_node(&self, node_rowid: i64) -> Result<Vec<ProcessMembership>> {
+        let mut stmt = self.conn().prepare_cached(
+            "SELECT p.rowid, p.id, p.name, p.props, e.step \
+             FROM edges e \
+             JOIN edge_types t ON t.type_id = e.type_id \
+             JOIN nodes p ON p.rowid = e.target \
+             WHERE e.source = ?1 AND t.name = 'ENTRY_POINT_OF' AND p.label = 'Process' \
+             ORDER BY p.rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![node_rowid], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<u32>>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (process_rowid, process_id, name, props_text, step) = row?;
+            let props: serde_json::Value =
+                serde_json::from_str(&props_text).unwrap_or(serde_json::Value::Null);
+            out.push(ProcessMembership {
+                process_rowid,
+                process_id,
+                name: name.unwrap_or_default(),
+                process_type: props["processType"].as_str().unwrap_or("").to_owned(),
+                step,
+                step_count: props["stepCount"].as_u64().map(|v| v as u32),
+            });
+        }
+        Ok(out)
+    }
+
     /// 批量查询符号参与的流程，避免 query 对每个命中单独查一次 SQLite。
     /// 输出 key 是传入的 node id。
     pub fn processes_of_node_ids(

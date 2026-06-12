@@ -9,6 +9,118 @@
 //! - 方法是同步签名；调用方（async 上下文）负责用 `spawn_blocking` 包装。
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// GitNexus-compatible symbol selector.  `symbol` is the human name, while
+/// `uid` is the graph node id returned as `id` by query/find/context results.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolSelector {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+impl SymbolSelector {
+    pub fn from_symbol(symbol: &str) -> Self {
+        Self {
+            symbol: Some(symbol.to_string()),
+            ..Self::default()
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.symbol.as_deref().is_none_or(str::is_empty)
+            && self.uid.as_deref().is_none_or(str::is_empty)
+    }
+
+    pub fn is_narrowed(&self) -> bool {
+        self.uid.as_deref().is_some_and(|v| !v.is_empty())
+            || self.file_path.as_deref().is_some_and(|v| !v.is_empty())
+            || self.kind.as_deref().is_some_and(|v| !v.is_empty())
+    }
+
+    pub fn label(&self) -> &str {
+        self.symbol
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .or_else(|| self.uid.as_deref().filter(|v| !v.is_empty()))
+            .unwrap_or("")
+    }
+
+    pub fn matches_hit(&self, hit: &SearchHit) -> bool {
+        if self.uid.as_deref().is_some_and(|uid| uid != hit.node_id) {
+            return false;
+        }
+        if self
+            .symbol
+            .as_deref()
+            .is_some_and(|symbol| symbol != hit.name)
+        {
+            return false;
+        }
+        if self
+            .kind
+            .as_deref()
+            .is_some_and(|kind| !kind.eq_ignore_ascii_case(&hit.label))
+        {
+            return false;
+        }
+        if let Some(file) = self.file_path.as_deref() {
+            let want = normalize_selector_path(file);
+            let got = normalize_selector_path(&hit.file_path);
+            if got != want && !got.ends_with(&format!("/{want}")) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn normalize_selector_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_string()
+}
+
+pub fn dedup_symbol_refs(refs: &mut Vec<SymbolRef>) {
+    let mut seen = std::collections::HashSet::new();
+    refs.retain(|r| seen.insert((r.node_id.clone(), r.edge_type.clone(), r.depth)));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactDirection {
+    Upstream,
+    Downstream,
+    Both,
+}
+
+impl ImpactDirection {
+    pub fn parse(raw: Option<&str>) -> anyhow::Result<Self> {
+        match raw.unwrap_or("upstream").to_ascii_lowercase().as_str() {
+            "upstream" | "callers" | "reverse" | "dependents" => Ok(Self::Upstream),
+            "downstream" | "callees" | "forward" | "dependencies" => Ok(Self::Downstream),
+            "both" | "all" => Ok(Self::Both),
+            other => anyhow::bail!(
+                "invalid impact direction {other:?}; expected upstream, downstream, or both"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Upstream => "upstream",
+            Self::Downstream => "downstream",
+            Self::Both => "both",
+        }
+    }
+}
 
 /// 全文 / 符号检索命中。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,6 +174,33 @@ pub struct CodeSearchResult {
     pub directories: Vec<DirectoryCount>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangedRange {
+    pub file_path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChangedSymbol {
+    pub node_id: String,
+    pub name: String,
+    pub label: String,
+    pub file_path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub ranges: Vec<ChangedRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChangeDetection {
+    pub repo: String,
+    pub scope: String,
+    pub base_ref: Option<String>,
+    pub ranges: Vec<ChangedRange>,
+    pub symbols: Vec<ChangedSymbol>,
+}
+
 /// 图遍历得到的符号引用（callers / callees / references / impact）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SymbolRef {
@@ -101,6 +240,49 @@ pub struct QueryEnrichment {
     pub cohesion: f32,
     /// include_content=true 时返回的符号源码切片。
     pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RouteConsumer {
+    pub name: String,
+    pub file_path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accessed_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RouteMapEntry {
+    pub id: String,
+    pub route: String,
+    pub handler: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub middleware: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub error_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumers: Vec<RouteConsumer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flows: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ToolMapEntry {
+    pub id: String,
+    pub name: String,
+    pub file_path: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handlers: Vec<SearchHit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flows: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Value>,
 }
 
 /// 后台导入 / 更新任务的实时进度。
@@ -187,6 +369,22 @@ pub trait Backend: Send + Sync + 'static {
     /// 按符号名精确定位定义（可能重名，返回多条）。
     fn find_definition(&self, repo: Option<&str>, symbol: &str) -> anyhow::Result<Vec<SearchHit>>;
 
+    /// GitNexus-compatible definition lookup with uid/file/kind disambiguation.
+    fn find_definition_by_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+    ) -> anyhow::Result<Vec<SearchHit>> {
+        let Some(symbol) = selector.symbol.as_deref() else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .find_definition(repo, symbol)?
+            .into_iter()
+            .filter(|hit| selector.matches_hit(hit))
+            .collect())
+    }
+
     /// 指向该符号的所有引用边（任意边类型，一跳）。
     fn references(
         &self,
@@ -194,6 +392,18 @@ pub trait Backend: Send + Sync + 'static {
         symbol: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<SymbolRef>>;
+
+    fn references_by_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SymbolRef>> {
+        let Some(symbol) = selector.symbol.as_deref() else {
+            return Ok(Vec::new());
+        };
+        self.references(repo, symbol, limit)
+    }
 
     /// 反向调用链（谁调用了它），BFS 到 `depth` 跳。
     fn callers(
@@ -203,6 +413,18 @@ pub trait Backend: Send + Sync + 'static {
         depth: u32,
     ) -> anyhow::Result<Vec<SymbolRef>>;
 
+    fn callers_by_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        depth: u32,
+    ) -> anyhow::Result<Vec<SymbolRef>> {
+        let Some(symbol) = selector.symbol.as_deref() else {
+            return Ok(Vec::new());
+        };
+        self.callers(repo, symbol, depth)
+    }
+
     /// 正向调用链（它调用了谁），BFS 到 `depth` 跳。
     fn callees(
         &self,
@@ -210,6 +432,18 @@ pub trait Backend: Send + Sync + 'static {
         symbol: &str,
         depth: u32,
     ) -> anyhow::Result<Vec<SymbolRef>>;
+
+    fn callees_by_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        depth: u32,
+    ) -> anyhow::Result<Vec<SymbolRef>> {
+        let Some(symbol) = selector.symbol.as_deref() else {
+            return Ok(Vec::new());
+        };
+        self.callees(repo, symbol, depth)
+    }
 
     /// 改动影响面：可达的反向依赖集合，截断到 `limit`。
     fn impact(
@@ -219,6 +453,38 @@ pub trait Backend: Send + Sync + 'static {
         depth: u32,
         limit: usize,
     ) -> anyhow::Result<Vec<SymbolRef>>;
+
+    fn impact_by_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        direction: ImpactDirection,
+        depth: u32,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SymbolRef>> {
+        match direction {
+            ImpactDirection::Upstream => {
+                let Some(symbol) = selector.symbol.as_deref() else {
+                    return Ok(Vec::new());
+                };
+                self.impact(repo, symbol, depth, limit)
+            }
+            ImpactDirection::Downstream => self.callees_by_selector(repo, selector, depth),
+            ImpactDirection::Both => {
+                let mut out = self.impact_by_selector(
+                    repo,
+                    selector,
+                    ImpactDirection::Upstream,
+                    depth,
+                    limit,
+                )?;
+                out.extend(self.callees_by_selector(repo, selector, depth)?);
+                dedup_symbol_refs(&mut out);
+                out.truncate(limit);
+                Ok(out)
+            }
+        }
+    }
 
     /// 节点所属的执行流程（沿 `符号-[STEP_IN_PROCESS]->Process` 边查归属）。
     /// `node_id` 是图谱节点 id（不是符号名）；节点不存在或没有流程数据
@@ -254,6 +520,34 @@ pub trait Backend: Send + Sync + 'static {
 
     /// 触发（重新）分析一个仓库，返回任务描述 / 结果摘要。
     fn analyze(&self, repo_path: &str) -> anyhow::Result<String>;
+
+    fn detect_changes(
+        &self,
+        repo: Option<&str>,
+        scope: &str,
+        base_ref: Option<&str>,
+    ) -> anyhow::Result<ChangeDetection> {
+        let _ = (repo, scope, base_ref);
+        anyhow::bail!("detect_changes not supported by this backend")
+    }
+
+    fn route_map(
+        &self,
+        repo: Option<&str>,
+        route: Option<&str>,
+    ) -> anyhow::Result<Vec<RouteMapEntry>> {
+        let _ = (repo, route);
+        anyhow::bail!("route_map not supported by this backend")
+    }
+
+    fn tool_map(
+        &self,
+        repo: Option<&str>,
+        tool: Option<&str>,
+    ) -> anyhow::Result<Vec<ToolMapEntry>> {
+        let _ = (repo, tool);
+        anyhow::bail!("tool_map not supported by this backend")
+    }
 
     /// 图 LOD 快照（aka-graph `LodGraph` 的 JSON 形状），给可视化用。
     /// `max_nodes = None` 时由实现解析 per-repo 的 render_max_nodes 设置

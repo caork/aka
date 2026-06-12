@@ -163,6 +163,75 @@ copy_engine_resource() {
     cp "${REPO_ROOT}/engine/ENGINE_SHA" "${dst}/ENGINE_SHA"
   fi
   echo "==> 内置 CBM engine: ${bin} -> ${dst}/${exe}"
+  assert_engine_resource_dir "${platform}" "${dst}"
+}
+
+find_engine_resource_bin() {
+  local platform dir exe
+  platform="$1"
+  dir="$2"
+  exe="$(cbm_exe_for_platform "${platform}")"
+  first_existing_file \
+    "${dir}/${exe}" \
+    "${dir}/bin/${exe}" \
+    "${dir}/build/c/${exe}"
+}
+
+assert_engine_resource_dir() {
+  local platform dir engine_bin
+  platform="$1"
+  dir="$2"
+  engine_bin="$(find_engine_resource_bin "${platform}" "${dir}" || true)"
+  if [[ -z "${engine_bin}" ]]; then
+    echo "error: 桌面 engine 资源缺少 native CBM 二进制: ${dir}" >&2
+    echo "       需要 $(cbm_exe_for_platform "${platform}")，不要打入旧的 JS/node engine 目录。" >&2
+    return 1
+  fi
+  if [[ "${platform}" != "win-x64" && ! -x "${engine_bin}" ]]; then
+    echo "error: 桌面 engine 资源不可执行: ${engine_bin}" >&2
+    return 1
+  fi
+  echo "==> 校验桌面 engine 资源: ${engine_bin}"
+}
+
+assert_app_bundle_engine() {
+  local app_path platform resources dir engine_bin
+  app_path="$1"
+  platform="$2"
+  resources="${app_path}/Contents/Resources"
+  [[ -d "${resources}" ]] || { echo "error: app 缺少 Resources 目录: ${resources}" >&2; return 1; }
+  for dir in "${resources}/engine" "${resources}/resources/engine"; do
+    engine_bin="$(find_engine_resource_bin "${platform}" "${dir}" || true)"
+    if [[ -n "${engine_bin}" ]]; then
+      if [[ "${platform}" != "win-x64" && ! -x "${engine_bin}" ]]; then
+        echo "error: app 包内 engine 不可执行: ${engine_bin}" >&2
+        return 1
+      fi
+      echo "==> 校验 app 包内 engine: ${engine_bin}"
+      return 0
+    fi
+  done
+  echo "error: app 包内缺少 native CBM engine: ${resources}/{engine,resources/engine}" >&2
+  return 1
+}
+
+assert_zip_has_engine() {
+  local zip_path platform prefix exe listing base entry
+  zip_path="$1"
+  platform="$2"
+  prefix="$3"
+  exe="$(cbm_exe_for_platform "${platform}")"
+  [[ -f "${zip_path}" ]] || { echo "error: 找不到 zip: ${zip_path}" >&2; return 1; }
+  listing="$(unzip -Z1 "${zip_path}")"
+  for base in "engine" "resources/engine" "engine/bin" "resources/engine/bin" "engine/build/c" "resources/engine/build/c"; do
+    entry="${prefix:+${prefix}/}${base}/${exe}"
+    if grep -qxF "${entry}" <<< "${listing}"; then
+      echo "==> 校验 zip 包内 engine: ${entry}"
+      return 0
+    fi
+  done
+  echo "error: zip 包内缺少 native CBM engine: ${zip_path}" >&2
+  return 1
 }
 
 prepare_desktop_resources() {
@@ -260,7 +329,6 @@ package_binary() {
   bin_archive="${DIST_DIR}/aka-${VERSION}-${triple}.${archive_kind}"
   rm -f "${bin_archive}"
   stage="$(mktemp -d)"
-  trap 'rm -rf "${stage}"' EXIT
   cp "${bin}" "${stage}/${bin_name}"
   if [[ "${bin_name}" = "aka" ]] && command -v strip >/dev/null 2>&1; then
     strip "${stage}/${bin_name}"
@@ -270,12 +338,13 @@ package_binary() {
   else
     COPYFILE_DISABLE=1 tar -czf "${bin_archive}" -C "${stage}" "${bin_name}"
   fi
+  rm -rf "${stage}"
   echo "==> ${bin_archive}"
   BIN_ARCHIVE="${bin_archive}"
 }
 
 package_desktop() {
-  local host_os host_arch desktop_triple app_path desktop_dmg desktop_zip
+  local host_os host_arch desktop_triple desktop_platform app_path desktop_dmg desktop_zip
   host_os="$(uname -s)"
   host_arch="$(uname -m)"
 
@@ -286,6 +355,7 @@ package_desktop() {
         x86_64)        desktop_triple="x86_64-apple-darwin" ;;
         *) echo "error: 不支持的 macOS 架构 ${host_arch}" >&2; return 1 ;;
       esac
+      desktop_platform="$(platform_from_triple "${desktop_triple}")"
 
       if [[ "${SKIP_BUILD}" -eq 0 ]]; then
         prepare_desktop_resources "${desktop_triple}"
@@ -295,6 +365,7 @@ package_desktop() {
 
       app_path="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/macos/AKA.app"
       [[ -d "${app_path}" ]] || { echo "error: 找不到 ${app_path}（先去掉 --skip-build 构建一次）" >&2; return 1; }
+      assert_app_bundle_engine "${app_path}" "${desktop_platform}"
 
       desktop_dmg="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.dmg"
       rm -f "${desktop_dmg}"
@@ -304,6 +375,7 @@ package_desktop() {
       desktop_zip="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.app.zip"
       rm -f "${desktop_zip}"
       COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "${app_path}" "${desktop_zip}"
+      assert_zip_has_engine "${desktop_zip}" "${desktop_platform}" "AKA.app/Contents/Resources"
       echo "==> ${desktop_zip}"
       ;;
     *)
@@ -347,9 +419,10 @@ package_windows_desktop() {
   stage="$(mktemp -d)"
   cp "${exe_path}" "${stage}/AKA.exe"
   engine_src="${TAURI_RESOURCES_DIR}/engine"
-  [[ -f "${engine_src}/codebase-memory-mcp.exe" ]] || { echo "error: 找不到 Windows portable 所需 CBM engine: ${engine_src}/codebase-memory-mcp.exe" >&2; return 1; }
+  assert_engine_resource_dir "win-x64" "${engine_src}"
   cp -R "${engine_src}" "${stage}/engine"
   (cd "${stage}" && zip -q -X -r "${portable_zip}" AKA.exe engine)
+  assert_zip_has_engine "${portable_zip}" "win-x64" ""
   rm -rf "${stage}"
   echo "==> ${portable_zip}"
 }
@@ -359,7 +432,7 @@ if [[ "${CHECKSUMS_ONLY}" -eq 1 ]]; then
   files=()
   while IFS= read -r f; do
     files+=("${f#./}")
-  done < <(find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name .DS_Store | sort)
+  done < <(find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name latest.json ! -name .DS_Store | sort)
   [[ ${#files[@]} -gt 0 ]] || { echo "error: dist/ 下没有可校验的产物" >&2; exit 1; }
   shasum -a 256 "${files[@]}" > SHA256SUMS
   echo "==> dist/SHA256SUMS"

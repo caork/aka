@@ -99,6 +99,74 @@ async fn query_returns_hits() {
 }
 
 #[tokio::test]
+async fn detect_changes_returns_changed_symbols_and_processes() {
+    let res = app()
+        .oneshot(post_json(
+            "/api/detect-changes",
+            json!({ "repo": "fixture", "scope": "unstaged" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["repo"], "fixture");
+    assert_eq!(v["changed_count"], 1);
+    assert_eq!(v["changed_symbols"][0]["id"], "fixture:fn:handle_request");
+    assert_eq!(v["affected_processes"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn route_tool_shape_and_api_impact_endpoints() {
+    let res = app()
+        .oneshot(post_json(
+            "/api/route-map",
+            json!({ "repo": "fixture", "route": "config" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["total"], 1);
+    assert_eq!(v["routes"][0]["route"], "/api/config");
+    assert_eq!(v["routes"][0]["consumers"][0]["accessedKeys"][1], "missing");
+
+    let res = app()
+        .oneshot(post_json(
+            "/api/tool-map",
+            json!({ "repo": "fixture", "tool": "index" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["tools"][0]["name"], "index_repo");
+    assert_eq!(v["tools"][0]["handlers"][0]["name"], "handle_request");
+
+    let res = app()
+        .oneshot(post_json(
+            "/api/shape-check",
+            json!({ "repo": "fixture", "route": "config" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["mismatches"], 1);
+    assert_eq!(v["routes"][0]["status"], "MISMATCH");
+
+    let res = app()
+        .oneshot(post_json(
+            "/api/api-impact",
+            json!({ "repo": "fixture", "route": "config" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["route"]["impactSummary"]["riskLevel"], "MEDIUM");
+}
+
+#[tokio::test]
 async fn search_code_returns_raw_matches_and_directory_distribution() {
     let res = app()
         .oneshot(post_json(

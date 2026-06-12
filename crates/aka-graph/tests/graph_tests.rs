@@ -458,11 +458,13 @@ fn process_store() -> GraphStore {
             "Process",
             json!({"name": "alpha-loop", "processType": "cycle"}),
         ),
+        node("route", "Route", json!({"name": "/api/config"})),
     ];
     let edges = vec![
         edge("main", "a", "CALLS"),
         edge("a", "b", "CALLS"),
         edge("main", "proc1", "ENTRY_POINT_OF"),
+        edge("route", "proc1", "ENTRY_POINT_OF"),
         step_edge("b", "proc1", 3),
         step_edge("main", "proc1", 1),
         step_edge("a", "proc1", 2),
@@ -470,8 +472,8 @@ fn process_store() -> GraphStore {
         edge("b", "proc2", "STEP_IN_PROCESS"),
     ];
     let stats = store.ingest(nodes.into_iter(), edges.into_iter()).unwrap();
-    assert_eq!(stats.nodes, 5);
-    assert_eq!(stats.edges, 8);
+    assert_eq!(stats.nodes, 6);
+    assert_eq!(stats.edges, 9);
     store
 }
 
@@ -504,6 +506,24 @@ fn processes_of_node_memberships() {
     // Process 自身没有出向 STEP_IN_PROCESS → 空。
     assert!(store
         .processes_of_node(rowid_of("proc1"))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn entry_processes_of_node_reads_route_and_tool_flows() {
+    let store = process_store();
+    let rowid_of = |id: &str| store.node_by_id(id).unwrap().unwrap().rowid;
+
+    let entries = store.entry_processes_of_node(rowid_of("route")).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].process_id, "proc1");
+    assert_eq!(entries[0].name, "main→beta");
+    assert_eq!(entries[0].step, None);
+
+    // ENTRY_POINT_OF remains distinct from STEP_IN_PROCESS membership.
+    assert!(store
+        .processes_of_node(rowid_of("route"))
         .unwrap()
         .is_empty());
 }

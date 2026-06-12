@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -172,9 +173,13 @@ impl EngineRunner {
         })?;
 
         let stderr = child.stderr.take().expect("piped stderr");
+        let (phase_tx, phase_rx) = mpsc::channel();
         let stderr_handle = std::thread::spawn(move || {
             let mut tail: Vec<String> = Vec::new();
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Some(phase) = parse_cbm_progress_phase(&line) {
+                    let _ = phase_tx.send(phase);
+                }
                 tail.push(line);
                 if tail.len() > 40 {
                     tail.remove(0);
@@ -198,10 +203,14 @@ impl EngineRunner {
                     stderr_tail: join_tail(stderr_tail, line),
                 });
             }
+            drain_cbm_progress(&phase_rx, &mut on_event);
         }
+        drain_cbm_progress(&phase_rx, &mut on_event);
 
         let status = wait_for_done_exit(&mut child, Self::DONE_EXIT_GRACE)?;
+        drain_cbm_progress(&phase_rx, &mut on_event);
         let stderr_tail = stderr_handle.join().unwrap_or_default();
+        drain_cbm_progress(&phase_rx, &mut on_event);
         if !status.success() {
             return Err(EngineError::Failed {
                 code: status.code(),
@@ -269,6 +278,32 @@ fn emit_phase(
     });
 }
 
+fn drain_cbm_progress(rx: &mpsc::Receiver<String>, on_event: &mut impl FnMut(&EngineEvent)) {
+    while let Ok(phase) = rx.try_recv() {
+        emit_phase(on_event, phase, 0, 0);
+    }
+}
+
+fn parse_cbm_progress_phase(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "Starting incremental index" {
+        return Some("codebase-memory:incremental-index".into());
+    }
+    if trimmed == "Starting full index" {
+        return Some("codebase-memory:full-index".into());
+    }
+    if trimmed.starts_with('[') {
+        return Some(format!("codebase-memory:{trimmed}"));
+    }
+    if trimmed.starts_with("Discovering files") || trimmed.starts_with("Extracting:") {
+        return Some(format!("codebase-memory:{trimmed}"));
+    }
+    None
+}
+
 fn join_tail(stderr_tail: String, stdout_line: String) -> String {
     if stderr_tail.trim().is_empty() {
         stdout_line
@@ -319,7 +354,7 @@ fn export_artifacts(
     no_chunks: bool,
 ) -> Result<ArtifactStats, EngineError> {
     let conn = open_cbm_db(db_path)?;
-    let synth = synthesize_graph(&conn, project)?;
+    let synth = synthesize_graph(&conn, project, repo)?;
     let mut stats = ArtifactStats {
         files: count_files(&conn, project)?,
         nodes: export_nodes(&conn, project, &out_dir.join("nodes.ndjson"), &synth)?,
@@ -379,7 +414,7 @@ fn export_nodes(
     while let Some(row) = rows.next()? {
         let cbm_id: i64 = row.get(0)?;
         let label = text_col(row, 1)?;
-        let name = text_col(row, 2)?;
+        let mut name = text_col(row, 2)?;
         let qn = text_col(row, 3)?;
         let file_path = text_col(row, 4)?;
         let start_line: i64 = row.get(5)?;
@@ -387,6 +422,14 @@ fn export_nodes(
         let props_text = text_col(row, 7)?;
 
         let mut properties = parse_props(&props_text);
+        if label == "Route" {
+            if let Some(route) = route_from_path(&file_path) {
+                name = route;
+                properties.insert("name".into(), Value::String(name.clone()));
+            }
+            sanitize_string_array_prop(&mut properties, "responseKeys");
+            sanitize_string_array_prop(&mut properties, "errorKeys");
+        }
         insert_if_missing(&mut properties, "name", Value::String(name));
         insert_if_missing(&mut properties, "qualifiedName", Value::String(qn.clone()));
         insert_if_missing(&mut properties, "filePath", Value::String(file_path));
@@ -419,6 +462,18 @@ fn export_nodes(
     }
     for process in &synth.processes {
         let node = process.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
+    for route in synth.routes.iter().filter(|r| r.emit_node) {
+        let node = route.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
+    for tool in synth.tools.iter().filter(|t| t.emit_node) {
+        let node = tool.node_rec();
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
         count += 1;
@@ -479,6 +534,8 @@ fn export_edges(
         .iter()
         .flat_map(SynthCommunity::edge_recs)
         .chain(synth.processes.iter().flat_map(SynthProcess::edge_recs))
+        .chain(synth.routes.iter().flat_map(SynthRoute::edge_recs))
+        .chain(synth.tools.iter().flat_map(SynthTool::edge_recs))
     {
         serde_json::to_writer(&mut out, &edge)?;
         out.write_all(b"\n")?;
@@ -503,6 +560,8 @@ struct SynthNode {
 struct SynthGraph {
     communities: Vec<SynthCommunity>,
     processes: Vec<SynthProcess>,
+    routes: Vec<SynthRoute>,
+    tools: Vec<SynthTool>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -576,6 +635,204 @@ struct SynthProcess {
     process_type: String,
     communities: Vec<CommunityRef>,
     steps: Vec<SynthNode>,
+}
+
+#[derive(Debug, Clone)]
+struct SynthRoute {
+    id: String,
+    route: String,
+    file_path: String,
+    emit_node: bool,
+    handler_id: Option<String>,
+    handler_name: Option<String>,
+    middleware: Vec<String>,
+    response_keys: Vec<String>,
+    error_keys: Vec<String>,
+    consumers: Vec<SynthRouteConsumer>,
+    process_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SynthRouteConsumer {
+    node_id: String,
+    keys: Vec<String>,
+    fetch_count: u32,
+}
+
+impl SynthRoute {
+    fn node_rec(&self) -> NodeRec {
+        let mut properties = Map::new();
+        properties.insert("name".into(), Value::String(self.route.clone()));
+        properties.insert("filePath".into(), Value::String(self.file_path.clone()));
+        properties.insert("source".into(), Value::String("aka-cbm-synth".into()));
+        properties.insert("routeSource".into(), Value::String("source-scan".into()));
+        if let Some(handler_id) = &self.handler_id {
+            properties.insert("handlerId".into(), Value::String(handler_id.clone()));
+        }
+        if let Some(handler_name) = &self.handler_name {
+            properties.insert("handlerName".into(), Value::String(handler_name.clone()));
+        }
+        if !self.middleware.is_empty() {
+            properties.insert(
+                "middleware".into(),
+                Value::Array(self.middleware.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        if !self.response_keys.is_empty() {
+            properties.insert(
+                "responseKeys".into(),
+                Value::Array(
+                    self.response_keys
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        if !self.error_keys.is_empty() {
+            properties.insert(
+                "errorKeys".into(),
+                Value::Array(self.error_keys.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        NodeRec {
+            id: self.id.clone(),
+            label: "Route".into(),
+            properties,
+        }
+    }
+
+    fn edge_recs(&self) -> Vec<EdgeRec> {
+        let mut out = Vec::new();
+        if let Some(handler_id) = &self.handler_id {
+            out.push(EdgeRec {
+                id: format!("{}:handles:{:016x}", self.id, stable_hash(handler_id)),
+                source_id: handler_id.clone(),
+                target_id: self.id.clone(),
+                edge_type: "HANDLES_ROUTE".into(),
+                confidence: 0.65,
+                reason: "aka route synthesis".into(),
+                step: None,
+                evidence: Some(json!({
+                    "source": "aka-cbm-synth",
+                    "kind": "route-handler",
+                    "route": self.route,
+                })),
+            });
+        }
+        for consumer in &self.consumers {
+            out.push(EdgeRec {
+                id: format!(
+                    "{}:fetches:{:016x}",
+                    self.id,
+                    stable_hash(&consumer.node_id)
+                ),
+                source_id: consumer.node_id.clone(),
+                target_id: self.id.clone(),
+                edge_type: "FETCHES".into(),
+                confidence: 0.6,
+                reason: fetch_reason(&consumer.keys, consumer.fetch_count),
+                step: None,
+                evidence: Some(json!({
+                    "source": "aka-cbm-synth",
+                    "kind": "fetch-consumer",
+                    "route": self.route,
+                    "accessedKeys": consumer.keys,
+                    "fetchCount": consumer.fetch_count,
+                })),
+            });
+        }
+        for process_id in &self.process_ids {
+            out.push(EdgeRec {
+                id: format!("{}:entry-process:{:016x}", self.id, stable_hash(process_id)),
+                source_id: self.id.clone(),
+                target_id: process_id.clone(),
+                edge_type: "ENTRY_POINT_OF".into(),
+                confidence: 0.55,
+                reason: "aka route process linkage".into(),
+                step: None,
+                evidence: Some(json!({
+                    "source": "aka-cbm-synth",
+                    "kind": "route-entry-process",
+                    "route": self.route,
+                })),
+            });
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SynthTool {
+    id: String,
+    name: String,
+    file_path: String,
+    emit_node: bool,
+    description: String,
+    handler_id: Option<String>,
+    process_ids: Vec<String>,
+}
+
+impl SynthTool {
+    fn node_rec(&self) -> NodeRec {
+        let mut properties = Map::new();
+        properties.insert("name".into(), Value::String(self.name.clone()));
+        properties.insert("filePath".into(), Value::String(self.file_path.clone()));
+        properties.insert("source".into(), Value::String("aka-cbm-synth".into()));
+        properties.insert("toolSource".into(), Value::String("source-scan".into()));
+        if !self.description.is_empty() {
+            properties.insert(
+                "description".into(),
+                Value::String(self.description.clone()),
+            );
+        }
+        if let Some(handler_id) = &self.handler_id {
+            properties.insert("handlerId".into(), Value::String(handler_id.clone()));
+        }
+        NodeRec {
+            id: self.id.clone(),
+            label: "Tool".into(),
+            properties,
+        }
+    }
+
+    fn edge_recs(&self) -> Vec<EdgeRec> {
+        let mut out = Vec::new();
+        if let Some(handler_id) = &self.handler_id {
+            out.push(EdgeRec {
+                id: format!("{}:handles:{:016x}", self.id, stable_hash(handler_id)),
+                source_id: handler_id.clone(),
+                target_id: self.id.clone(),
+                edge_type: "HANDLES_TOOL".into(),
+                confidence: 0.6,
+                reason: "aka tool synthesis".into(),
+                step: None,
+                evidence: Some(json!({
+                    "source": "aka-cbm-synth",
+                    "kind": "tool-handler",
+                    "tool": self.name,
+                })),
+            });
+        }
+        for process_id in &self.process_ids {
+            out.push(EdgeRec {
+                id: format!("{}:entry-process:{:016x}", self.id, stable_hash(process_id)),
+                source_id: self.id.clone(),
+                target_id: process_id.clone(),
+                edge_type: "ENTRY_POINT_OF".into(),
+                confidence: 0.5,
+                reason: "aka tool process linkage".into(),
+                step: None,
+                evidence: Some(json!({
+                    "source": "aka-cbm-synth",
+                    "kind": "tool-entry-process",
+                    "tool": self.name,
+                })),
+            });
+        }
+        out
+    }
 }
 
 impl SynthProcess {
@@ -666,9 +923,15 @@ impl SynthProcess {
     }
 }
 
-fn synthesize_graph(conn: &Connection, project: &str) -> Result<SynthGraph, EngineError> {
+fn synthesize_graph(
+    conn: &Connection,
+    project: &str,
+    repo: &Path,
+) -> Result<SynthGraph, EngineError> {
     let native_communities = has_native_label(conn, project, "Community")?;
     let native_processes = has_native_label(conn, project, "Process")?;
+    let native_routes = load_native_app_nodes(conn, project, "Route")?;
+    let native_tools = load_native_app_nodes(conn, project, "Tool")?;
     let nodes = load_synth_nodes(conn, project)?;
     if nodes.is_empty() {
         return Ok(SynthGraph::default());
@@ -695,10 +958,14 @@ fn synthesize_graph(conn: &Connection, project: &str) -> Result<SynthGraph, Engi
             &community_memberships,
         )
     };
+    let routes = synthesize_routes_from_sources(repo, &nodes, &processes, &native_routes);
+    let tools = synthesize_tools_from_sources(repo, &nodes, &processes, &native_tools);
 
     Ok(SynthGraph {
         communities,
         processes,
+        routes,
+        tools,
     })
 }
 
@@ -709,6 +976,44 @@ fn has_native_label(conn: &Connection, project: &str, label: &str) -> Result<boo
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+#[derive(Debug, Clone)]
+struct NativeAppNode {
+    id: String,
+    name: String,
+    file_path: String,
+}
+
+fn load_native_app_nodes(
+    conn: &Connection,
+    project: &str,
+    label: &str,
+) -> Result<Vec<NativeAppNode>, EngineError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, qualified_name, file_path, properties \
+         FROM nodes WHERE project = ?1 AND label = ?2 ORDER BY id",
+    )?;
+    let mut rows = stmt.query([project, label])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let cbm_id: i64 = row.get(0)?;
+        let name = text_col(row, 1)?;
+        let qn = text_col(row, 2)?;
+        let file_path = text_col(row, 3)?;
+        let props = parse_props(&text_col(row, 4)?);
+        let name = props
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(&name)
+            .to_string();
+        out.push(NativeAppNode {
+            id: aka_node_id(cbm_id, &qn),
+            name,
+            file_path,
+        });
+    }
+    Ok(out)
 }
 
 fn load_synth_nodes(
@@ -1251,6 +1556,857 @@ fn process_communities(
     communities.into_iter().collect()
 }
 
+fn synthesize_routes_from_sources(
+    repo: &Path,
+    nodes: &BTreeMap<String, SynthNode>,
+    processes: &[SynthProcess],
+    native_routes: &[NativeAppNode],
+) -> Vec<SynthRoute> {
+    let mut by_file = nodes_by_file(nodes);
+    let mut routes: BTreeMap<(String, String), SynthRoute> = BTreeMap::new();
+    for native in native_routes {
+        let route = route_from_path(&native.file_path)
+            .unwrap_or_else(|| normalize_route_literal(trim_route_suffix(&native.name)));
+        routes.insert(
+            (route.clone(), native.file_path.clone()),
+            SynthRoute {
+                id: native.id.clone(),
+                route,
+                file_path: native.file_path.clone(),
+                emit_node: false,
+                handler_id: None,
+                handler_name: None,
+                middleware: Vec::new(),
+                response_keys: Vec::new(),
+                error_keys: Vec::new(),
+                consumers: Vec::new(),
+                process_ids: process_ids_for_entry(processes, &native.file_path, None),
+            },
+        );
+    }
+    for (file_path, file_nodes) in &mut by_file {
+        let Some(text) = read_repo_text(repo, file_path) else {
+            continue;
+        };
+        let mut route_names = BTreeSet::new();
+        if let Some(route) = route_from_path(file_path) {
+            route_names.insert(route);
+        }
+        route_names.extend(extract_route_handler_literals(&text));
+        if route_names.is_empty() {
+            continue;
+        }
+        let handler = pick_handler_node(file_nodes);
+        let response_keys = extract_response_keys(&text);
+        let error_keys = extract_error_keys(&response_keys, &text);
+        let middleware = extract_middleware(&text);
+        for route in route_names {
+            let key = (route.clone(), file_path.clone());
+            match routes.get_mut(&key) {
+                Some(existing) => {
+                    if existing.handler_id.is_none() {
+                        existing.handler_id = handler.map(|n| n.aka_id.clone());
+                        existing.handler_name = handler.map(|n| n.display_name().to_string());
+                    }
+                    merge_strings(&mut existing.middleware, &middleware);
+                    merge_strings(&mut existing.response_keys, &response_keys);
+                    merge_strings(&mut existing.error_keys, &error_keys);
+                    merge_strings(
+                        &mut existing.process_ids,
+                        &process_ids_for_entry(
+                            processes,
+                            file_path,
+                            handler.map(|n| n.aka_id.as_str()),
+                        ),
+                    );
+                }
+                None => {
+                    routes.insert(
+                        key,
+                        SynthRoute {
+                            id: format!(
+                                "route:heuristic:{:016x}",
+                                stable_hash(&format!("{route}|{file_path}"))
+                            ),
+                            route,
+                            file_path: file_path.clone(),
+                            emit_node: true,
+                            handler_id: handler.map(|n| n.aka_id.clone()),
+                            handler_name: handler.map(|n| n.display_name().to_string()),
+                            middleware: middleware.clone(),
+                            response_keys: response_keys.clone(),
+                            error_keys: error_keys.clone(),
+                            consumers: Vec::new(),
+                            process_ids: process_ids_for_entry(
+                                processes,
+                                file_path,
+                                handler.map(|n| n.aka_id.as_str()),
+                            ),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    attach_route_consumers(repo, nodes, &mut routes);
+
+    let mut out: Vec<SynthRoute> = routes.into_values().collect();
+    out.sort_by(|a, b| {
+        a.route
+            .cmp(&b.route)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
+    out
+}
+
+fn synthesize_tools_from_sources(
+    repo: &Path,
+    nodes: &BTreeMap<String, SynthNode>,
+    processes: &[SynthProcess],
+    native_tools: &[NativeAppNode],
+) -> Vec<SynthTool> {
+    let mut by_file = nodes_by_file(nodes);
+    let mut tools: BTreeMap<(String, String), SynthTool> = BTreeMap::new();
+    for native in native_tools {
+        tools.insert(
+            (native.name.clone(), native.file_path.clone()),
+            SynthTool {
+                id: native.id.clone(),
+                name: native.name.clone(),
+                file_path: native.file_path.clone(),
+                emit_node: false,
+                description: String::new(),
+                handler_id: None,
+                process_ids: process_ids_for_entry(processes, &native.file_path, None),
+            },
+        );
+    }
+    for (file_path, file_nodes) in &mut by_file {
+        let Some(text) = read_repo_text(repo, file_path) else {
+            continue;
+        };
+        let defs = extract_tool_defs(&text);
+        if defs.is_empty() {
+            continue;
+        }
+        let handler = pick_handler_node(file_nodes);
+        for def in defs {
+            let key = (def.name.clone(), file_path.clone());
+            match tools.get_mut(&key) {
+                Some(existing) => {
+                    if existing.description.is_empty() {
+                        existing.description = def.description;
+                    }
+                    if existing.handler_id.is_none() {
+                        existing.handler_id = handler.map(|n| n.aka_id.clone());
+                    }
+                    merge_strings(
+                        &mut existing.process_ids,
+                        &process_ids_for_entry(
+                            processes,
+                            file_path,
+                            handler.map(|n| n.aka_id.as_str()),
+                        ),
+                    );
+                }
+                None => {
+                    tools.insert(
+                        key,
+                        SynthTool {
+                            id: format!(
+                                "tool:heuristic:{:016x}",
+                                stable_hash(&format!("{}|{file_path}", def.name))
+                            ),
+                            name: def.name,
+                            file_path: file_path.clone(),
+                            emit_node: true,
+                            description: def.description,
+                            handler_id: handler.map(|n| n.aka_id.clone()),
+                            process_ids: process_ids_for_entry(
+                                processes,
+                                file_path,
+                                handler.map(|n| n.aka_id.as_str()),
+                            ),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let mut out: Vec<SynthTool> = tools.into_values().collect();
+    out.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
+    out
+}
+
+fn nodes_by_file(nodes: &BTreeMap<String, SynthNode>) -> BTreeMap<String, Vec<&SynthNode>> {
+    let mut by_file: BTreeMap<String, Vec<&SynthNode>> = BTreeMap::new();
+    for node in nodes.values() {
+        if node.file_path.is_empty() || is_noisy_source_path(&node.file_path) {
+            continue;
+        }
+        by_file
+            .entry(node.file_path.clone())
+            .or_default()
+            .push(node);
+    }
+    for file_nodes in by_file.values_mut() {
+        file_nodes.sort_by(|a, b| {
+            handler_rank(a)
+                .cmp(&handler_rank(b))
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.aka_id.cmp(&b.aka_id))
+        });
+    }
+    by_file
+}
+
+fn read_repo_text(repo: &Path, file_path: &str) -> Option<String> {
+    std::fs::read_to_string(repo.join(file_path)).ok()
+}
+
+fn pick_handler_node<'a>(nodes: &'a [&'a SynthNode]) -> Option<&'a SynthNode> {
+    nodes
+        .iter()
+        .copied()
+        .find(|n| matches!(n.label.as_str(), "Function" | "Method") && handler_rank(n) <= 1)
+        .or_else(|| {
+            nodes
+                .iter()
+                .copied()
+                .find(|n| matches!(n.label.as_str(), "Function" | "Method"))
+        })
+        .or_else(|| nodes.first().copied())
+}
+
+fn handler_rank(node: &SynthNode) -> u8 {
+    let lower = node.name.to_ascii_lowercase();
+    if lower == "handler" || lower == "handle" || lower.starts_with("handle") {
+        0
+    } else if matches!(
+        lower.as_str(),
+        "get" | "post" | "put" | "patch" | "delete" | "head" | "options"
+    ) || lower.ends_with("handler")
+        || lower.ends_with("controller")
+    {
+        1
+    } else if matches!(node.label.as_str(), "Function" | "Method") {
+        2
+    } else {
+        3
+    }
+}
+
+fn route_from_path(file_path: &str) -> Option<String> {
+    let normalized = file_path.replace('\\', "/");
+    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    if let Some(idx) = find_segment_pair(&segments, "pages", "api") {
+        return route_from_segments(&segments[idx + 2..], true);
+    }
+    if let Some(idx) = find_segment_pair(&segments, "app", "api") {
+        return route_from_segments(&segments[idx + 2..], true);
+    }
+    for marker in ["routes", "controllers", "handlers"] {
+        if let Some(idx) = segments.iter().position(|s| s.eq_ignore_ascii_case(marker)) {
+            if let Some(route) = route_from_segments(&segments[idx + 1..], true) {
+                return Some(route);
+            }
+        }
+    }
+    None
+}
+
+fn find_segment_pair(segments: &[&str], a: &str, b: &str) -> Option<usize> {
+    segments
+        .windows(2)
+        .position(|w| w[0].eq_ignore_ascii_case(a) && w[1].eq_ignore_ascii_case(b))
+}
+
+fn route_from_segments(segments: &[&str], api_prefix: bool) -> Option<String> {
+    let mut parts = Vec::new();
+    for segment in segments {
+        let stem = file_stem_label(segment);
+        if matches!(
+            stem.as_str(),
+            "route" | "index" | "page" | "layout" | "handler" | "controller"
+        ) {
+            continue;
+        }
+        let part = stem
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_start_matches("...")
+            .trim_start_matches('$');
+        if part.is_empty() {
+            continue;
+        }
+        let part = if stem.starts_with('[') || stem.starts_with('$') {
+            format!(":{part}")
+        } else {
+            part.to_string()
+        };
+        parts.push(part);
+    }
+    if parts.is_empty() && !api_prefix {
+        return None;
+    }
+    let body = parts.join("/");
+    if api_prefix {
+        if body.is_empty() {
+            Some("/api".into())
+        } else {
+            Some(format!("/api/{body}"))
+        }
+    } else if body.is_empty() {
+        None
+    } else {
+        Some(format!("/{body}"))
+    }
+}
+
+fn extract_route_handler_literals(text: &str) -> BTreeSet<String> {
+    let mut routes = BTreeSet::new();
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if !is_ident_start(bytes[i] as char) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        while i < bytes.len() && is_ident_continue(bytes[i] as char) {
+            i += 1;
+        }
+        let word = &text[start..i];
+        let lower = word.to_ascii_lowercase();
+        if !matches!(
+            lower.as_str(),
+            "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "all" | "route"
+        ) {
+            continue;
+        }
+        let mut j = skip_ws(text, i);
+        if j < bytes.len() && bytes[j] == b'(' {
+            j = skip_ws(text, j + 1);
+            if let Some((literal, _end)) = read_string_literal(text, j) {
+                if literal.starts_with('/') && !literal.starts_with("//") {
+                    routes.insert(normalize_route_literal(&literal));
+                }
+            }
+        }
+    }
+    routes
+}
+
+fn attach_route_consumers(
+    repo: &Path,
+    nodes: &BTreeMap<String, SynthNode>,
+    routes: &mut BTreeMap<(String, String), SynthRoute>,
+) {
+    if routes.is_empty() {
+        return;
+    }
+    let by_file = nodes_by_file(nodes);
+    let route_names: Vec<String> = routes.keys().map(|(route, _)| route.clone()).collect();
+    for (file_path, file_nodes) in by_file {
+        let Some(text) = read_repo_text(repo, &file_path) else {
+            continue;
+        };
+        let Some(consumer) = pick_handler_node(&file_nodes) else {
+            continue;
+        };
+        for route in &route_names {
+            let occurrences = count_route_fetches(&text, route);
+            if occurrences == 0 {
+                continue;
+            }
+            let keys = extract_accessed_keys_near_route(&text, route);
+            for candidate in routes.values_mut().filter(|r| &r.route == route) {
+                if candidate.file_path == file_path {
+                    continue;
+                }
+                candidate.consumers.push(SynthRouteConsumer {
+                    node_id: consumer.aka_id.clone(),
+                    keys: keys.clone(),
+                    fetch_count: occurrences,
+                });
+            }
+        }
+    }
+    for route in routes.values_mut() {
+        route.consumers.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        route.consumers.dedup_by(|a, b| {
+            if a.node_id == b.node_id {
+                b.fetch_count = b.fetch_count.saturating_add(a.fetch_count);
+                b.keys.extend(a.keys.clone());
+                b.keys.sort();
+                b.keys.dedup();
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+fn count_route_fetches(text: &str, route: &str) -> u32 {
+    let mut count = 0u32;
+    for idx in literal_occurrences(text, route) {
+        let start = idx.saturating_sub(80);
+        let prefix = &text[start..idx];
+        if prefix.contains("fetch(")
+            || prefix.contains("axios.")
+            || prefix.contains(".get(")
+            || prefix.contains(".post(")
+            || prefix.contains("http.")
+            || prefix.contains("client.")
+        {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+fn literal_occurrences(text: &str, needle: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(pos) = text[offset..].find(needle) {
+        let idx = offset + pos;
+        out.push(idx);
+        offset = idx + needle.len();
+    }
+    out
+}
+
+fn extract_accessed_keys_near_route(text: &str, route: &str) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    for idx in literal_occurrences(text, route) {
+        let end = (idx + 2000).min(text.len());
+        let window = &text[idx..end];
+        for key in dotted_property_names(window) {
+            if !is_common_property(&key) {
+                keys.insert(key);
+            }
+        }
+    }
+    keys.into_iter().take(16).collect()
+}
+
+fn dotted_property_names(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        if bytes[i] != b'.' || !is_ident_start(bytes[i + 1] as char) {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        i = start + 1;
+        while i < bytes.len() && is_ident_continue(bytes[i] as char) {
+            i += 1;
+        }
+        out.push(text[start..i].to_string());
+    }
+    out
+}
+
+fn is_common_property(key: &str) -> bool {
+    matches!(
+        key,
+        "then"
+            | "catch"
+            | "finally"
+            | "json"
+            | "text"
+            | "ok"
+            | "status"
+            | "headers"
+            | "map"
+            | "filter"
+            | "reduce"
+            | "length"
+            | "push"
+            | "slice"
+            | "data"
+    )
+}
+
+fn extract_response_keys(text: &str) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    for marker in [".json(", "json(", "return "] {
+        let mut offset = 0usize;
+        while let Some(pos) = text[offset..].find(marker) {
+            let idx = offset + pos + marker.len();
+            let idx = skip_ws(text, idx);
+            if text.as_bytes().get(idx) == Some(&b'{') {
+                if let Some(body) = balanced_brace_body(text, idx) {
+                    keys.extend(top_level_object_keys(body));
+                }
+            }
+            offset = idx.saturating_add(1);
+        }
+    }
+    keys.into_iter().take(32).collect()
+}
+
+fn extract_error_keys(response_keys: &[String], text: &str) -> Vec<String> {
+    let mut keys: BTreeSet<String> = response_keys
+        .iter()
+        .filter(|key| matches!(key.as_str(), "error" | "errors" | "message" | "code"))
+        .cloned()
+        .collect();
+    let lower = text.to_ascii_lowercase();
+    for key in ["error", "errors", "message", "code"] {
+        if lower.contains(key) {
+            keys.insert(key.to_string());
+        }
+    }
+    keys.into_iter().collect()
+}
+
+fn extract_middleware(text: &str) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for word in ident_words(text) {
+        if word.starts_with("with") && word.len() > 4 {
+            out.insert(word);
+        }
+    }
+    for name in ["auth", "requireAuth", "rateLimit", "cors", "csrf"] {
+        if text.contains(name) {
+            out.insert(name.to_string());
+        }
+    }
+    out.into_iter().take(12).collect()
+}
+
+#[derive(Debug)]
+struct ToolDef {
+    name: String,
+    description: String,
+}
+
+fn extract_tool_defs(text: &str) -> Vec<ToolDef> {
+    let mut tools: BTreeMap<String, ToolDef> = BTreeMap::new();
+    for marker in [".tool(", "server.tool(", "tool("] {
+        let mut offset = 0usize;
+        while let Some(pos) = text[offset..].find(marker) {
+            let idx = offset + pos + marker.len();
+            let idx = skip_ws(text, idx);
+            if let Some((name, end)) = read_string_literal(text, idx) {
+                if is_plausible_tool_name(&name) {
+                    let desc = extract_description_near(text, end);
+                    tools.entry(name.clone()).or_insert(ToolDef {
+                        name,
+                        description: desc,
+                    });
+                }
+                offset = end;
+            } else {
+                offset = idx.saturating_add(1);
+            }
+        }
+    }
+    for idx in property_name_offsets(text, "name") {
+        let window_start = idx.saturating_sub(240);
+        let window_end = (idx + 400).min(text.len());
+        let window = &text[window_start..window_end];
+        let lower = window.to_ascii_lowercase();
+        if !(lower.contains("tool") || lower.contains("inputschema") || lower.contains("schema")) {
+            continue;
+        }
+        let value_start = skip_ws(text, idx + "name".len());
+        let value_start = if text.as_bytes().get(value_start) == Some(&b':') {
+            skip_ws(text, value_start + 1)
+        } else {
+            continue;
+        };
+        if let Some((name, end)) = read_string_literal(text, value_start) {
+            if is_plausible_tool_name(&name) {
+                let desc = extract_description_near(text, end);
+                tools.entry(name.clone()).or_insert(ToolDef {
+                    name,
+                    description: desc,
+                });
+            }
+        }
+    }
+    tools.into_values().collect()
+}
+
+fn extract_description_near(text: &str, idx: usize) -> String {
+    let start = idx.saturating_sub(120);
+    let end = (idx + 600).min(text.len());
+    let window = &text[start..end];
+    for key in ["description", "title"] {
+        if let Some(pos) = window.find(key) {
+            let colon = skip_ws(window, pos + key.len());
+            let value_start = if window.as_bytes().get(colon) == Some(&b':') {
+                skip_ws(window, colon + 1)
+            } else {
+                continue;
+            };
+            if let Some((desc, _)) = read_string_literal(window, value_start) {
+                return desc.chars().take(240).collect();
+            }
+        }
+    }
+    String::new()
+}
+
+fn is_plausible_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 80
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/'))
+        && name.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+fn process_ids_for_entry(
+    processes: &[SynthProcess],
+    file_path: &str,
+    handler_id: Option<&str>,
+) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    for process in processes {
+        let touches_handler =
+            handler_id.is_some_and(|id| process.steps.iter().any(|step| step.aka_id == id));
+        let touches_file = process.steps.iter().any(|step| step.file_path == file_path);
+        if touches_handler || touches_file {
+            ids.insert(process.id.clone());
+        }
+    }
+    ids.into_iter().collect()
+}
+
+fn fetch_reason(keys: &[String], fetch_count: u32) -> String {
+    let mut out = String::from("fetch-url-match");
+    if !keys.is_empty() {
+        out.push_str("|keys:");
+        out.push_str(&keys.join(","));
+    }
+    out.push_str("|fetches:");
+    out.push_str(&fetch_count.max(1).to_string());
+    out
+}
+
+fn normalize_route_literal(route: &str) -> String {
+    let mut out = route.trim().to_string();
+    if out.len() > 1 {
+        while out.ends_with('/') {
+            out.pop();
+        }
+    }
+    out
+}
+
+fn trim_route_suffix(route: &str) -> &str {
+    route
+        .strip_suffix("/route")
+        .or_else(|| route.strip_suffix("/index"))
+        .unwrap_or(route)
+}
+
+fn merge_strings(target: &mut Vec<String>, source: &[String]) {
+    target.extend(source.iter().cloned());
+    target.sort();
+    target.dedup();
+}
+
+fn balanced_brace_body(text: &str, open_idx: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if bytes.get(open_idx) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut escape = false;
+    let mut i = open_idx;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => quote = Some(b),
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[open_idx + 1..i]);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn top_level_object_keys(body: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut keys = Vec::new();
+    let mut i = 0usize;
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut escape = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' if depth > 0 => quote = Some(b),
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth -= 1,
+            b'\'' | b'"' if depth == 0 => {
+                if let Some((key, end)) = read_string_literal(body, i) {
+                    let after = skip_ws(body, end);
+                    if body.as_bytes().get(after) == Some(&b':') && is_object_key(&key) {
+                        keys.push(key);
+                    }
+                    i = after.saturating_add(1);
+                    continue;
+                }
+            }
+            _ if depth == 0 && is_ident_start(b as char) => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && is_ident_continue(bytes[i] as char) {
+                    i += 1;
+                }
+                let key = &body[start..i];
+                let after = skip_ws(body, i);
+                if body.as_bytes().get(after) == Some(&b':') && is_object_key(key) {
+                    keys.push(key.to_string());
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn is_object_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '$'))
+}
+
+fn ident_words(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if !is_ident_start(bytes[i] as char) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        while i < bytes.len() && is_ident_continue(bytes[i] as char) {
+            i += 1;
+        }
+        out.push(text[start..i].to_string());
+    }
+    out
+}
+
+fn property_name_offsets(text: &str, name: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i + name.len() <= bytes.len() {
+        if &text[i..i + name.len()] == name {
+            let before = i
+                .checked_sub(1)
+                .and_then(|idx| text.as_bytes().get(idx))
+                .copied()
+                .map(char::from);
+            let after = text.as_bytes().get(i + name.len()).copied().map(char::from);
+            if before.is_none_or(|ch| !is_ident_continue(ch))
+                && after.is_none_or(|ch| !is_ident_continue(ch))
+            {
+                out.push(i);
+            }
+            i += name.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn read_string_literal(text: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = text.as_bytes();
+    let quote = *bytes.get(start)?;
+    if !matches!(quote, b'\'' | b'"' | b'`') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut escape = false;
+    let mut i = start + 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            out.push(b as char);
+            escape = false;
+        } else if b == b'\\' {
+            escape = true;
+        } else if b == quote {
+            return Some((out, i + 1));
+        } else {
+            out.push(b as char);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn skip_ws(text: &str, mut idx: usize) -> usize {
+    let bytes = text.as_bytes();
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    idx
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || matches!(ch, '_' | '$')
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')
+}
+
 impl SynthNode {
     fn display_name(&self) -> &str {
         if self.name.is_empty() {
@@ -1758,6 +2914,22 @@ fn insert_if_missing(props: &mut Map<String, Value>, key: &str, value: Value) {
     props.entry(key.to_string()).or_insert(value);
 }
 
+fn sanitize_string_array_prop(props: &mut Map<String, Value>, key: &str) {
+    let Some(values) = props.get(key).and_then(Value::as_array) else {
+        return;
+    };
+    let mut out: Vec<Value> = values
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|s| s.trim_matches(['"', '\'']).to_string())
+        .filter(|s| !s.is_empty() && s != "null" && s != "undefined")
+        .map(Value::String)
+        .collect();
+    out.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    out.dedup();
+    props.insert(key.to_string(), Value::Array(out));
+}
+
 fn to_artifact_line(line_1based: i64) -> u32 {
     if line_1based <= 0 {
         0
@@ -1862,6 +3034,14 @@ mod tests {
         .unwrap();
     }
 
+    fn temp_repo(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("aka-core-engine-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn synthesizes_call_chain_processes_from_cbm_calls() {
         let conn = test_conn();
@@ -1892,7 +3072,9 @@ mod tests {
         insert_edge(&conn, 1, 1, 2, "CALLS");
         insert_edge(&conn, 2, 2, 3, "CALLS");
 
-        let processes = synthesize_graph(&conn, "demo").unwrap().processes;
+        let processes = synthesize_graph(&conn, "demo", std::path::Path::new("."))
+            .unwrap()
+            .processes;
         assert_eq!(processes.len(), 1);
         let p = &processes[0];
         assert_eq!(p.name, "main → parseConfig");
@@ -1962,7 +3144,7 @@ mod tests {
         insert_edge(&conn, 1, 1, 2, "CALLS");
         insert_edge(&conn, 2, 2, 3, "CALLS");
 
-        let synth = synthesize_graph(&conn, "demo").unwrap();
+        let synth = synthesize_graph(&conn, "demo", std::path::Path::new(".")).unwrap();
         assert_eq!(synth.communities.len(), 1);
         let main = synth
             .communities
@@ -2026,7 +3208,7 @@ mod tests {
         insert_edge(&conn, 2, 2, 3, "CALLS");
         insert_edge(&conn, 3, 3, 4, "CALLS");
 
-        let synth = synthesize_graph(&conn, "demo").unwrap();
+        let synth = synthesize_graph(&conn, "demo", std::path::Path::new(".")).unwrap();
         assert_eq!(synth.communities.len(), 2);
         let process = synth.processes.first().expect("process");
         assert_eq!(process.process_type, "cross_community");
@@ -2063,7 +3245,9 @@ mod tests {
         insert_edge(&conn, 1, 1, 2, "CALLS");
         insert_edge(&conn, 2, 2, 3, "CALLS");
 
-        let processes = synthesize_graph(&conn, "demo").unwrap().processes;
+        let processes = synthesize_graph(&conn, "demo", std::path::Path::new("."))
+            .unwrap()
+            .processes;
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].process_type, "intra_community");
         assert_eq!(processes[0].communities.len(), 1);
@@ -2094,7 +3278,9 @@ mod tests {
         insert_edge(&conn, 1, 2, 3, "CALLS");
         insert_edge(&conn, 2, 2, 1, "STEP_IN_PROCESS");
 
-        let processes = synthesize_graph(&conn, "demo").unwrap().processes;
+        let processes = synthesize_graph(&conn, "demo", std::path::Path::new("."))
+            .unwrap()
+            .processes;
         assert!(processes.is_empty());
     }
 
@@ -2127,7 +3313,9 @@ mod tests {
         );
         insert_edge(&conn, 1, 2, 3, "CALLS");
 
-        let processes = synthesize_graph(&conn, "demo").unwrap().processes;
+        let processes = synthesize_graph(&conn, "demo", std::path::Path::new("."))
+            .unwrap()
+            .processes;
         assert!(processes.is_empty());
     }
 
@@ -2164,7 +3352,7 @@ mod tests {
         insert_edge(&conn, 3, 2, 1, "MEMBER_OF");
         insert_edge(&conn, 4, 3, 1, "MEMBER_OF");
 
-        let synth = synthesize_graph(&conn, "demo").unwrap();
+        let synth = synthesize_graph(&conn, "demo", std::path::Path::new(".")).unwrap();
         assert!(synth.communities.is_empty());
         assert_eq!(synth.processes.len(), 1);
         assert_eq!(synth.processes[0].process_type, "intra_community");
@@ -2227,7 +3415,7 @@ mod tests {
         insert_edge(&conn, 3, 1, 2, "CALLS");
         insert_edge(&conn, 4, 5, 6, "CALLS");
 
-        let synth = synthesize_graph(&conn, "demo").unwrap();
+        let synth = synthesize_graph(&conn, "demo", std::path::Path::new(".")).unwrap();
         let processes = synth.processes;
         assert_eq!(processes.len(), 1);
         let process = &processes[0];
@@ -2247,5 +3435,93 @@ mod tests {
                 .all(|step| !step.file_path.contains(".test.")),
             "test-file entry points should not produce processes"
         );
+    }
+
+    #[test]
+    fn synthesizes_route_nodes_consumers_and_entry_flows() {
+        let repo = temp_repo("routes");
+        std::fs::create_dir_all(repo.join("src/pages/api/config")).unwrap();
+        std::fs::create_dir_all(repo.join("src/components")).unwrap();
+        std::fs::write(
+            repo.join("src/pages/api/config/route.ts"),
+            "export async function GET() { return Response.json({ data: [], pagination: {}, error: null }); }",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("src/components/config-panel.tsx"),
+            "export async function ConfigPanel() { const res = await fetch('/api/config'); const data = await res.json(); return data.pagination.total + data.missing; }",
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_node(
+            &conn,
+            1,
+            "Function",
+            "GET",
+            "src/pages/api/config/route.ts::GET",
+            "src/pages/api/config/route.ts",
+        );
+        insert_node(
+            &conn,
+            2,
+            "Function",
+            "loadConfig",
+            "src/pages/api/config/route.ts::loadConfig",
+            "src/pages/api/config/route.ts",
+        );
+        insert_node(
+            &conn,
+            3,
+            "Function",
+            "ConfigPanel",
+            "src/components/config-panel.tsx::ConfigPanel",
+            "src/components/config-panel.tsx",
+        );
+        insert_edge(&conn, 1, 1, 2, "CALLS");
+
+        let synth = synthesize_graph(&conn, "demo", &repo).unwrap();
+        assert_eq!(synth.routes.len(), 1);
+        let route = &synth.routes[0];
+        assert_eq!(route.route, "/api/config");
+        assert!(route.response_keys.contains(&"data".to_string()));
+        assert!(route.response_keys.contains(&"pagination".to_string()));
+        assert!(route.error_keys.contains(&"error".to_string()));
+        assert_eq!(route.consumers.len(), 1);
+        assert_eq!(route.consumers[0].fetch_count, 1);
+        assert!(route.consumers[0].keys.contains(&"pagination".to_string()));
+
+        let edge_types: Vec<_> = route.edge_recs().into_iter().map(|e| e.edge_type).collect();
+        assert!(edge_types.contains(&"HANDLES_ROUTE".to_string()));
+        assert!(edge_types.contains(&"FETCHES".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_tool_nodes_and_handler_edges() {
+        let repo = temp_repo("tools");
+        std::fs::create_dir_all(repo.join("src/mcp")).unwrap();
+        std::fs::write(
+            repo.join("src/mcp/server.ts"),
+            "export function handleIndexRepo() {}\nserver.tool('index_repo', { description: 'Index a repository' }, handleIndexRepo);",
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_node(
+            &conn,
+            1,
+            "Function",
+            "handleIndexRepo",
+            "src/mcp/server.ts::handleIndexRepo",
+            "src/mcp/server.ts",
+        );
+
+        let synth = synthesize_graph(&conn, "demo", &repo).unwrap();
+        assert_eq!(synth.tools.len(), 1);
+        let tool = &synth.tools[0];
+        assert_eq!(tool.name, "index_repo");
+        assert_eq!(tool.description, "Index a repository");
+        assert!(tool.handler_id.is_some());
+        assert_eq!(tool.edge_recs()[0].edge_type, "HANDLES_TOOL");
     }
 }

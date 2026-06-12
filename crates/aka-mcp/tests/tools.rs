@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use aka_mcp::backend::{Backend, RepoInfo, SearchHit, SymbolRef};
 use aka_mcp::service::{
-    AkaMcpServer, AnalyzeParams, AugmentParams, CodeSearchParams, ImpactParams, QueryParams,
-    ReferencesParams, SymbolParams,
+    AkaMcpServer, AnalyzeParams, ApiImpactParams, AugmentParams, CodeSearchParams,
+    DetectChangesParams, ImpactParams, QueryParams, ReferencesParams, RouteMapParams, SymbolParams,
+    ToolMapParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -233,7 +234,10 @@ async fn context_shape() {
     let res = server()
         .context(Parameters(SymbolParams {
             repo: None,
-            symbol: "handle_request".into(),
+            symbol: Some("handle_request".into()),
+            uid: None,
+            file_path: None,
+            kind: None,
         }))
         .await
         .unwrap();
@@ -270,11 +274,52 @@ async fn context_shape() {
 }
 
 #[tokio::test]
+async fn context_ambiguous_symbol_returns_candidates_and_uid_disambiguates() {
+    let res = server()
+        .context(Parameters(SymbolParams {
+            repo: Some("fixture".into()),
+            symbol: Some("duplicate".into()),
+            uid: None,
+            file_path: None,
+            kind: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["status"], "ambiguous");
+    let candidates = v["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0]["id"], "fixture:fn:duplicate_lib");
+    assert_eq!(candidates[1]["id"], "fixture:fn:duplicate_ui");
+    assert!(v["defs"].as_array().unwrap().is_empty());
+
+    let res = server()
+        .context(Parameters(SymbolParams {
+            repo: Some("fixture".into()),
+            symbol: Some("duplicate".into()),
+            uid: Some("fixture:fn:duplicate_ui".into()),
+            file_path: None,
+            kind: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["status"], "ok");
+    let defs = v["defs"].as_array().unwrap();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0]["id"], "fixture:fn:duplicate_ui");
+    assert_eq!(defs[0]["file"], "src/b.rs");
+}
+
+#[tokio::test]
 async fn find_definition_shape() {
     let res = server()
         .find_definition(Parameters(SymbolParams {
             repo: None,
-            symbol: "parse_config".into(),
+            symbol: Some("parse_config".into()),
+            uid: None,
+            file_path: None,
+            kind: None,
         }))
         .await
         .unwrap();
@@ -288,7 +333,10 @@ async fn find_definition_shape() {
     let res = server()
         .find_definition(Parameters(SymbolParams {
             repo: None,
-            symbol: "nope".into(),
+            symbol: Some("nope".into()),
+            uid: None,
+            file_path: None,
+            kind: None,
         }))
         .await
         .unwrap();
@@ -300,7 +348,10 @@ async fn search_references_shape() {
     let res = server()
         .search_references(Parameters(ReferencesParams {
             repo: None,
-            symbol: "read_file".into(),
+            symbol: Some("read_file".into()),
+            uid: None,
+            file_path: None,
+            kind: None,
             limit: None,
         }))
         .await
@@ -318,7 +369,11 @@ async fn impact_shape() {
     let res = server()
         .impact(Parameters(ImpactParams {
             repo: None,
-            symbol: "read_file".into(),
+            symbol: Some("read_file".into()),
+            uid: None,
+            file_path: None,
+            kind: None,
+            direction: None,
             depth: None, // 默认 2 跳
             limit: None,
         }))
@@ -348,12 +403,44 @@ async fn impact_shape() {
 }
 
 #[tokio::test]
+async fn impact_supports_downstream_direction() {
+    let res = server()
+        .impact(Parameters(ImpactParams {
+            repo: Some("fixture".into()),
+            symbol: Some("handle_request".into()),
+            uid: None,
+            file_path: None,
+            kind: None,
+            direction: Some("downstream".into()),
+            depth: Some(1),
+            limit: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["direction"], "downstream");
+    let names: Vec<_> = v["impacted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["parse_config", "write_output"]);
+    assert_eq!(v["by_depth"].as_array().unwrap()[0]["count"], 2);
+}
+
+#[tokio::test]
 async fn impact_affected_processes_empty_without_membership() {
     // beta_main 没有流程数据 → affected_processes 为空数组（字段始终存在）。
     let res = server()
         .impact(Parameters(ImpactParams {
             repo: Some("beta".into()),
-            symbol: "beta_main".into(),
+            symbol: Some("beta_main".into()),
+            uid: None,
+            file_path: None,
+            kind: None,
+            direction: None,
             depth: None,
             limit: None,
         }))
@@ -374,6 +461,138 @@ async fn analyze_shape() {
     let v = text_json(&res);
     assert_eq!(keys(&v), ["summary"]);
     assert!(v["summary"].as_str().unwrap().contains("/tmp/fixture"));
+}
+
+#[tokio::test]
+async fn detect_changes_shape() {
+    let res = server()
+        .detect_changes(Parameters(DetectChangesParams {
+            repo: Some("fixture".into()),
+            scope: Some("unstaged".into()),
+            base_ref: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["repo"], "fixture");
+    assert_eq!(v["scope"], "unstaged");
+    assert_eq!(v["changed_count"], 1);
+    assert_eq!(
+        v["changed_ranges"].as_array().unwrap()[0]["file"],
+        "src/handler.rs"
+    );
+    let symbols = v["changed_symbols"].as_array().unwrap();
+    assert_eq!(symbols[0]["id"], "fixture:fn:handle_request");
+    assert_eq!(
+        symbols[0]["ranges"].as_array().unwrap()[0]["start_line"],
+        12
+    );
+    let procs = v["affected_processes"].as_array().unwrap();
+    assert_eq!(procs.len(), 2);
+    let request_flow = procs
+        .iter()
+        .find(|p| p["process_id"] == "fixture:proc:request-flow")
+        .unwrap();
+    assert_eq!(request_flow["first_affected_step"], 2);
+}
+
+#[tokio::test]
+async fn route_map_shape() {
+    let res = server()
+        .route_map(Parameters(RouteMapParams {
+            repo: Some("fixture".into()),
+            route: Some("/api".into()),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["total"], 1);
+    let route = &v["routes"].as_array().unwrap()[0];
+    assert_eq!(route["route"], "/api/config");
+    assert_eq!(route["handler"], "src/routes/config.rs");
+    assert_eq!(route["middleware"].as_array().unwrap()[0], "withAuth");
+    assert_eq!(route["responseKeys"].as_array().unwrap()[0], "data");
+    assert_eq!(
+        route["consumers"].as_array().unwrap()[0]["name"],
+        "ConfigPanel"
+    );
+    assert_eq!(
+        route["consumers"].as_array().unwrap()[0]["accessedKeys"]
+            .as_array()
+            .unwrap()[1],
+        "missing"
+    );
+    assert_eq!(route["flows"].as_array().unwrap()[0], "main → read_file");
+}
+
+#[tokio::test]
+async fn tool_map_shape() {
+    let res = server()
+        .tool_map(Parameters(ToolMapParams {
+            repo: Some("fixture".into()),
+            tool: Some("index".into()),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["total"], 1);
+    let tool = &v["tools"].as_array().unwrap()[0];
+    assert_eq!(tool["name"], "index_repo");
+    assert_eq!(tool["filePath"], "src/tools/index_repo.rs");
+    assert!(tool["description"].as_str().unwrap().contains("Index"));
+    assert_eq!(
+        tool["handlers"].as_array().unwrap()[0]["name"],
+        "handle_request"
+    );
+    assert_eq!(tool["flows"].as_array().unwrap()[0], "main → write_output");
+}
+
+#[tokio::test]
+async fn shape_check_reports_mismatch() {
+    let res = server()
+        .shape_check(Parameters(RouteMapParams {
+            repo: Some("fixture".into()),
+            route: Some("config".into()),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["total"], 1);
+    assert_eq!(v["mismatches"], 1);
+    let route = &v["routes"].as_array().unwrap()[0];
+    assert_eq!(route["status"], "MISMATCH");
+    let consumer = &route["consumers"].as_array().unwrap()[0];
+    assert_eq!(consumer["mismatched"].as_array().unwrap()[0], "missing");
+    assert_eq!(consumer["mismatchConfidence"], "high");
+}
+
+#[tokio::test]
+async fn api_impact_shape() {
+    let res = server()
+        .api_impact(Parameters(ApiImpactParams {
+            repo: Some("fixture".into()),
+            route: Some("/api/config".into()),
+            file: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["total"], 1);
+    let route = &v["route"];
+    assert_eq!(route["route"], "/api/config");
+    assert_eq!(
+        route["responseShape"]["success"].as_array().unwrap()[0],
+        "data"
+    );
+    assert_eq!(
+        route["consumers"].as_array().unwrap()[0]["file"],
+        "src/ui/config_panel.tsx"
+    );
+    assert_eq!(
+        route["mismatches"].as_array().unwrap()[0]["field"],
+        "missing"
+    );
+    assert_eq!(route["impactSummary"]["riskLevel"], "MEDIUM");
 }
 
 #[tokio::test]

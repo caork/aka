@@ -45,7 +45,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 pub use aka_mcp::ops;
 pub use aka_mcp::{
     clamp_render_nodes, Backend, RepoInfo, RepoProgress, RepoSettingsUpdate, SearchHit, SymbolRef,
-    MAX_RENDER_NODES, MIN_RENDER_NODES,
+    SymbolSelector, MAX_RENDER_NODES, MIN_RENDER_NODES,
 };
 
 type AppState = Arc<dyn Backend>;
@@ -72,6 +72,11 @@ pub fn router(backend: Arc<dyn Backend>) -> Router {
         .route("/api/repos/{name}/settings", post(repo_settings))
         .route("/api/repos/{name}", delete(repo_delete))
         .route("/api/query", post(query))
+        .route("/api/detect-changes", post(detect_changes))
+        .route("/api/route-map", post(route_map))
+        .route("/api/tool-map", post(tool_map))
+        .route("/api/shape-check", post(shape_check))
+        .route("/api/api-impact", post(api_impact))
         .route("/api/search/code", post(search_code))
         .route("/api/symbol/context", post(symbol_context))
         .route("/api/node", get(node_detail))
@@ -237,7 +242,61 @@ pub struct CodeSearchRequest {
 pub struct ContextRequest {
     #[serde(default)]
     pub repo: Option<String>,
-    pub symbol: String,
+    #[serde(default, alias = "name", alias = "target")]
+    pub symbol: Option<String>,
+    #[serde(default, alias = "target_uid")]
+    pub uid: Option<String>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+impl ContextRequest {
+    fn selector(&self) -> SymbolSelector {
+        SymbolSelector {
+            symbol: self.symbol.clone(),
+            uid: self.uid.clone(),
+            file_path: self.file_path.clone(),
+            kind: self.kind.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DetectChangesRequest {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub base_ref: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RouteMapRequest {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub route: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ToolMapRequest {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub tool: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApiImpactRequest {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub route: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
 }
 
 // ---- handlers ----
@@ -303,12 +362,69 @@ async fn search_code(
     .await
 }
 
+async fn detect_changes(
+    State(b): State<AppState>,
+    Json(req): Json<DetectChangesRequest>,
+) -> Result<Json<ops::DetectChangesOut>, ApiError> {
+    let scope = req.scope.unwrap_or_else(|| "unstaged".into());
+    run(b, move |b| {
+        ops::detect_changes(b, req.repo.as_deref(), &scope, req.base_ref.as_deref())
+    })
+    .await
+}
+
+async fn route_map(
+    State(b): State<AppState>,
+    Json(req): Json<RouteMapRequest>,
+) -> Result<Json<ops::RouteMapOut>, ApiError> {
+    run(b, move |b| {
+        ops::route_map(b, req.repo.as_deref(), req.route.as_deref())
+    })
+    .await
+}
+
+async fn tool_map(
+    State(b): State<AppState>,
+    Json(req): Json<ToolMapRequest>,
+) -> Result<Json<ops::ToolMapOut>, ApiError> {
+    run(b, move |b| {
+        ops::tool_map(b, req.repo.as_deref(), req.tool.as_deref())
+    })
+    .await
+}
+
+async fn shape_check(
+    State(b): State<AppState>,
+    Json(req): Json<RouteMapRequest>,
+) -> Result<Json<ops::ShapeCheckOut>, ApiError> {
+    run(b, move |b| {
+        ops::shape_check(b, req.repo.as_deref(), req.route.as_deref())
+    })
+    .await
+}
+
+async fn api_impact(
+    State(b): State<AppState>,
+    Json(req): Json<ApiImpactRequest>,
+) -> Result<Json<ops::ApiImpactOut>, ApiError> {
+    run(b, move |b| {
+        ops::api_impact(
+            b,
+            req.repo.as_deref(),
+            req.route.as_deref(),
+            req.file.as_deref(),
+        )
+    })
+    .await
+}
+
 async fn symbol_context(
     State(b): State<AppState>,
     Json(req): Json<ContextRequest>,
 ) -> Result<Json<ops::ContextOut>, ApiError> {
+    let selector = req.selector();
     run(b, move |b| {
-        ops::context(b, req.repo.as_deref(), &req.symbol)
+        ops::context_select(b, req.repo.as_deref(), &selector)
     })
     .await
 }

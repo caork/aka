@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -23,8 +24,10 @@ use aka_core::{
 };
 use aka_graph::{Adjacency, GraphStore, NodeRow};
 use aka_mcp::{
-    Backend, CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, ProcessHit,
-    QueryEnrichment, RepoInfo, RepoProgress, RepoSettingsUpdate, SearchHit, SymbolRef,
+    backend::dedup_symbol_refs, Backend, ChangeDetection, ChangedRange, ChangedSymbol,
+    CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, ImpactDirection, ProcessHit,
+    QueryEnrichment, RepoInfo, RepoProgress, RepoSettingsUpdate, RouteConsumer, RouteMapEntry,
+    SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
 };
 use aka_search::SearchIndex;
 use git2::{
@@ -43,6 +46,9 @@ const DEFINITION_LABELS: &[&str] = &[
     "Struct",
     "Enum",
     "Trait",
+    "Route",
+    "Tool",
+    "Resource",
 ];
 
 const JOB_LOG_LIMIT: usize = 80;
@@ -92,6 +98,73 @@ impl RepoHandle {
             .or_else(|| rows.first());
         Ok(pick.and_then(|r| self.adj.index_of_rowid(r.rowid)))
     }
+
+    fn rows_by_selector(&self, selector: &SymbolSelector, limit: usize) -> Result<Vec<NodeRow>> {
+        if let Some(uid) = selector.uid.as_deref().filter(|v| !v.is_empty()) {
+            let store = self.store.lock().expect("store lock");
+            let Some(row) = store.node_by_id(uid)? else {
+                return Ok(Vec::new());
+            };
+            return Ok(row_matches_selector(&row, selector)
+                .then_some(row)
+                .into_iter()
+                .collect());
+        }
+        let Some(symbol) = selector.symbol.as_deref().filter(|v| !v.is_empty()) else {
+            return Ok(Vec::new());
+        };
+        let rows = {
+            let store = self.store.lock().expect("store lock");
+            store.nodes_by_name(symbol, limit)?
+        };
+        Ok(rows
+            .into_iter()
+            .filter(|row| row_matches_selector(row, selector))
+            .collect())
+    }
+
+    fn definition_rows_by_selector(&self, selector: &SymbolSelector) -> Result<Vec<NodeRow>> {
+        let rows = self.rows_by_selector(selector, 50)?;
+        let exact_defs: Vec<NodeRow> = rows
+            .iter()
+            .filter(|r| {
+                r.name.as_deref().is_some_and(|name| {
+                    selector
+                        .symbol
+                        .as_deref()
+                        .is_none_or(|symbol| symbol == name)
+                }) && DEFINITION_LABELS.contains(&r.label.as_str())
+            })
+            .cloned()
+            .collect();
+        if exact_defs.is_empty() {
+            Ok(rows
+                .into_iter()
+                .filter(|r| {
+                    r.name.as_deref().is_some_and(|name| {
+                        selector
+                            .symbol
+                            .as_deref()
+                            .is_none_or(|symbol| symbol == name)
+                    })
+                })
+                .collect())
+        } else {
+            Ok(exact_defs)
+        }
+    }
+
+    fn resolve_selector(&self, selector: &SymbolSelector) -> Result<Vec<u32>> {
+        Ok(self
+            .definition_rows_by_selector(selector)?
+            .into_iter()
+            .filter_map(|r| self.adj.index_of_rowid(r.rowid))
+            .collect())
+    }
+}
+
+fn row_matches_selector(row: &NodeRow, selector: &SymbolSelector) -> bool {
+    selector.matches_hit(&row_to_hit(row, 1.0))
 }
 
 fn row_to_hit(row: &NodeRow, score: f32) -> SearchHit {
@@ -105,6 +178,47 @@ fn row_to_hit(row: &NodeRow, score: f32) -> SearchHit {
         score,
         snippet: None,
     }
+}
+
+fn string_array_prop(props: &serde_json::Value, key: &str) -> Vec<String> {
+    props
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim_matches(['"', '\'']).to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn string_prop(props: &serde_json::Value, key: &str) -> Option<String> {
+    props
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+        .filter(|s| !s.is_empty())
+}
+
+fn parse_fetch_reason(reason: &str) -> (Vec<String>, Option<u32>) {
+    let mut accessed = Vec::new();
+    let mut fetch_count = None;
+    for part in reason.split('|') {
+        if let Some(keys) = part.strip_prefix("keys:") {
+            accessed = keys
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+                .collect();
+        } else if let Some(n) = part.strip_prefix("fetches:") {
+            fetch_count = n.parse::<u32>().ok();
+        }
+    }
+    (accessed, fetch_count)
 }
 
 fn node_content(repo_root: &Path, row: &NodeRow) -> Result<Option<String>> {
@@ -749,6 +863,150 @@ fn find_code_line_matches(
     }
 }
 
+fn run_git_diff(repo: &Path, scope: &str, base_ref: Option<&str>) -> Result<String> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo).arg("diff").arg("--unified=0");
+    match scope {
+        "unstaged" => {}
+        "staged" | "cached" => {
+            cmd.arg("--cached");
+        }
+        "all" => {
+            cmd.arg("HEAD");
+        }
+        "compare" => {
+            let base = base_ref.context("base_ref is required when scope = compare")?;
+            cmd.arg(format!("{base}...HEAD"));
+        }
+        other => {
+            bail!("invalid change scope {other:?}; expected unstaged, staged, all, or compare")
+        }
+    }
+    let output = cmd
+        .output()
+        .with_context(|| format!("run git diff in {}", repo.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git diff failed: {}", stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn parse_changed_ranges(diff: &str) -> Vec<ChangedRange> {
+    let mut file: Option<String> = None;
+    let mut ranges = Vec::new();
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            file = parse_diff_file(rest);
+            continue;
+        }
+        if !line.starts_with("@@ ") {
+            continue;
+        }
+        let Some(path) = file.clone() else {
+            continue;
+        };
+        if path == "/dev/null" {
+            continue;
+        }
+        if let Some((start, count)) = parse_hunk_new_range(line) {
+            let end = if count == 0 {
+                start
+            } else {
+                start.saturating_add(count).saturating_sub(1)
+            };
+            ranges.push(ChangedRange {
+                file_path: path,
+                start_line: start.max(1),
+                end_line: end.max(start.max(1)),
+            });
+        }
+    }
+    merge_changed_ranges(ranges)
+}
+
+fn parse_diff_file(raw: &str) -> Option<String> {
+    let path = raw.split('\t').next().unwrap_or(raw);
+    if path == "/dev/null" {
+        return Some(path.to_string());
+    }
+    let path = path.strip_prefix("b/").unwrap_or(path);
+    Some(path.to_string())
+}
+
+fn parse_hunk_new_range(line: &str) -> Option<(u32, u32)> {
+    let plus = line.split_whitespace().find(|part| part.starts_with('+'))?;
+    let body = plus.strip_prefix('+')?;
+    let (start, count) = body.split_once(',').unwrap_or((body, "1"));
+    Some((start.parse().ok()?, count.parse().ok()?))
+}
+
+fn merge_changed_ranges(mut ranges: Vec<ChangedRange>) -> Vec<ChangedRange> {
+    ranges.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.end_line.cmp(&b.end_line))
+    });
+    let mut merged: Vec<ChangedRange> = Vec::new();
+    for range in ranges {
+        if let Some(last) = merged.last_mut() {
+            if last.file_path == range.file_path && range.start_line <= last.end_line + 1 {
+                last.end_line = last.end_line.max(range.end_line);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+fn changed_symbols_in_handle(
+    handle: &RepoHandle,
+    ranges: &[ChangedRange],
+) -> Result<Vec<ChangedSymbol>> {
+    let mut by_id: HashMap<String, ChangedSymbol> = HashMap::new();
+    let store = handle.store.lock().expect("store lock");
+    for range in ranges {
+        let rows = store.nodes_in_file(&range.file_path)?;
+        for row in rows {
+            let Some(start) = row.start_line else {
+                continue;
+            };
+            if !DEFINITION_LABELS.contains(&row.label.as_str()) {
+                continue;
+            }
+            let end = row.end_line.or(row.start_line).unwrap_or(start);
+            if end < range.start_line || start > range.end_line {
+                continue;
+            }
+            let entry = by_id
+                .entry(row.id.clone())
+                .or_insert_with(|| ChangedSymbol {
+                    node_id: row.id.clone(),
+                    name: row.name.clone().unwrap_or_default(),
+                    label: row.label.clone(),
+                    file_path: row.file_path.clone().unwrap_or_default(),
+                    start_line: start,
+                    end_line: end,
+                    ranges: Vec::new(),
+                });
+            entry.ranges.push(range.clone());
+        }
+    }
+    let mut out: Vec<ChangedSymbol> = by_id.into_values().collect();
+    for symbol in &mut out {
+        symbol.ranges = merge_changed_ranges(std::mem::take(&mut symbol.ranges));
+    }
+    out.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then_with(|| a.start_line.cmp(&b.start_line))
+            .then_with(|| a.node_id.cmp(&b.node_id))
+    });
+    Ok(out)
+}
+
 fn nearest_symbol_for_match(
     handle: &RepoHandle,
     file_path: &str,
@@ -993,6 +1251,42 @@ impl AkaBackend {
         }
         Ok(out)
     }
+
+    fn traverse_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        edge_label: &str,
+        f: impl Fn(&RepoHandle, u32) -> Vec<(u32, u32)>,
+    ) -> Result<Vec<SymbolRef>> {
+        let mut out = Vec::new();
+        for handle in self.targets(repo)? {
+            for node in handle.resolve_selector(selector)? {
+                for (n, depth) in f(&handle, node) {
+                    if let Some(row) = handle.node_row(n)? {
+                        out.push(SymbolRef {
+                            node_id: row.id.clone(),
+                            name: row.name.clone().unwrap_or_default(),
+                            label: row.label.clone(),
+                            file_path: row.file_path.clone().unwrap_or_default(),
+                            start_line: row.start_line.unwrap_or(0),
+                            edge_type: edge_label.to_string(),
+                            depth,
+                        });
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.start_line.cmp(&b.start_line))
+                .then_with(|| a.node_id.cmp(&b.node_id))
+        });
+        dedup_symbol_refs(&mut out);
+        Ok(out)
+    }
 }
 
 impl Default for AkaBackend {
@@ -1134,6 +1428,30 @@ impl Backend for AkaBackend {
         Ok(out)
     }
 
+    fn find_definition_by_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+    ) -> Result<Vec<SearchHit>> {
+        let mut out = Vec::new();
+        for handle in self.targets(repo)? {
+            out.extend(
+                handle
+                    .definition_rows_by_selector(selector)?
+                    .into_iter()
+                    .map(|r| row_to_hit(&r, 1.0)),
+            );
+        }
+        out.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.start_line.cmp(&b.start_line))
+                .then_with(|| a.node_id.cmp(&b.node_id))
+        });
+        Ok(out)
+    }
+
     fn references(&self, repo: Option<&str>, symbol: &str, limit: usize) -> Result<Vec<SymbolRef>> {
         let mut out = Vec::new();
         for handle in self.targets(repo)? {
@@ -1163,14 +1481,74 @@ impl Backend for AkaBackend {
         Ok(out)
     }
 
+    fn references_by_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        limit: usize,
+    ) -> Result<Vec<SymbolRef>> {
+        let mut out = Vec::new();
+        for handle in self.targets(repo)? {
+            for node in handle.resolve_selector(selector)? {
+                for nb in handle.adj.neighbors(node) {
+                    if nb.outgoing {
+                        continue;
+                    }
+                    if let Some(row) = handle.node_row(nb.node)? {
+                        out.push(SymbolRef {
+                            node_id: row.id.clone(),
+                            name: row.name.clone().unwrap_or_default(),
+                            label: row.label.clone(),
+                            file_path: row.file_path.clone().unwrap_or_default(),
+                            start_line: row.start_line.unwrap_or(0),
+                            edge_type: nb.edge_type.to_string(),
+                            depth: 1,
+                        });
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then_with(|| a.start_line.cmp(&b.start_line))
+                .then_with(|| a.node_id.cmp(&b.node_id))
+        });
+        dedup_symbol_refs(&mut out);
+        out.truncate(limit);
+        Ok(out)
+    }
+
     fn callers(&self, repo: Option<&str>, symbol: &str, depth: u32) -> Result<Vec<SymbolRef>> {
         self.traverse(repo, symbol, "CALLS", |h, n| {
             h.adj.callers(n, depth.max(1), 200)
         })
     }
 
+    fn callers_by_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        depth: u32,
+    ) -> Result<Vec<SymbolRef>> {
+        self.traverse_selector(repo, selector, "CALLS", |h, n| {
+            h.adj.callers(n, depth.max(1), 200)
+        })
+    }
+
     fn callees(&self, repo: Option<&str>, symbol: &str, depth: u32) -> Result<Vec<SymbolRef>> {
         self.traverse(repo, symbol, "CALLS", |h, n| {
+            h.adj.callees(n, depth.max(1), 200)
+        })
+    }
+
+    fn callees_by_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        depth: u32,
+    ) -> Result<Vec<SymbolRef>> {
+        self.traverse_selector(repo, selector, "CALLS", |h, n| {
             h.adj.callees(n, depth.max(1), 200)
         })
     }
@@ -1185,6 +1563,55 @@ impl Backend for AkaBackend {
         self.traverse(repo, symbol, "IMPACT", |h, n| {
             h.adj.impact(n, depth.max(1), limit)
         })
+    }
+
+    fn impact_by_selector(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        direction: ImpactDirection,
+        depth: u32,
+        limit: usize,
+    ) -> Result<Vec<SymbolRef>> {
+        let mut out = match direction {
+            ImpactDirection::Upstream => {
+                self.traverse_selector(repo, selector, "IMPACT", |h, n| {
+                    h.adj.impact(n, depth.max(1), limit)
+                })?
+            }
+            ImpactDirection::Downstream => {
+                self.traverse_selector(repo, selector, "CALLS", |h, n| {
+                    h.adj.callees(n, depth.max(1), limit)
+                })?
+            }
+            ImpactDirection::Both => {
+                let mut refs = self.impact_by_selector(
+                    repo,
+                    selector,
+                    ImpactDirection::Upstream,
+                    depth,
+                    limit,
+                )?;
+                refs.extend(self.impact_by_selector(
+                    repo,
+                    selector,
+                    ImpactDirection::Downstream,
+                    depth,
+                    limit,
+                )?);
+                refs
+            }
+        };
+        out.sort_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.start_line.cmp(&b.start_line))
+                .then_with(|| a.node_id.cmp(&b.node_id))
+        });
+        dedup_symbol_refs(&mut out);
+        out.truncate(limit);
+        Ok(out)
     }
 
     fn processes_of(&self, repo: Option<&str>, node_id: &str) -> Result<Vec<ProcessHit>> {
@@ -1303,6 +1730,143 @@ impl Backend for AkaBackend {
             .expect("handles lock")
             .remove(&PathBuf::from(repo_path));
         Ok(summary)
+    }
+
+    fn detect_changes(
+        &self,
+        repo: Option<&str>,
+        scope: &str,
+        base_ref: Option<&str>,
+    ) -> Result<ChangeDetection> {
+        let handles = self.targets(repo)?;
+        if repo.is_none() && handles.len() != 1 {
+            bail!(
+                "detect_changes requires repo when multiple repositories are indexed ({} ready)",
+                handles.len()
+            );
+        }
+        let handle = handles.first().context("repo handle")?;
+        let scope = scope.to_ascii_lowercase();
+        let diff = run_git_diff(&handle.entry.repo_path, &scope, base_ref)?;
+        let ranges = parse_changed_ranges(&diff);
+        let symbols = changed_symbols_in_handle(handle, &ranges)?;
+        Ok(ChangeDetection {
+            repo: handle.entry.name.clone(),
+            scope,
+            base_ref: base_ref.map(str::to_string),
+            ranges,
+            symbols,
+        })
+    }
+
+    fn route_map(&self, repo: Option<&str>, route: Option<&str>) -> Result<Vec<RouteMapEntry>> {
+        let mut out = Vec::new();
+        for handle in self.targets(repo)? {
+            let store = handle.store.lock().expect("store lock");
+            for route_row in store.nodes_by_label("Route", route, 500)? {
+                let route_name = route_row
+                    .name
+                    .clone()
+                    .or_else(|| string_prop(&route_row.props, "name"))
+                    .unwrap_or_else(|| route_row.id.clone());
+                let handlers = store.incoming_linked_nodes(route_row.rowid, &["HANDLES_ROUTE"])?;
+                let handler = handlers
+                    .first()
+                    .and_then(|h| h.node.file_path.clone().or(h.node.name.clone()))
+                    .or_else(|| route_row.file_path.clone())
+                    .or_else(|| string_prop(&route_row.props, "filePath"))
+                    .unwrap_or_default();
+                let consumers = store
+                    .incoming_linked_nodes(route_row.rowid, &["FETCHES", "HTTP_CALLS"])?
+                    .into_iter()
+                    .map(|linked| {
+                        let (accessed_keys, fetch_count) = parse_fetch_reason(&linked.reason);
+                        RouteConsumer {
+                            name: linked
+                                .node
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| linked.node.id.clone()),
+                            file_path: linked.node.file_path.unwrap_or_default(),
+                            accessed_keys,
+                            fetch_count,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let mut flows = Vec::new();
+                for p in store.entry_processes_of_node(route_row.rowid)? {
+                    flows.push(p.name);
+                }
+                if flows.is_empty() {
+                    for p in store.processes_of_node(route_row.rowid)? {
+                        flows.push(p.name);
+                    }
+                }
+                flows.sort();
+                flows.dedup();
+                out.push(RouteMapEntry {
+                    id: route_row.id.clone(),
+                    route: route_name,
+                    handler,
+                    middleware: string_array_prop(&route_row.props, "middleware"),
+                    response_keys: string_array_prop(&route_row.props, "responseKeys"),
+                    error_keys: string_array_prop(&route_row.props, "errorKeys"),
+                    consumers,
+                    flows,
+                    properties: Some(route_row.props.clone()),
+                });
+            }
+        }
+        out.sort_by(|a, b| a.route.cmp(&b.route).then_with(|| a.id.cmp(&b.id)));
+        Ok(out)
+    }
+
+    fn tool_map(&self, repo: Option<&str>, tool: Option<&str>) -> Result<Vec<ToolMapEntry>> {
+        let mut out = Vec::new();
+        for handle in self.targets(repo)? {
+            let store = handle.store.lock().expect("store lock");
+            for tool_row in store.nodes_by_label("Tool", tool, 500)? {
+                let handlers = store
+                    .incoming_linked_nodes(tool_row.rowid, &["HANDLES_TOOL"])?
+                    .into_iter()
+                    .map(|linked| row_to_hit(&linked.node, 1.0))
+                    .collect::<Vec<_>>();
+                let mut flows = Vec::new();
+                for p in store.entry_processes_of_node(tool_row.rowid)? {
+                    flows.push(p.name);
+                }
+                if flows.is_empty() {
+                    for p in store.processes_of_node(tool_row.rowid)? {
+                        flows.push(p.name);
+                    }
+                }
+                flows.sort();
+                flows.dedup();
+                out.push(ToolMapEntry {
+                    id: tool_row.id.clone(),
+                    name: tool_row
+                        .name
+                        .clone()
+                        .or_else(|| string_prop(&tool_row.props, "name"))
+                        .unwrap_or_else(|| tool_row.id.clone()),
+                    file_path: tool_row
+                        .file_path
+                        .clone()
+                        .or_else(|| string_prop(&tool_row.props, "filePath"))
+                        .unwrap_or_default(),
+                    description: string_prop(&tool_row.props, "description")
+                        .unwrap_or_default()
+                        .chars()
+                        .take(200)
+                        .collect(),
+                    handlers,
+                    flows,
+                    properties: Some(tool_row.props.clone()),
+                });
+            }
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        Ok(out)
     }
 
     // ── 仓库管理 ────────────────────────────────────────────────

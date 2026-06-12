@@ -78,6 +78,10 @@ impl RepoPaths {
         self.root.join("parse-cache")
     }
 
+    pub fn parse_cache_manifest_path(&self) -> PathBuf {
+        self.parse_cache_dir().join("manifest.json")
+    }
+
     pub fn graph_db(&self) -> PathBuf {
         self.root.join("graph.db")
     }
