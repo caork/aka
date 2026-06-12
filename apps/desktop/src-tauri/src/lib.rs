@@ -462,6 +462,7 @@ pub fn run() {
             let backend = configure_desktop_runtime(app).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("configure desktop runtime: {e:#}"))
             })?;
+            backend.start_auto_indexer();
             app.manage(Arc::new(backend));
             Ok(())
         })

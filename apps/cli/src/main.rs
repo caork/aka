@@ -115,7 +115,9 @@ fn main() -> Result<()> {
         }),
         Cmd::Serve { addr } => tokio_rt()?.block_on(async {
             eprintln!("aka ▸ http://{addr}");
-            aka_server::serve(Arc::new(AkaBackend::new()) as Arc<dyn Backend>, addr).await
+            let backend = AkaBackend::new();
+            backend.start_auto_indexer();
+            aka_server::serve(Arc::new(backend) as Arc<dyn Backend>, addr).await
         }),
     }
 }

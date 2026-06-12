@@ -11,16 +11,20 @@
 //!   checkout，用户自己的本地路径绝不动。
 //! - zip 解压防 zip-slip：entry 路径必须能 `enclosed_name()`（拒绝绝对路径与 `..`）。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 
 use aka_core::{
-    aka_home, clamp_render_nodes, ArtifactStats, EngineEvent, Registry, RepoEntry, RepoPaths,
-    DEFAULT_RENDER_MAX_NODES,
+    aka_home, clamp_render_nodes, load_index_state, ArtifactStats, EngineEvent, IndexState,
+    Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
 };
 use aka_graph::{Adjacency, GraphStore, NodeRow};
 use aka_mcp::{
@@ -52,6 +56,8 @@ const DEFINITION_LABELS: &[&str] = &[
 ];
 
 const JOB_LOG_LIMIT: usize = 80;
+const AUTO_INDEX_SCAN_INTERVAL: Duration = Duration::from_secs(4);
+const AUTO_INDEX_DEBOUNCE: Duration = Duration::from_secs(3);
 
 pub struct RepoHandle {
     pub entry: RepoEntry,
@@ -368,6 +374,24 @@ impl JobInfo {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RepoQuickState {
+    files: BTreeMap<String, QuickFingerprint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuickFingerprint {
+    size: u64,
+    modified: u128,
+}
+
+#[derive(Debug, Clone)]
+struct AutoIndexState {
+    quick: RepoQuickState,
+    first_seen_dirty: Option<Instant>,
+    last_dirty_quick: Option<RepoQuickState>,
+}
+
 fn engine_percent(phase: &str, current: u64, total: u64) -> f32 {
     if total > 0 {
         let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
@@ -419,14 +443,293 @@ fn run_analyze_job(
     Ok(())
 }
 
+fn run_auto_analyze_job(
+    jobs: &Arc<Mutex<HashMap<String, JobInfo>>>,
+    name: &str,
+    repo: PathBuf,
+    engine_dir: Option<PathBuf>,
+) -> Result<()> {
+    update_job(jobs, name, |job| {
+        job.push_log("auto-index: workspace change detected");
+    });
+    run_analyze_job(jobs, name, repo, engine_dir)
+}
+
 fn job_matches_key(name: &str, job: &JobInfo, key: &str) -> bool {
     name == key || job.path.to_string_lossy() == key
+}
+
+fn run_auto_indexer(
+    auto: Arc<AutoIndexer>,
+    jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
+    handles: Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
+    engine_dir: Option<PathBuf>,
+) {
+    while !auto.stop.load(Ordering::Relaxed) {
+        if let Ok(registry) = Registry::load() {
+            auto_index_scan(&auto, &jobs, &handles, engine_dir.clone(), registry);
+        }
+        std::thread::sleep(AUTO_INDEX_SCAN_INTERVAL);
+    }
+    auto.running.store(false, Ordering::Relaxed);
+}
+
+fn auto_index_scan(
+    auto: &Arc<AutoIndexer>,
+    jobs: &Arc<Mutex<HashMap<String, JobInfo>>>,
+    handles: &Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
+    engine_dir: Option<PathBuf>,
+    registry: Registry,
+) {
+    if jobs
+        .lock()
+        .expect("jobs lock")
+        .values()
+        .any(|job| job.status == "indexing")
+    {
+        return;
+    }
+
+    let registered_names: HashSet<String> = registry.repos.iter().map(|r| r.name.clone()).collect();
+    auto.states
+        .lock()
+        .expect("auto index states lock")
+        .retain(|name, _| registered_names.contains(name));
+
+    for entry in registry.repos {
+        if entry.source_kind == "zip" {
+            continue;
+        }
+        if jobs
+            .lock()
+            .expect("jobs lock")
+            .get(&entry.name)
+            .is_some_and(|job| job.status == "indexing")
+        {
+            continue;
+        }
+        let Ok(current_quick) = RepoQuickState::compute(&entry.repo_path) else {
+            continue;
+        };
+        let should_analyze = {
+            let mut states = auto.states.lock().expect("auto index states lock");
+            let state = states
+                .entry(entry.name.clone())
+                .or_insert_with(|| AutoIndexState {
+                    quick: current_quick.clone(),
+                    first_seen_dirty: None,
+                    last_dirty_quick: None,
+                });
+            auto_index_should_analyze(state, current_quick, Instant::now())
+        };
+        if should_analyze && auto_index_has_delta(&entry) {
+            spawn_auto_index_job(
+                entry,
+                Arc::clone(jobs),
+                Arc::clone(handles),
+                engine_dir.clone(),
+            );
+            return;
+        }
+    }
+}
+
+fn auto_index_should_analyze(
+    state: &mut AutoIndexState,
+    current: RepoQuickState,
+    now: Instant,
+) -> bool {
+    if current == state.quick {
+        state.first_seen_dirty = None;
+        state.last_dirty_quick = None;
+        return false;
+    }
+    if state.last_dirty_quick.as_ref() != Some(&current) {
+        state.first_seen_dirty = Some(now);
+        state.last_dirty_quick = Some(current);
+        return false;
+    }
+    if state
+        .first_seen_dirty
+        .is_some_and(|first| now.duration_since(first) >= AUTO_INDEX_DEBOUNCE)
+    {
+        state.quick = current;
+        state.first_seen_dirty = None;
+        state.last_dirty_quick = None;
+        return true;
+    }
+    false
+}
+
+fn auto_index_has_delta(entry: &RepoEntry) -> bool {
+    let paths = RepoPaths {
+        root: entry.data_dir.clone(),
+    };
+    let previous = match load_index_state(&paths.index_state_path()) {
+        Ok(previous) => previous,
+        Err(_) => return true,
+    };
+    let current = match IndexState::compute(&entry.repo_path, entry.engine_sha.clone(), false) {
+        Ok(current) => current,
+        Err(_) => return false,
+    };
+    !current.delta_from(previous.as_ref()).is_empty()
+}
+
+fn spawn_auto_index_job(
+    entry: RepoEntry,
+    jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
+    handles: Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
+    engine_dir: Option<PathBuf>,
+) {
+    {
+        let mut jobs_guard = jobs.lock().expect("jobs lock");
+        if jobs_guard
+            .get(&entry.name)
+            .is_some_and(|job| job.status == "indexing")
+        {
+            return;
+        }
+        let mut job = JobInfo::new(
+            &entry.source_kind,
+            entry.source_url.clone(),
+            entry.repo_path.clone(),
+        );
+        job.set_stage("queued", "Workspace changed; refreshing index", 2.0);
+        jobs_guard.insert(entry.name.clone(), job);
+    }
+    let name = entry.name.clone();
+    let repo_path = entry.repo_path.clone();
+    std::thread::spawn(move || {
+        match run_auto_analyze_job(&jobs, &name, repo_path.clone(), engine_dir) {
+            Ok(()) => {
+                handles.lock().expect("handles lock").remove(&repo_path);
+                jobs.lock().expect("jobs lock").remove(&name);
+            }
+            Err(e) => {
+                if let Some(job) = jobs.lock().expect("jobs lock").get_mut(&name) {
+                    job.status = "failed".into();
+                    let detail = format!("{e:#}");
+                    job.detail = Some(detail.clone());
+                    job.progress.stage = "failed".into();
+                    job.progress.message = "Auto index failed".into();
+                    job.push_log(format!("failed: {detail}"));
+                }
+            }
+        }
+    });
+}
+
+impl RepoQuickState {
+    fn compute(repo: &Path) -> std::io::Result<Self> {
+        let mut files = BTreeMap::new();
+        collect_quick_state(repo, repo, &mut files)?;
+        Ok(Self { files })
+    }
+}
+
+fn collect_quick_state(
+    repo: &Path,
+    dir: &Path,
+    out: &mut BTreeMap<String, QuickFingerprint>,
+) -> std::io::Result<()> {
+    let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if file_type.is_dir() {
+            if is_auto_index_skipped_dir(&name) {
+                continue;
+            }
+            collect_quick_state(repo, &path, out)?;
+        } else if file_type.is_file() {
+            if is_auto_index_skipped_file(&name) {
+                continue;
+            }
+            let Some(rel) = path.strip_prefix(repo).ok() else {
+                continue;
+            };
+            let meta = entry.metadata()?;
+            out.insert(
+                rel.to_string_lossy().replace('\\', "/"),
+                QuickFingerprint {
+                    size: meta.len(),
+                    modified: meta
+                        .modified()
+                        .ok()
+                        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_auto_index_skipped_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | ".hg"
+            | ".svn"
+            | ".aka"
+            | ".claude"
+            | ".cursor"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | "coverage"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | ".next"
+            | ".nuxt"
+            | ".turbo"
+    )
+}
+
+fn is_auto_index_skipped_file(name: &str) -> bool {
+    matches!(name, ".DS_Store")
 }
 
 pub struct AkaBackend {
     handles: Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
+    auto_indexer: Arc<AutoIndexer>,
     engine_dir: Option<PathBuf>,
+}
+
+struct AutoIndexer {
+    stop: AtomicBool,
+    running: AtomicBool,
+    states: Mutex<HashMap<String, AutoIndexState>>,
+}
+
+impl AutoIndexer {
+    fn new() -> Self {
+        Self {
+            stop: AtomicBool::new(false),
+            running: AtomicBool::new(false),
+            states: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Drop for AutoIndexer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for AkaBackend {
+    fn drop(&mut self) {
+        self.auto_indexer.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 /// git / zip 导入的受管 checkout 根目录。
@@ -1059,6 +1362,7 @@ impl AkaBackend {
         Self {
             handles: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            auto_indexer: Arc::new(AutoIndexer::new()),
             engine_dir: None,
         }
     }
@@ -1086,6 +1390,7 @@ impl AkaBackend {
         Self {
             handles: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            auto_indexer: Arc::new(AutoIndexer::new()),
             engine_dir: Some(engine_dir),
         }
     }
@@ -1104,6 +1409,20 @@ impl AkaBackend {
 
     pub fn clear_cached_handles(&self) {
         self.handles.lock().expect("handles lock").clear();
+    }
+
+    pub fn start_auto_indexer(&self) {
+        let auto = Arc::clone(&self.auto_indexer);
+        if auto.running.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        auto.stop.store(false, Ordering::Relaxed);
+        let jobs = Arc::clone(&self.jobs);
+        let handles = Arc::clone(&self.handles);
+        let engine_dir = self.engine_dir();
+        std::thread::spawn(move || {
+            run_auto_indexer(auto, jobs, handles, engine_dir);
+        });
     }
 
     /// 名字可用性守卫：已注册或有进行中任务 → 拒绝。
