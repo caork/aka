@@ -1,8 +1,8 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { Camera } from "../graph/camera";
-import type { ClusterSummary, GraphData } from "../graph/format";
-import { loadClusterGraph, loadEgoGraph, loadRealGraph } from "../graph/source";
+import type { GraphData } from "../graph/format";
+import { loadEgoGraph, loadRealGraph } from "../graph/source";
 import { SpatialGrid } from "../graph/grid";
 import { LabelOverlay } from "../graph/labels";
 import {
@@ -20,17 +20,8 @@ const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 
 const ACCENT_RGB = hexToRgb(ACCENT);
 const BEACON_RGB = hexToRgb(BEACON);
-const LOD_NAMES = ["far", "mid", "near"] as const;
 const BEACON_COUNT = 12;
 const EGO_DEPTH = 2;
-const DETAIL_ENTER_ZOOM = 3.2;
-const OVERVIEW_EXIT_ZOOM = 1.8;
-
-type GraphMode = "overview" | "detail" | "ego";
-
-interface ApplyDataOptions {
-  resetCamera?: boolean;
-}
 
 interface Stats {
   fps: number;
@@ -53,12 +44,6 @@ interface EgoState {
   name: string;
 }
 
-interface ClusterPanelState {
-  summary: ClusterSummary;
-  x: number;
-  y: number;
-}
-
 interface Rig {
   renderer: GraphRenderer;
   camera: Camera;
@@ -75,7 +60,7 @@ interface Rig {
   mouseDirty: boolean;
   dragging: boolean;
   moved: boolean;
-  applyData(data: GraphData, options?: ApplyDataOptions): void;
+  applyData(data: GraphData): void;
 }
 
 export default function GraphView() {
@@ -84,12 +69,6 @@ export default function GraphView() {
   const labelRef = useRef<HTMLCanvasElement>(null);
   const rigRef = useRef<Rig | null>(null);
   const onSelectRef = useRef<(i: number) => void>(() => {});
-  const overviewDataRef = useRef<GraphData | null>(null);
-  const detailDataRef = useRef<GraphData | null>(null);
-  const graphModeRef = useRef<GraphMode>("overview");
-  const layerLoadRef = useRef<AbortController | null>(null);
-  const requestDetailRef = useRef<() => void>(() => {});
-  const requestOverviewRef = useRef<() => void>(() => {});
 
   const repoId = useAppStore((s) => s.selectedRepoId);
   const repo = useAppStore(
@@ -110,12 +89,11 @@ export default function GraphView() {
   const [emptyReason, setEmptyReason] = useState<"none" | "missing" | "unavailable">("none");
   const [ego, setEgo] = useState<EgoState | null>(null);
   const [egoError, setEgoError] = useState<string | null>(null);
-  const [clusterPanel, setClusterPanel] = useState<ClusterPanelState | null>(null);
 
-  /** symbol-level LOD budget; loaded when the user zooms into detail. */
-  const renderBudget = repo?.renderMaxNodes ?? null;
   /** 仓库总节点数（来自 /api/repos stats），用于徽章 "已渲染 N / 总数" */
   const totalNodes = repo?.symbols ?? 0;
+  /** 全图渲染预算：优先用仓库总符号数，避免回退到后端默认 LOD 截断。 */
+  const renderBudget = totalNodes > 0 ? totalNodes : (repo?.renderMaxNodes ?? null);
   const repoPending = repo?.status === "indexing" || repo?.status === "failed";
 
   /* ---- rig：渲染器 / 相机 / 交互，仅挂载一次 ---- */
@@ -142,7 +120,7 @@ export default function GraphView() {
       mouseDirty: false,
       dragging: false,
       moved: false,
-      applyData(data: GraphData, options: ApplyDataOptions = {}) {
+      applyData(data: GraphData) {
         const grid = new SpatialGrid(data.positions, data.count, data.bounds);
 
         /* beacons: highest-degree hubs across distinct clusters */
@@ -178,13 +156,8 @@ export default function GraphView() {
         rig.hoverIndex = -1;
         rig.selectedIndex = -1;
         setHover(null);
-        setClusterPanel(null);
         renderer.setData(data);
-        if (options.resetCamera ?? true) {
-          camera.fitBounds(data.bounds, true);
-        } else {
-          camera.setFit(data.bounds);
-        }
+        camera.fitBounds(data.bounds, true);
         setStats((s) => ({ ...s, nodes: data.count, edges: data.edgeCount }));
       },
     };
@@ -340,20 +313,6 @@ export default function GraphView() {
       lastT = t;
       camera.update(dt);
       const lod = computeLod(camera.zoomLevel);
-      if (rig.centerIndex < 0) {
-        if (
-          graphModeRef.current === "overview" &&
-          camera.zoomLevel >= DETAIL_ENTER_ZOOM
-        ) {
-          requestDetailRef.current();
-        } else if (
-          graphModeRef.current === "detail" &&
-          overviewDataRef.current &&
-          camera.zoomLevel <= OVERVIEW_EXIT_ZOOM
-        ) {
-          requestOverviewRef.current();
-        }
-      }
 
       /* hover picking — at most once per frame */
       if (rig.mouseDirty && !rig.dragging && rig.grid && rig.data) {
@@ -432,60 +391,10 @@ export default function GraphView() {
     };
   }, []);
 
-  requestDetailRef.current = () => {
-    const rig = rigRef.current;
-    if (!rig || !repoId || repoPending || ego || graphModeRef.current !== "overview") {
-      return;
-    }
-    if (detailDataRef.current) {
-      graphModeRef.current = "detail";
-      rig.applyData(detailDataRef.current, { resetCamera: false });
-      return;
-    }
-    if (layerLoadRef.current) return;
-    const repoAtStart = repoId;
-    const ctrl = new AbortController();
-    layerLoadRef.current = ctrl;
-    void loadRealGraph(repoAtStart, renderBudget, ctrl.signal)
-      .then((data) => {
-        if (
-          !data ||
-          ctrl.signal.aborted ||
-          repoAtStart !== useAppStore.getState().selectedRepoId
-        ) {
-          return;
-        }
-        detailDataRef.current = data;
-        if (graphModeRef.current === "overview") {
-          const currentRig = rigRef.current;
-          if (!currentRig) return;
-          if (currentRig.camera.zoomLevel < DETAIL_ENTER_ZOOM) return;
-          graphModeRef.current = "detail";
-          currentRig.applyData(data, { resetCamera: false });
-        }
-      })
-      .finally(() => {
-        if (layerLoadRef.current === ctrl) layerLoadRef.current = null;
-      });
-  };
-
-  requestOverviewRef.current = () => {
-    const rig = rigRef.current;
-    const data = overviewDataRef.current;
-    if (!rig || !data || graphModeRef.current !== "detail") return;
-    graphModeRef.current = "overview";
-    rig.applyData(data, { resetCamera: false });
-  };
-
   /* ---- data：跟随 selectedRepoId / ego 状态加载，可取消 ---- */
   useEffect(() => {
     const rig = rigRef.current;
     if (!rig) return;
-    layerLoadRef.current?.abort();
-    layerLoadRef.current = null;
-    overviewDataRef.current = null;
-    detailDataRef.current = null;
-    graphModeRef.current = ego ? "ego" : "overview";
     if (!repoId || !repo) {
       rig.renderer.clearData();
       rig.labels.clear();
@@ -496,7 +405,6 @@ export default function GraphView() {
       rig.selectedIndex = -1;
       rig.hoverIndex = -1;
       setHover(null);
-      setClusterPanel(null);
       setStats((s) => ({ ...s, nodes: 0, edges: 0 }));
       setLoading(false);
       setEmptyReason("missing");
@@ -512,7 +420,6 @@ export default function GraphView() {
       rig.selectedIndex = -1;
       rig.hoverIndex = -1;
       setHover(null);
-      setClusterPanel(null);
       setLoading(false);
       setEmptyReason("none");
       setEgo(null);
@@ -540,7 +447,6 @@ export default function GraphView() {
         ).catch(() => null);
         if (cancelled) return;
         if (data) {
-          graphModeRef.current = "ego";
           rig.applyData(data);
           rig.centerIndex = 0; /* 合同：ego 中心节点 i=0 */
           setEmptyReason("none");
@@ -552,19 +458,12 @@ export default function GraphView() {
           setEgo(null);
         }
       } else {
-        const data =
-          (await loadClusterGraph(repoId, ctrl.signal).catch(() => null)) ??
-          (await loadRealGraph(repoId, renderBudget, ctrl.signal).catch(() => null));
+        const data = await loadRealGraph(repoId, renderBudget, ctrl.signal).catch(
+          () => null,
+        );
         if (cancelled) return;
         rig.centerIndex = -1;
         if (data) {
-          if (data.id(0).startsWith("cluster:")) {
-            overviewDataRef.current = data;
-            graphModeRef.current = "overview";
-          } else {
-            detailDataRef.current = data;
-            graphModeRef.current = "detail";
-          }
           rig.applyData(data);
           setEmptyReason("none");
         } else {
@@ -577,7 +476,6 @@ export default function GraphView() {
           rig.selectedIndex = -1;
           rig.hoverIndex = -1;
           setHover(null);
-          setClusterPanel(null);
           setStats((s) => ({ ...s, nodes: 0, edges: 0 }));
           setEmptyReason("unavailable");
         }
@@ -588,8 +486,6 @@ export default function GraphView() {
     return () => {
       cancelled = true;
       ctrl.abort();
-      layerLoadRef.current?.abort();
-      layerLoadRef.current = null;
     };
   }, [repoId, repo, repoPending, ego, renderBudget]);
 
@@ -605,7 +501,7 @@ export default function GraphView() {
      等当前数据加载完成后消费：
      · 在已加载图中找到节点 → 相机平滑动画到该节点（只写 target，不动
        fitK/LOD 基准），选中（发光蓝）并打开 DetailPanel；
-     · 没找到（被 LOD 截断 / 不在当前 ego 子图）→ 回退走与 requestEgo
+     · 没找到（不在当前 ego 子图）→ 回退走与 requestEgo
        相同的 ego 加载路径，以该节点为中心。 */
   useEffect(() => {
     if (!focusRequest || loading) return;
@@ -622,7 +518,6 @@ export default function GraphView() {
     clearFocusRequest();
     if (found >= 0) {
       rig.selectedIndex = found;
-      setClusterPanel(null);
       focusCameraOn(
         rig.camera,
         d.positions[found * 2],
@@ -645,25 +540,14 @@ export default function GraphView() {
   onSelectRef.current = (i: number) => {
     const rig = rigRef.current;
     if (!rig?.data || i < 0) {
-      setClusterPanel(null);
       closeDetail();
       return;
     }
     const d = rig.data;
     if (d.id(i).startsWith("cluster:")) {
-      const summary = d.clusterSummaryByNode(i);
-      if (summary) {
-        closeDetail();
-        setHover(null);
-        setClusterPanel({
-          summary,
-          x: rig.mouseX,
-          y: rig.mouseY,
-        });
-      }
+      closeDetail();
       return;
     }
-    setClusterPanel(null);
     openDetail({
       id: d.id(i),
       name: d.name(i),
@@ -678,9 +562,7 @@ export default function GraphView() {
     const rig = rigRef.current;
     if (!rig) return;
     if (!detailTarget) {
-      if (!clusterPanel) {
-        rig.selectedIndex = -1;
-      }
+      rig.selectedIndex = -1;
       return;
     }
     if (
@@ -690,7 +572,7 @@ export default function GraphView() {
     ) {
       rig.selectedIndex = -1;
     }
-  }, [detailTarget, clusterPanel]);
+  }, [detailTarget]);
 
   const zoom = (factor: number) => {
     const rig = rigRef.current;
@@ -861,24 +743,9 @@ export default function GraphView() {
         )}
       </AnimatePresence>
 
-      {/* cluster summary */}
-      <AnimatePresence>
-        {clusterPanel && !loading && !ego && (
-          <ClusterSummaryPanel
-            state={clusterPanel}
-            containerWidth={containerRef.current?.clientWidth ?? 960}
-            onClose={() => {
-              setClusterPanel(null);
-              const rig = rigRef.current;
-              if (rig) rig.selectedIndex = -1;
-            }}
-          />
-        )}
-      </AnimatePresence>
-
       {/* hover tooltip */}
       <AnimatePresence>
-        {hover && !detailTarget && !clusterPanel && (
+        {hover && !detailTarget && (
           <motion.div
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
@@ -970,13 +837,6 @@ export default function GraphView() {
           </span>{" "}
           edges
         </span>
-        <span
-          className="rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-ink-2"
-          style={{ background: "var(--subtle-fill)" }}
-          data-testid="lod-level"
-        >
-          {LOD_NAMES[stats.lod]}
-        </span>
       </motion.div>
     </div>
   );
@@ -1009,162 +869,6 @@ function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
   return String(n);
-}
-
-function formatPercent(n: number): string {
-  return `${Math.round(Math.max(0, Math.min(1, n)) * 100)}%`;
-}
-
-function formatBasis(basis: string): string {
-  const [, value = basis] = basis.split(/:(.*)/s);
-  return value;
-}
-
-function lineLabel(line?: number): string {
-  return typeof line === "number" && Number.isFinite(line) ? `:${line}` : "";
-}
-
-function ClusterSummaryPanel({
-  state,
-  containerWidth,
-  onClose,
-}: {
-  state: ClusterPanelState;
-  containerWidth: number;
-  onClose(): void;
-}) {
-  const { summary } = state;
-  const left =
-    containerWidth < 720
-      ? 16
-      : Math.min(
-          Math.max(16, state.x + 18),
-          Math.max(16, containerWidth - 388),
-        );
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 6, scale: 0.98 }}
-      transition={spring}
-      className="glass-panel absolute top-16 z-20 max-h-[calc(100%-104px)] w-[min(372px,calc(100%-32px))] overflow-hidden px-4 py-3.5"
-      style={{ left }}
-      data-graph-ui
-      data-testid="cluster-summary-panel"
-    >
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-[14px] font-semibold text-ink">
-              {summary.display_label}
-            </span>
-            <span className="badge Community flex-none">Community</span>
-          </div>
-          <div className="mono mt-1 truncate text-[10.5px] text-ink-3">
-            {summary.label}
-          </div>
-        </div>
-        <button
-          aria-label="Close cluster summary"
-          onClick={onClose}
-          className="focus-ring -mr-1 flex h-7 w-7 flex-none items-center justify-center rounded-[7px] text-[15px] leading-none text-ink-3 transition-colors duration-150 ease-out hover:bg-[var(--hover-fill)] hover:text-ink"
-        >
-          x
-        </button>
-      </div>
-
-      <div className="mt-3 flex flex-wrap gap-1.5 text-[10.5px] font-semibold text-ink-2">
-        <span
-          className="rounded-[6px] px-2 py-1"
-          style={{ background: "var(--accent-fill)" }}
-        >
-          confidence {formatPercent(summary.quality.confidence)}
-        </span>
-        <span
-          className="rounded-[6px] px-2 py-1"
-          style={{ background: "var(--success-fill)" }}
-        >
-          cohesion {formatPercent(summary.quality.cohesion)}
-        </span>
-        <span
-          className="rounded-[6px] px-2 py-1"
-          style={{ background: "var(--subtle-fill)" }}
-        >
-          boundary {formatPercent(summary.quality.boundary_ratio)}
-        </span>
-      </div>
-
-      <div
-        className="mt-3 h-px"
-        style={{ background: "var(--hairline)" }}
-      />
-
-      <div className="scroll-area max-h-[calc(100vh-288px)] pr-1">
-        <div className="mt-3">
-          <div className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-ink-3">
-            Top files
-          </div>
-          <div className="mt-2 space-y-1.5">
-            {summary.top_files.slice(0, 5).map((file) => (
-              <div key={file.path} className="flex items-center gap-2 text-[11.5px]">
-                <span className="mono min-w-0 flex-1 truncate text-ink-2">
-                  {file.path}
-                </span>
-                <span className="tabular flex-none text-ink-3">
-                  {file.symbols}/{file.nodes}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="mt-4">
-          <div className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-ink-3">
-            Top symbols
-          </div>
-          <div className="mt-2 space-y-1.5">
-            {summary.top_symbols.slice(0, 5).map((symbol) => (
-              <div key={symbol.id} className="min-w-0">
-                <div className="flex items-center gap-2 text-[11.5px]">
-                  <span className="mono min-w-0 flex-1 truncate font-medium text-ink">
-                    {symbol.name}
-                  </span>
-                  <span className={`badge ${symbol.label} flex-none`}>
-                    {symbol.label}
-                  </span>
-                </div>
-                <div className="mono mt-0.5 truncate text-[10.5px] text-ink-3">
-                  {symbol.file_path ?? "no file"}
-                  {lineLabel(symbol.start_line)}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="mt-4">
-          <div className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-ink-3">
-            Label basis
-          </div>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {summary.label_basis.map((basis) => (
-              <span
-                key={basis}
-                className="mono max-w-full truncate rounded-[6px] px-2 py-1 text-[10.5px] text-ink-2"
-                style={{ background: "var(--subtle-fill-2)" }}
-              >
-                {formatBasis(basis)}
-              </span>
-            ))}
-          </div>
-        </div>
-
-        <p className="mt-4 text-[11.5px] leading-relaxed text-ink-2">
-          {summary.quality.explanation}
-        </p>
-      </div>
-    </motion.div>
-  );
 }
 
 function CtrlButton({
