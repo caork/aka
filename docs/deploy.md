@@ -110,6 +110,7 @@ docker load -i aka-0.1.0-linux-amd64.docker.tar.gz       # 走 release 资产（
 - `aka-<版本>-x86_64-pc-windows-msvc.zip` — Windows `aka.exe`
 - `aka-desktop-<版本>-aarch64-apple-darwin.dmg` — macOS GUI 安装镜像（桌面端更新检查优先展示）
 - `aka-desktop-<版本>-aarch64-apple-darwin.app.zip` — macOS GUI（zip 内是 `aka.app`）
+- `aka-desktop-<版本>-macos-open.sh` — macOS 无 Apple Developer ID/无公证包打开助手
 - `aka-desktop-<版本>-x86_64-pc-windows-msvc-setup.exe` — Windows GUI 安装包
 - `aka-desktop-<版本>-x86_64-pc-windows-msvc-portable.zip` — Windows GUI 免安装包
 - `latest.json` — 桌面端更新清单，可同步到 `https://aka.hawkingrad.com/releases/latest.json`

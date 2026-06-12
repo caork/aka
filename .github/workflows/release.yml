@@ -169,6 +169,17 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Package macOS desktop GUI
+        env:
+          AKA_MACOS_SIGN: auto
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
         run: scripts/package-release.sh --version "${{ steps.ver.outputs.version }}" --desktop-only
 
       - name: Upload to release
@@ -179,7 +190,7 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || \
             gh release view "$GITHUB_REF_NAME" >/dev/null
-          gh release upload "$GITHUB_REF_NAME" dist/aka-desktop-*.dmg dist/aka-desktop-*.app.zip --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/aka-desktop-*.dmg dist/aka-desktop-*.app.zip dist/aka-desktop-*-macos-open.sh --clobber
 
       - uses: actions/upload-artifact@v4
         if: github.ref_type != 'tag'
@@ -188,6 +199,7 @@ jobs:
           path: |
             dist/aka-desktop-*.dmg
             dist/aka-desktop-*.app.zip
+            dist/aka-desktop-*-macos-open.sh
 
   windows-desktop:
     runs-on: windows-latest
@@ -207,6 +219,10 @@ jobs:
         shell: pwsh
         run: npm ci
         working-directory: apps/desktop
+
+      - name: Install Windows packaging tools
+        shell: pwsh
+        run: choco install zip --no-progress -y
 
       - name: Build Windows desktop GUI
         id: pkg
