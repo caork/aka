@@ -513,14 +513,16 @@ fn auto_index_scan(
         };
         let should_analyze = {
             let mut states = auto.states.lock().expect("auto index states lock");
-            let state = states
-                .entry(entry.name.clone())
-                .or_insert_with(|| AutoIndexState {
-                    quick: current_quick.clone(),
-                    first_seen_dirty: None,
-                    last_dirty_quick: None,
-                });
-            auto_index_should_analyze(state, current_quick, Instant::now())
+            if let Some(state) = states.get_mut(&entry.name) {
+                auto_index_should_analyze(state, current_quick, Instant::now())
+            } else {
+                let is_dirty = auto_index_has_delta(&entry);
+                states.insert(
+                    entry.name.clone(),
+                    auto_index_initial_state(current_quick, is_dirty, Instant::now()),
+                );
+                false
+            }
         };
         if should_analyze && auto_index_has_delta(&entry) {
             spawn_auto_index_job(
@@ -534,12 +536,24 @@ fn auto_index_scan(
     }
 }
 
+fn auto_index_initial_state(
+    current: RepoQuickState,
+    is_dirty: bool,
+    now: Instant,
+) -> AutoIndexState {
+    AutoIndexState {
+        quick: current.clone(),
+        first_seen_dirty: is_dirty.then_some(now),
+        last_dirty_quick: is_dirty.then_some(current),
+    }
+}
+
 fn auto_index_should_analyze(
     state: &mut AutoIndexState,
     current: RepoQuickState,
     now: Instant,
 ) -> bool {
-    if current == state.quick {
+    if current == state.quick && state.last_dirty_quick.is_none() {
         state.first_seen_dirty = None;
         state.last_dirty_quick = None;
         return false;

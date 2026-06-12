@@ -23,6 +23,14 @@ const BEACON_RGB = hexToRgb(BEACON);
 const LOD_NAMES = ["far", "mid", "near"] as const;
 const BEACON_COUNT = 12;
 const EGO_DEPTH = 2;
+const DETAIL_ENTER_ZOOM = 3.2;
+const OVERVIEW_EXIT_ZOOM = 1.8;
+
+type GraphMode = "overview" | "detail" | "ego";
+
+interface ApplyDataOptions {
+  resetCamera?: boolean;
+}
 
 interface Stats {
   fps: number;
@@ -61,7 +69,7 @@ interface Rig {
   mouseDirty: boolean;
   dragging: boolean;
   moved: boolean;
-  applyData(data: GraphData): void;
+  applyData(data: GraphData, options?: ApplyDataOptions): void;
 }
 
 export default function GraphView() {
@@ -70,6 +78,12 @@ export default function GraphView() {
   const labelRef = useRef<HTMLCanvasElement>(null);
   const rigRef = useRef<Rig | null>(null);
   const onSelectRef = useRef<(i: number) => void>(() => {});
+  const overviewDataRef = useRef<GraphData | null>(null);
+  const detailDataRef = useRef<GraphData | null>(null);
+  const graphModeRef = useRef<GraphMode>("overview");
+  const layerLoadRef = useRef<AbortController | null>(null);
+  const requestDetailRef = useRef<() => void>(() => {});
+  const requestOverviewRef = useRef<() => void>(() => {});
 
   const repoId = useAppStore((s) => s.selectedRepoId);
   const repo = useAppStore(
@@ -91,7 +105,7 @@ export default function GraphView() {
   const [ego, setEgo] = useState<EgoState | null>(null);
   const [egoError, setEgoError] = useState<string | null>(null);
 
-  /** symbol-level LOD budget; cluster overview is only a fallback. */
+  /** symbol-level LOD budget; loaded when the user zooms into detail. */
   const renderBudget = repo?.renderMaxNodes ?? null;
   /** 仓库总节点数（来自 /api/repos stats），用于徽章 "已渲染 N / 总数" */
   const totalNodes = repo?.symbols ?? 0;
@@ -121,7 +135,7 @@ export default function GraphView() {
       mouseDirty: false,
       dragging: false,
       moved: false,
-      applyData(data: GraphData) {
+      applyData(data: GraphData, options: ApplyDataOptions = {}) {
         const grid = new SpatialGrid(data.positions, data.count, data.bounds);
 
         /* beacons: highest-degree hubs across distinct clusters */
@@ -158,7 +172,11 @@ export default function GraphView() {
         rig.selectedIndex = -1;
         setHover(null);
         renderer.setData(data);
-        camera.fitBounds(data.bounds, true);
+        if (options.resetCamera ?? true) {
+          camera.fitBounds(data.bounds, true);
+        } else {
+          camera.setFit(data.bounds);
+        }
         setStats((s) => ({ ...s, nodes: data.count, edges: data.edgeCount }));
       },
     };
@@ -302,6 +320,20 @@ export default function GraphView() {
       lastT = t;
       camera.update(dt);
       const lod = computeLod(camera.zoomLevel);
+      if (rig.centerIndex < 0) {
+        if (
+          graphModeRef.current === "overview" &&
+          camera.zoomLevel >= DETAIL_ENTER_ZOOM
+        ) {
+          requestDetailRef.current();
+        } else if (
+          graphModeRef.current === "detail" &&
+          overviewDataRef.current &&
+          camera.zoomLevel <= OVERVIEW_EXIT_ZOOM
+        ) {
+          requestOverviewRef.current();
+        }
+      }
 
       /* hover picking — at most once per frame */
       if (rig.mouseDirty && !rig.dragging && rig.grid && rig.data) {
@@ -380,10 +412,60 @@ export default function GraphView() {
     };
   }, []);
 
+  requestDetailRef.current = () => {
+    const rig = rigRef.current;
+    if (!rig || !repoId || repoPending || ego || graphModeRef.current !== "overview") {
+      return;
+    }
+    if (detailDataRef.current) {
+      graphModeRef.current = "detail";
+      rig.applyData(detailDataRef.current, { resetCamera: false });
+      return;
+    }
+    if (layerLoadRef.current) return;
+    const repoAtStart = repoId;
+    const ctrl = new AbortController();
+    layerLoadRef.current = ctrl;
+    void loadRealGraph(repoAtStart, renderBudget, ctrl.signal)
+      .then((data) => {
+        if (
+          !data ||
+          ctrl.signal.aborted ||
+          repoAtStart !== useAppStore.getState().selectedRepoId
+        ) {
+          return;
+        }
+        detailDataRef.current = data;
+        if (graphModeRef.current === "overview") {
+          const currentRig = rigRef.current;
+          if (!currentRig) return;
+          if (currentRig.camera.zoomLevel < DETAIL_ENTER_ZOOM) return;
+          graphModeRef.current = "detail";
+          currentRig.applyData(data, { resetCamera: false });
+        }
+      })
+      .finally(() => {
+        if (layerLoadRef.current === ctrl) layerLoadRef.current = null;
+      });
+  };
+
+  requestOverviewRef.current = () => {
+    const rig = rigRef.current;
+    const data = overviewDataRef.current;
+    if (!rig || !data || graphModeRef.current !== "detail") return;
+    graphModeRef.current = "overview";
+    rig.applyData(data, { resetCamera: false });
+  };
+
   /* ---- data：跟随 selectedRepoId / ego 状态加载，可取消 ---- */
   useEffect(() => {
     const rig = rigRef.current;
     if (!rig) return;
+    layerLoadRef.current?.abort();
+    layerLoadRef.current = null;
+    overviewDataRef.current = null;
+    detailDataRef.current = null;
+    graphModeRef.current = ego ? "ego" : "overview";
     if (!repoId || !repo) {
       rig.renderer.clearData();
       rig.labels.clear();
@@ -436,6 +518,7 @@ export default function GraphView() {
         ).catch(() => null);
         if (cancelled) return;
         if (data) {
+          graphModeRef.current = "ego";
           rig.applyData(data);
           rig.centerIndex = 0; /* 合同：ego 中心节点 i=0 */
           setEmptyReason("none");
@@ -448,11 +531,18 @@ export default function GraphView() {
         }
       } else {
         const data =
-          (await loadRealGraph(repoId, renderBudget, ctrl.signal).catch(() => null)) ??
-          (await loadClusterGraph(repoId, ctrl.signal).catch(() => null));
+          (await loadClusterGraph(repoId, ctrl.signal).catch(() => null)) ??
+          (await loadRealGraph(repoId, renderBudget, ctrl.signal).catch(() => null));
         if (cancelled) return;
         rig.centerIndex = -1;
         if (data) {
+          if (data.id(0).startsWith("cluster:")) {
+            overviewDataRef.current = data;
+            graphModeRef.current = "overview";
+          } else {
+            detailDataRef.current = data;
+            graphModeRef.current = "detail";
+          }
           rig.applyData(data);
           setEmptyReason("none");
         } else {
@@ -475,6 +565,8 @@ export default function GraphView() {
     return () => {
       cancelled = true;
       ctrl.abort();
+      layerLoadRef.current?.abort();
+      layerLoadRef.current = null;
     };
   }, [repoId, repo, repoPending, ego, renderBudget]);
 
