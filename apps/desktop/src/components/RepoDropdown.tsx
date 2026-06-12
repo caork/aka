@@ -80,11 +80,9 @@ export default function RepoDropdown() {
             transition={spring}
             className="absolute bottom-[calc(100%+6px)] left-0 z-50 w-[220px] origin-bottom-left overflow-hidden rounded-[14px]"
             style={{
-              background: "var(--glass-bg-strong)",
-              backdropFilter: "blur(28px) saturate(190%)",
-              WebkitBackdropFilter: "blur(28px) saturate(190%)",
+              background: "var(--popover-bg)",
               boxShadow:
-                "inset 0 0 0 0.5px var(--glass-inner), 0 0 0 1px var(--glass-border), var(--shadow-panel)",
+                "inset 0 0 0 1px var(--hairline-strong), var(--shadow-panel)",
             }}
             onMouseEnter={enter}
             onMouseLeave={leave}
