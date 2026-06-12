@@ -3,10 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
-const collapsedRadius = 18;
+const collapsedRadius = 10;
 const expandedRadius = 10;
 const collapsedWidth = 36;
-const expandedWidth = 232;
 
 export default function SearchBubble() {
   const query = useAppStore((s) => s.query);
@@ -45,48 +44,38 @@ export default function SearchBubble() {
 
   return (
     <motion.div
+      className="relative h-8"
       initial={false}
-      animate={{
-        width: searchExpanded ? expandedWidth : collapsedWidth,
-        borderRadius: searchExpanded ? expandedRadius : collapsedRadius,
-      }}
-      transition={
-        searchExpanded
-          ? spring
-          : { ...spring, delay: 0.06 }
-      }
-      role={searchExpanded ? "search" : "button"}
-      tabIndex={searchExpanded ? -1 : 0}
-      aria-label={searchExpanded ? "Search symbols" : "Open symbol search"}
-      aria-expanded={searchExpanded}
-      onClick={searchExpanded ? undefined : openSearch}
-      onKeyDown={(e) => {
-        if (searchExpanded) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          openSearch();
-        }
-      }}
-      style={{ transformOrigin: "left center" }}
-      className={[
-        "cmd-input relative flex h-9 max-w-[calc(100vw-24px)] shrink-0 items-center overflow-hidden",
-        searchExpanded ? "cursor-text" : "cursor-pointer",
-      ].join(" ")}
-      data-testid="sidebar-search-bubble"
     >
-      <span className="grid h-9 w-9 flex-none place-items-center">
+      <motion.button
+        type="button"
+        animate={{
+          width: collapsedWidth,
+          borderRadius: collapsedRadius,
+        }}
+        transition={spring}
+        aria-label="Open symbol search"
+        aria-expanded={searchExpanded}
+        onClick={openSearch}
+        className="cmd-input focus-ring grid h-8 place-items-center"
+        data-testid="sidebar-search-bubble"
+      >
         <SearchIcon />
-      </span>
+      </motion.button>
       <AnimatePresence initial={false}>
         {searchExpanded && (
           <motion.div
             key="search-content"
-            initial={{ opacity: 0, x: -4 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -4 }}
-            transition={{ duration: 0.12, ease: "easeOut" }}
-            className="absolute bottom-0 left-9 top-0 flex w-[196px] items-center gap-2 pr-3"
+            initial={{ opacity: 0, y: -6, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -4, scale: 0.98 }}
+            transition={spring}
+            role="search"
+            className="cmd-input absolute right-0 top-[calc(100%+8px)] z-50 flex h-9 w-[232px] items-center gap-2 px-3"
+            style={{ borderRadius: expandedRadius, transformOrigin: "top right" }}
+            data-testid="global-search-popover"
           >
+            <SearchIcon />
             <input
               ref={inputRef}
               value={query}

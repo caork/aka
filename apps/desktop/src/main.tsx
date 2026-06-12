@@ -5,6 +5,13 @@ import { refreshRepos } from "./store";
 import { applyTheme, readThemeMode } from "./theme";
 import "./index.css";
 
+const platform = navigator.platform.toLowerCase();
+document.documentElement.dataset.platform = platform.includes("mac")
+  ? "macos"
+  : platform.includes("win")
+    ? "windows"
+    : "other";
+
 applyTheme(readThemeMode());
 void refreshRepos();
 

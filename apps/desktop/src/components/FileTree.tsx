@@ -103,6 +103,7 @@ function ancestorDirs(nodes: TreeNode[], filePath: string): string[] {
 type LoadState =
   | { phase: "loading" }
   | { phase: "ok"; files: RepoFile[]; live: boolean }
+  | { phase: "pending"; status: "indexing" | "failed"; detail?: string | null }
   /** serve 可达但端点不支持/仓库未找到——不假装有文件 */
   | { phase: "unsupported" };
 
@@ -114,7 +115,8 @@ export default function FileTree() {
   const codeTarget = useAppStore((s) => s.codeTarget);
   const openCode = useAppStore((s) => s.openCode);
 
-  const repoName = repos.find((r) => r.id === repoId)?.name ?? repoId;
+  const repo = repos.find((r) => r.id === repoId) ?? null;
+  const repoName = repo?.name ?? repoId;
   const activePath = codeTarget?.path ?? null;
 
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
@@ -123,6 +125,14 @@ export default function FileTree() {
   const autoFor = useRef<string | null>(null);
 
   useEffect(() => {
+    if (repo?.status === "indexing" || repo?.status === "failed") {
+      setLoad({ phase: "pending", status: repo.status, detail: repo.detail });
+      return;
+    }
+    if (!repoId) {
+      setLoad({ phase: "unsupported" });
+      return;
+    }
     let stale = false;
     const ctrl = new AbortController();
     setLoad({ phase: "loading" });
@@ -147,7 +157,7 @@ export default function FileTree() {
       stale = true;
       ctrl.abort();
     };
-  }, [repoId]);
+  }, [repoId, repo?.status]);
 
   const tree = useMemo(
     () => (load.phase === "ok" ? buildTree(load.files) : []),
@@ -191,8 +201,7 @@ export default function FileTree() {
 
   return (
     <div className="flex h-full flex-col" data-testid="file-tree">
-      {/* 顶部留白避开浮动搜索泡 */}
-      <div className="flex items-baseline justify-between px-3 pb-2 pt-14">
+      <div className="flex items-baseline justify-between px-3 pb-2 pt-3">
         <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
           Files
         </span>
@@ -208,6 +217,17 @@ export default function FileTree() {
             该仓库未在 aka serve 注册,或后端版本过旧
             <br />
             <span className="text-[11px]">选择左侧已索引的仓库</span>
+          </div>
+        )}
+        {load.phase === "pending" && (
+          <div className="px-3 py-6 text-center text-[12px] leading-relaxed text-ink-3">
+            {load.status === "failed" ? "索引失败，文件树暂不可用" : "索引完成后显示文件树"}
+            {load.status === "failed" && load.detail && (
+              <>
+                <br />
+                <span className="text-[11px]">{load.detail}</span>
+              </>
+            )}
           </div>
         )}
         {load.phase === "ok" && load.files.length === 0 && (
@@ -229,7 +249,7 @@ export default function FileTree() {
           ))}
       </div>
 
-      {load.phase === "ok" && !load.live && (
+      {load.phase === "ok" && !load.live && repo?.status === "ready" && (
         <div className="themed-divider border-t px-3 py-1.5 text-[10px] text-ink-3">
           演示文件树 · 连接 aka serve 后显示真实数据
         </div>

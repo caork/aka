@@ -1,13 +1,13 @@
 ---
 name: aka-code-graph
-description: 用 aka 代码知识图谱（MCP 工具 list_repos/query/context/find_definition/search_references/impact/analyze/augment）高效检索和理解已索引仓库。当需要在大代码库里找符号定义、搜实现、评估改动影响面（blast radius）、或快速建立对陌生符号的全景认知时使用。比逐文件 grep/read 更省 token、更准。
+description: 用 aka 代码知识图谱（MCP 工具 list_repos/query/search_code/context/find_definition/search_references/impact/analyze/augment）高效检索和理解已索引仓库。当需要在大代码库里找符号定义、搜实现、评估改动影响面（blast radius）、或快速建立对陌生符号的全景认知时使用。比逐文件 grep/read 更省 token、更准。
 ---
 
 # aka 代码知识图谱使用策略
 
-aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM25 全文索引。八个 MCP 工具覆盖三类任务：**检索**（query/augment）、**定位**（find_definition/context/search_references）、**分析**（impact），外加 **管理**（list_repos/analyze）。
+aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM25 全文索引。九个 MCP 工具覆盖三类任务：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**分析**（impact），外加 **管理**（list_repos/analyze）。
 
-> OpenCode 里 MCP 工具按 `<server>_<tool>` 命名：上面八个工具显示为 `aka_list_repos`、`aka_query` 等。下文用短名。
+> OpenCode 里 MCP 工具按 `<server>_<tool>` 命名：上面九个工具显示为 `aka_list_repos`、`aka_query` 等。下文用短名。
 
 ## 第一步：永远先 list_repos
 
@@ -22,6 +22,7 @@ aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM
 | 你想做什么 | 用 | 不要用 |
 |---|---|---|
 | "这个库里处理 X 的代码在哪" （模糊、关键词式） | `query` | 逐目录 grep |
+| "我要看包含 X 的原始代码行/上下文/目录分布" | `search_code` | query（会按符号聚合，缺少 raw line 证据） |
 | "符号 Foo 定义在哪个文件哪一行"（**知道确切名字**） | `find_definition` | query（会混入近似命中） |
 | "Foo 是干嘛的、谁调它、它调谁"（陌生符号建立全景） | `context`（一次拿到定义+callers+callees+引用） | 连续调三四个单项工具 |
 | "谁直接用了 Foo"（一跳引用清单） | `search_references` | impact（多跳，结果更大） |
@@ -31,6 +32,7 @@ aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM
 经验法则：
 
 - **名字确切 → find_definition；名字模糊 → query。** query 是代码感知分词的 BM25（默认纯 BM25，无语义向量），关键词选「会出现在标识符或代码里的词」，如 `parse ndjson stream` 而不是自然语言整句。
+- **要 grep-like 证据 → search_code。** 它返回原始匹配行、上下文和顶层目录分布；适合确认字符串/配置/API path 是否真的出现。
 - **探索陌生符号首选 context**，一次调用顶四次，token 最划算。
 - **动手重构前必跑 impact**：结果里 `depth` 是反向依赖的跳数，depth=1 是直接调用方（必须逐个检查），depth≥2 是传递波及（扫一眼判断是否行为变化会穿透）。`count` 很大时说明是热点符号，考虑兼容性包装而非直接改签名。
 
@@ -38,7 +40,9 @@ aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM
 
 所有工具返回紧凑 JSON（短字段名，为省 token 设计）：
 
-- **检索命中**（query/find_definition）：`{id, name, label, file, line, score, snip?}` — `label` 是节点类型（Function/Class/File…），`file`+`line` 直接可用于后续 read，`snip` 是代码片段，往往不用再开文件。
+- **query**：返回 `{processes, process_symbols, definitions, hits}`。优先读 `processes`（执行流，含 `summary/priority/symbol_count/process_type/step_count`），再看对应 `process_symbols`（`id/name/type/filePath/startLine/step_index/module?`）；`definitions` 是不在流程里的独立定义；`hits` 只是兼容旧客户端的扁平命中。
+- **find_definition**：返回 `{defs:[{id, name, label, file, line, score, snip?}]}` — 知道确切符号名时用它定位定义。
+- **源码行命中**（search_code）：`{hits:[{id,name,label,file,line,score,matches:[{line,text,matched}]}], directories:[{dir,count}]}` — `matched=true` 是原始命中行，`matched=false` 是上下文；`directories` 用于判断命中集中在哪个模块。
 - **图引用**（search_references/impact）：`{id, name, label, file, line, edge, depth}` — `edge` 是关系类型（CALLS/IMPORTS…），`depth` 是跳数。
 - **context**：分组返回 `defs` / `callers` / `callees` / `refs` 四段。
 

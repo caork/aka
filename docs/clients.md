@@ -4,7 +4,7 @@
 
 ## 1. 设计目标与原则
 
-- **一个接入面，N 种包装**：所有客户端统一走 MCP 协议接 `aka mcp`（rmcp stdio，八工具）。客户端差异只体现在「配置格式 + 分发方式」这一薄层，不为任何客户端做专属代码（不动 crates/、不绕过 `Backend` trait 接缝）。
+- **一个接入面，N 种包装**：所有客户端统一走 MCP 协议接 `aka mcp`（rmcp stdio，九工具）。客户端差异只体现在「配置格式 + 分发方式」这一薄层，不为任何客户端做专属代码（不动 crates/、不绕过 `Backend` trait 接缝）。
 - **零常驻**：stdio server 由客户端按需 spawn，进程随会话生灭；数据（`~/.aka/`）由 CLI 的 `analyze` 预先建好，MCP 进程只读。
 - **路径不写死**：仓库内任何配置不含机器特定路径；`clients/install.sh` 安装时探测（`command -v aka` → `target/release` → `target/debug`），插件场景靠 PATH 解析。
 
@@ -70,7 +70,7 @@ aka mcp ──读──▶ ~/.aka/                   aka serve :4111 (Docker @ J
 
 ## 5. 版本兼容策略
 
-- **MCP 工具面即合同**：八工具的名称、参数、输出字段视同 `docs/contracts/artifacts.md` 的同级合同——**只增不改不删**。新能力 = 新工具或新可选参数；废弃工具先在 description 标注 deprecated 一个版本周期再移除。三个客户端都直接消费工具 schema，没有中间适配层可以吸收破坏性变更。
+- **MCP 工具面即合同**：工具的名称、参数、输出字段视同 `docs/contracts/artifacts.md` 的同级合同——**只增不改不删**。新能力 = 新工具或新可选参数；废弃工具先在 description 标注 deprecated 一个版本周期再移除。三个客户端都直接消费工具 schema，没有中间适配层可以吸收破坏性变更。
 - **插件版本**：`plugin.json` 的 `version` 跟随 aka 二进制的 minor 版本手动 bump（不 bump 用户就不会收到更新）；插件只含配置和 markdown，与二进制弱耦合，唯一硬依赖是「二进制支持 `aka mcp` 子命令」（M2 起恒真）。
 - **客户端版本下限**：Claude Code 用到的特性（plugin.json + .mcp.json + skills + marketplace）为 2025 年底已稳定的核心集，刻意不用新版才有的字段（`displayName` 需 ≥2.1.143、`defaultEnabled` 需 ≥2.1.154、`userConfig` 等），保证老版本可装。Codex/OpenCode 片段同样只用各自文档标注的稳定字段。
 - **格式漂移的防线**：三家配置格式仍在演进，`clients/` 各 README 标注「2026-06 核实」与来源 URL；install.sh 优先走官方 CLI（`claude mcp add`、`codex mcp add`），格式变更由官方 CLI 吸收，手写文件仅作 fallback（OpenCode MCP 配置用 jq 合并而非整文件覆盖，本地 plugin 用发现目录安装）。

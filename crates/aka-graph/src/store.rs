@@ -242,13 +242,14 @@ impl GraphStore {
                 if let Some(&rowid) = map.get(id) {
                     return Ok(Some(rowid));
                 }
-                let found: Option<i64> = sel_node
-                    .query_row([id], |r| r.get(0))
-                    .map(Some)
-                    .or_else(|e| match e {
-                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                        other => Err(other),
-                    })?;
+                let found: Option<i64> =
+                    sel_node
+                        .query_row([id], |r| r.get(0))
+                        .map(Some)
+                        .or_else(|e| match e {
+                            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                            other => Err(other),
+                        })?;
                 if let Some(rowid) = found {
                     map.insert(id.to_owned(), rowid);
                 }
@@ -319,6 +320,22 @@ impl GraphStore {
         let mut stmt = self.conn.prepare_cached(
             "SELECT file_path, COUNT(*) FROM nodes \
              WHERE file_path IS NOT NULL AND start_line IS NOT NULL \
+             GROUP BY file_path ORDER BY file_path ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 可源码搜索的文件清单：所有落到图里的文件路径 → 该路径节点数。
+    ///
+    /// 与 [`Self::file_list`] 不同，这里不要求 `start_line IS NOT NULL`，用于
+    /// grep-like search_code 覆盖只有 File/Resource 节点、没有符号定义的源码/配置文件。
+    pub fn searchable_file_list(&self) -> Result<Vec<(String, u32)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT file_path, COUNT(*) FROM nodes \
+             WHERE file_path IS NOT NULL AND file_path != '' \
              GROUP BY file_path ORDER BY file_path ASC",
         )?;
         let rows = stmt.query_map([], |r| {

@@ -3,11 +3,14 @@
 //! MCP 工具和 aka-server 的 HTTP API 共用这里的 DTO / 聚合函数，
 //! 保证两个面输出一致。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::backend::{Backend, ProcessHit, RepoInfo, SearchHit, SymbolRef};
+use crate::backend::{
+    Backend, CodeLineMatch, CodeSearchHit, DirectoryCount, ProcessHit, RepoInfo, RepoProgress,
+    SearchHit, SymbolRef,
+};
 
 /// 检索命中（短字段名版）。
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -80,6 +83,37 @@ pub struct SourceOut {
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct RepoProgressOut {
+    pub stage: String,
+    pub message: String,
+    pub percent: f32,
+    pub current: Option<u64>,
+    pub total: Option<u64>,
+    pub files: u64,
+    pub nodes: u64,
+    pub edges: u64,
+    pub chunks: u64,
+    pub logs: Vec<String>,
+}
+
+impl From<RepoProgress> for RepoProgressOut {
+    fn from(p: RepoProgress) -> Self {
+        Self {
+            stage: p.stage,
+            message: p.message,
+            percent: (p.percent * 10.0).round() / 10.0,
+            current: p.current,
+            total: p.total,
+            files: p.files,
+            nodes: p.nodes,
+            edges: p.edges,
+            chunks: p.chunks,
+            logs: p.logs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RepoOut {
     pub name: String,
     pub path: String,
@@ -95,6 +129,8 @@ pub struct RepoOut {
     pub detail: Option<String>,
     /// 渲染节点预算；合同要求显式 null（null = 默认 50_000）。
     pub render_max_nodes: Option<u32>,
+    /// status = indexing / failed 时携带；ready 时为 null。
+    pub progress: Option<RepoProgressOut>,
 }
 
 impl From<RepoInfo> for RepoOut {
@@ -113,6 +149,7 @@ impl From<RepoInfo> for RepoOut {
             },
             detail: r.detail,
             render_max_nodes: r.render_max_nodes,
+            progress: r.progress.map(Into::into),
         }
     }
 }
@@ -124,7 +161,77 @@ pub struct ReposOut {
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct QueryOut {
+    /// 兼容旧客户端的扁平命中列表。
     pub hits: Vec<HitOut>,
+    /// GitNexus-like 流程分组：按命中符号累计分数排序。
+    pub processes: Vec<QueryProcessOut>,
+    /// 命中符号按所属流程展开；一个符号参与多条流程时会出现多次。
+    pub process_symbols: Vec<QueryProcessSymbolOut>,
+    /// 不属于任何流程的 standalone 定义/文件命中。
+    pub definitions: Vec<HitOut>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct CodeLineOut {
+    pub line: u32,
+    pub text: String,
+    pub matched: bool,
+}
+
+impl From<CodeLineMatch> for CodeLineOut {
+    fn from(m: CodeLineMatch) -> Self {
+        Self {
+            line: m.line,
+            text: m.text,
+            matched: m.matched,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct CodeHitOut {
+    pub id: String,
+    pub name: String,
+    pub label: String,
+    pub file: String,
+    pub line: u32,
+    pub score: f32,
+    pub matches: Vec<CodeLineOut>,
+}
+
+impl From<CodeSearchHit> for CodeHitOut {
+    fn from(h: CodeSearchHit) -> Self {
+        Self {
+            id: h.node_id,
+            name: h.name,
+            label: h.label,
+            file: h.file_path,
+            line: h.start_line,
+            score: (h.score * 1000.0).round() / 1000.0,
+            matches: h.matches.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DirectoryOut {
+    pub dir: String,
+    pub count: usize,
+}
+
+impl From<DirectoryCount> for DirectoryOut {
+    fn from(d: DirectoryCount) -> Self {
+        Self {
+            dir: d.dir,
+            count: d.count,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct CodeSearchOut {
+    pub hits: Vec<CodeHitOut>,
+    pub directories: Vec<DirectoryOut>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -157,6 +264,35 @@ impl From<ProcessHit> for ProcessOut {
             step_count: p.step_count,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct QueryProcessOut {
+    pub id: String,
+    pub summary: String,
+    pub priority: f32,
+    pub symbol_count: usize,
+    pub process_type: String,
+    pub step_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct QueryProcessSymbolOut {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub symbol_type: String,
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    #[serde(rename = "startLine")]
+    pub start_line: u32,
+    pub score: f32,
+    pub process_id: String,
+    pub step_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// impact 的流程视角聚合：哪条执行流会断、断在第几步、波及几个符号。
@@ -224,6 +360,8 @@ pub struct FilesOut {
 
 pub const DEFAULT_QUERY_LIMIT: usize = 10;
 pub const MAX_QUERY_LIMIT: usize = 100;
+pub const DEFAULT_CODE_CONTEXT: usize = 1;
+pub const MAX_CODE_CONTEXT: usize = 5;
 pub const DEFAULT_REFS_LIMIT: usize = 25;
 pub const DEFAULT_IMPACT_DEPTH: u32 = 2;
 pub const DEFAULT_IMPACT_LIMIT: usize = 50;
@@ -231,6 +369,14 @@ pub const CONTEXT_NEIGHBOR_DEPTH: u32 = 1;
 pub const AUGMENT_TOP_K: usize = 3;
 /// query 每条命中最多带几个流程名（再多就靠 context / node 详情看全量）。
 pub const MAX_HIT_PROCESS_NAMES: usize = 3;
+pub const DEFAULT_QUERY_PROCESS_SYMBOL_LIMIT: usize = 10;
+pub const MAX_QUERY_PROCESS_SYMBOL_LIMIT: usize = 200;
+
+pub fn clamp_process_symbol_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(DEFAULT_QUERY_PROCESS_SYMBOL_LIMIT)
+        .clamp(1, MAX_QUERY_PROCESS_SYMBOL_LIMIT)
+}
 
 pub fn list_repos(b: &dyn Backend) -> anyhow::Result<ReposOut> {
     Ok(ReposOut {
@@ -243,23 +389,158 @@ pub fn query(
     repo: Option<&str>,
     query: &str,
     limit: usize,
+    max_symbols: usize,
+    include_content: bool,
 ) -> anyhow::Result<QueryOut> {
     let mut hits = Vec::new();
-    for h in b.search(repo, query, limit)? {
-        let procs = b.processes_of(repo, &h.node_id)?;
+    let mut process_map: BTreeMap<String, QueryProcessAgg> = BTreeMap::new();
+    let mut process_symbols = Vec::new();
+    let mut definitions = Vec::new();
+    let mut next_process_order = 0usize;
+    let search_limit = limit.saturating_mul(max_symbols).max(limit);
+    let search_hits = b.search(repo, query, search_limit)?;
+    let node_ids: Vec<String> = search_hits.iter().map(|h| h.node_id.clone()).collect();
+    let enrichments = b.query_enrichment(repo, &node_ids, include_content)?;
+    for h in search_hits {
+        let enrichment = enrichments.get(&h.node_id).cloned().unwrap_or_default();
+        let procs = &enrichment.processes;
         let mut hit = HitOut::from(h);
         if !procs.is_empty() {
             hit.processes = Some(
                 procs
-                    .into_iter()
+                    .iter()
                     .take(MAX_HIT_PROCESS_NAMES)
-                    .map(|p| p.name)
+                    .map(|p| p.name.clone())
                     .collect(),
             );
+            for p in procs {
+                if !process_map.contains_key(&p.process_id) {
+                    process_map.insert(
+                        p.process_id.clone(),
+                        QueryProcessAgg {
+                            id: p.process_id.clone(),
+                            summary: p.name.clone(),
+                            process_type: p.process_type.clone(),
+                            step_count: p.step_count,
+                            total_score: 0.0,
+                            cohesion_boost: 0.0,
+                            symbol_count: 0,
+                            order: next_process_order,
+                        },
+                    );
+                    next_process_order += 1;
+                }
+                let entry = process_map
+                    .get_mut(&p.process_id)
+                    .expect("process inserted above");
+                entry.total_score += hit.score;
+                entry.cohesion_boost = entry.cohesion_boost.max(enrichment.cohesion);
+                entry.symbol_count += 1;
+                process_symbols.push(QueryProcessSymbolOut {
+                    id: hit.id.clone(),
+                    name: hit.name.clone(),
+                    symbol_type: hit.label.clone(),
+                    file_path: hit.file.clone(),
+                    start_line: hit.line,
+                    score: hit.score,
+                    process_id: p.process_id.clone(),
+                    step_index: p.step,
+                    module: enrichment.module.clone(),
+                    content: enrichment.content.clone(),
+                });
+            }
+        } else {
+            if include_content && hit.snip.is_none() {
+                hit.snip = enrichment.content.clone();
+            }
+            definitions.push(hit.clone());
         }
-        hits.push(hit);
+        if hits.len() < limit {
+            hits.push(hit);
+        }
     }
-    Ok(QueryOut { hits })
+    let mut process_aggs: Vec<QueryProcessAgg> = process_map.into_values().collect();
+    process_aggs.sort_by(|a, b| {
+        let a_priority = a.total_score + a.cohesion_boost * 0.1;
+        let b_priority = b.total_score + b.cohesion_boost * 0.1;
+        b_priority
+            .total_cmp(&a_priority)
+            .then_with(|| b.symbol_count.cmp(&a.symbol_count))
+            .then_with(|| a.order.cmp(&b.order))
+    });
+    process_aggs.truncate(limit);
+    let processes: Vec<QueryProcessOut> = process_aggs
+        .into_iter()
+        .map(|p| QueryProcessOut {
+            id: p.id,
+            summary: p.summary,
+            priority: ((p.total_score + p.cohesion_boost * 0.1) * 1000.0).round() / 1000.0,
+            symbol_count: p.symbol_count,
+            process_type: p.process_type,
+            step_count: p.step_count,
+        })
+        .collect();
+    let allowed: HashSet<&str> = processes.iter().map(|p| p.id.as_str()).collect();
+    let process_rank: HashMap<&str, usize> = processes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.id.as_str(), i))
+        .collect();
+    process_symbols.retain(|s| allowed.contains(s.process_id.as_str()));
+    process_symbols.sort_by(|a, b| {
+        process_rank
+            .get(a.process_id.as_str())
+            .cmp(&process_rank.get(b.process_id.as_str()))
+            .then_with(|| a.step_index.cmp(&b.step_index))
+            .then_with(|| b.score.total_cmp(&a.score))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut kept_per_process: BTreeMap<String, usize> = BTreeMap::new();
+    process_symbols.retain(|s| {
+        let n = kept_per_process.entry(s.process_id.clone()).or_default();
+        if *n >= max_symbols {
+            return false;
+        }
+        *n += 1;
+        true
+    });
+    let mut seen_symbols = HashSet::new();
+    process_symbols.retain(|s| seen_symbols.insert(s.id.clone()));
+    definitions.truncate(20);
+
+    Ok(QueryOut {
+        hits,
+        processes,
+        process_symbols,
+        definitions,
+    })
+}
+
+struct QueryProcessAgg {
+    id: String,
+    summary: String,
+    process_type: String,
+    step_count: Option<u32>,
+    total_score: f32,
+    cohesion_boost: f32,
+    symbol_count: usize,
+    order: usize,
+}
+
+pub fn search_code(
+    b: &dyn Backend,
+    repo: Option<&str>,
+    query: &str,
+    limit: usize,
+    context: usize,
+    regex: bool,
+    path_filter: Option<&str>,
+) -> anyhow::Result<CodeSearchOut> {
+    let result = b.search_code(repo, query, limit, context, regex, path_filter)?;
+    Ok(CodeSearchOut {
+        hits: result.hits.into_iter().map(Into::into).collect(),
+        directories: result.directories.into_iter().map(Into::into).collect(),
+    })
 }
 
 pub fn find_definition(
@@ -268,7 +549,11 @@ pub fn find_definition(
     symbol: &str,
 ) -> anyhow::Result<DefsOut> {
     Ok(DefsOut {
-        defs: b.find_definition(repo, symbol)?.into_iter().map(Into::into).collect(),
+        defs: b
+            .find_definition(repo, symbol)?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     })
 }
 
@@ -279,7 +564,11 @@ pub fn references(
     limit: usize,
 ) -> anyhow::Result<RefsOut> {
     Ok(RefsOut {
-        refs: b.references(repo, symbol, limit)?.into_iter().map(Into::into).collect(),
+        refs: b
+            .references(repo, symbol, limit)?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     })
 }
 
@@ -306,14 +595,16 @@ pub fn impact(
     let mut agg: BTreeMap<String, AffectedProcessOut> = BTreeMap::new();
     for id in &node_ids {
         for p in b.processes_of(repo, id)? {
-            let entry = agg.entry(p.process_id.clone()).or_insert(AffectedProcessOut {
-                process_id: p.process_id,
-                name: p.name,
-                process_type: p.process_type,
-                step_count: p.step_count,
-                first_affected_step: None,
-                affected_symbols: 0,
-            });
+            let entry = agg
+                .entry(p.process_id.clone())
+                .or_insert(AffectedProcessOut {
+                    process_id: p.process_id,
+                    name: p.name,
+                    process_type: p.process_type,
+                    step_count: p.step_count,
+                    first_affected_step: None,
+                    affected_symbols: 0,
+                });
             entry.affected_symbols += 1;
             // 最早断点 = 所有受影响符号步号的最小值（无步号的符号不参与）。
             entry.first_affected_step = match (entry.first_affected_step, p.step) {
@@ -331,13 +622,20 @@ pub fn impact(
 
     let impacted: Vec<RefOut> = refs.into_iter().map(Into::into).collect();
     let count = impacted.len();
-    Ok(ImpactOut { impacted, count, affected_processes })
+    Ok(ImpactOut {
+        impacted,
+        count,
+        affected_processes,
+    })
 }
 
 /// definition + callers + callees + references 拼成一个结构化结果。
 pub fn context(b: &dyn Backend, repo: Option<&str>, symbol: &str) -> anyhow::Result<ContextOut> {
-    let defs: Vec<HitOut> =
-        b.find_definition(repo, symbol)?.into_iter().map(Into::into).collect();
+    let defs: Vec<HitOut> = b
+        .find_definition(repo, symbol)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
     // 流程归属：符号可能重名多定义，全部聚合后按 process_id 去重。
     let mut seen: HashSet<String> = HashSet::new();
     let mut processes: Vec<ProcessOut> = Vec::new();
@@ -384,13 +682,19 @@ pub fn augment(b: &dyn Backend, repo: Option<&str>, query: &str) -> anyhow::Resu
             .into_iter()
             .map(Into::into)
             .collect();
-        items.push(AugmentItem { hit: hit.into(), callers, callees });
+        items.push(AugmentItem {
+            hit: hit.into(),
+            callers,
+            callees,
+        });
     }
     Ok(AugmentOut { items })
 }
 
 pub fn analyze(b: &dyn Backend, repo_path: &str) -> anyhow::Result<AnalyzeOut> {
-    Ok(AnalyzeOut { summary: b.analyze(repo_path)? })
+    Ok(AnalyzeOut {
+        summary: b.analyze(repo_path)?,
+    })
 }
 
 /// 某仓库的源文件清单（含符号数），按 path 升序。repo 未注册 → Err（HTTP 面 404）。

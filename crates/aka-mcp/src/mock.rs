@@ -14,9 +14,12 @@
 //!
 //! 另有 repo `beta`（1 个孤立函数，无流程归属），用于验证 repo 过滤与字段省略。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use crate::backend::{Backend, ProcessHit, RepoInfo, SearchHit, SymbolRef};
+use crate::backend::{
+    Backend, CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, ProcessHit,
+    QueryEnrichment, RepoInfo, SearchHit, SymbolRef,
+};
 
 #[derive(Debug, Clone)]
 struct MockNode {
@@ -31,13 +34,61 @@ struct MockNode {
 /// (source idx, target idx, edge type)
 type MockEdge = (usize, usize, &'static str);
 
+struct MockSource {
+    repo: &'static str,
+    file: &'static str,
+    lines: &'static [(u32, &'static str)],
+}
+
 const NODES: &[MockNode] = &[
-    MockNode { id: "demo:fn:main", name: "main", label: "Function", repo: "demo", file: "src/main.rs", line: 3 },
-    MockNode { id: "demo:fn:handle_request", name: "handle_request", label: "Function", repo: "demo", file: "src/handler.rs", line: 12 },
-    MockNode { id: "demo:fn:parse_config", name: "parse_config", label: "Function", repo: "demo", file: "src/config.rs", line: 8 },
-    MockNode { id: "demo:fn:read_file", name: "read_file", label: "Function", repo: "demo", file: "src/io.rs", line: 5 },
-    MockNode { id: "demo:fn:write_output", name: "write_output", label: "Function", repo: "demo", file: "src/io.rs", line: 21 },
-    MockNode { id: "beta:fn:beta_main", name: "beta_main", label: "Function", repo: "beta", file: "src/main.rs", line: 1 },
+    MockNode {
+        id: "demo:fn:main",
+        name: "main",
+        label: "Function",
+        repo: "demo",
+        file: "src/main.rs",
+        line: 3,
+    },
+    MockNode {
+        id: "demo:fn:handle_request",
+        name: "handle_request",
+        label: "Function",
+        repo: "demo",
+        file: "src/handler.rs",
+        line: 12,
+    },
+    MockNode {
+        id: "demo:fn:parse_config",
+        name: "parse_config",
+        label: "Function",
+        repo: "demo",
+        file: "src/config.rs",
+        line: 8,
+    },
+    MockNode {
+        id: "demo:fn:read_file",
+        name: "read_file",
+        label: "Function",
+        repo: "demo",
+        file: "src/io.rs",
+        line: 5,
+    },
+    MockNode {
+        id: "demo:fn:write_output",
+        name: "write_output",
+        label: "Function",
+        repo: "demo",
+        file: "src/io.rs",
+        line: 21,
+    },
+    MockNode {
+        id: "beta:fn:beta_main",
+        name: "beta_main",
+        label: "Function",
+        repo: "beta",
+        file: "src/main.rs",
+        line: 1,
+    },
 ];
 
 const EDGES: &[MockEdge] = &[
@@ -45,6 +96,33 @@ const EDGES: &[MockEdge] = &[
     (1, 2, "CALLS"), // handle_request -> parse_config
     (1, 4, "CALLS"), // handle_request -> write_output
     (2, 3, "CALLS"), // parse_config -> read_file
+];
+
+const SOURCES: &[MockSource] = &[
+    MockSource {
+        repo: "demo",
+        file: "src/handler.rs",
+        lines: &[
+            (11, "pub fn handle_request(req: Request) -> Response {"),
+            (12, "    let config = parse_config(req.path());"),
+            (13, "    write_output(config)"),
+            (14, "}"),
+        ],
+    },
+    MockSource {
+        repo: "demo",
+        file: "src/config.rs",
+        lines: &[
+            (7, "pub fn parse_config(path: &str) -> Config {"),
+            (8, "    read_file(path).parse_config()"),
+            (9, "}"),
+        ],
+    },
+    MockSource {
+        repo: "beta",
+        file: "src/main.rs",
+        lines: &[(1, "pub fn beta_main() { println!(\"beta\"); }")],
+    },
 ];
 
 /// Process 合成节点的归属数据（`符号-[STEP_IN_PROCESS]->Process` 的 mock 版）。
@@ -60,13 +138,13 @@ const PROCESSES: &[MockProcess] = &[
     MockProcess {
         id: "demo:proc:request-flow",
         name: "main → read_file",
-        process_type: "call_chain",
+        process_type: "call-chain",
         steps: &[(0, 1), (1, 2), (2, 3), (3, 4)],
     },
     MockProcess {
         id: "demo:proc:output-flow",
         name: "main → write_output",
-        process_type: "call_chain",
+        process_type: "call-chain",
         steps: &[(0, 1), (1, 2), (4, 3)],
     },
 ];
@@ -158,6 +236,7 @@ impl Backend for MockBackend {
                 source_url: None,
                 detail: None,
                 render_max_nodes: None,
+                progress: None,
             },
             RepoInfo {
                 name: "beta".into(),
@@ -171,6 +250,7 @@ impl Backend for MockBackend {
                 source_url: Some("https://example.com/beta.git".into()),
                 detail: None,
                 render_max_nodes: None,
+                progress: None,
             },
         ])
     }
@@ -192,11 +272,95 @@ impl Backend for MockBackend {
             .collect())
     }
 
-    fn find_definition(
+    fn search_code(
         &self,
         repo: Option<&str>,
-        symbol: &str,
-    ) -> anyhow::Result<Vec<SearchHit>> {
+        query: &str,
+        limit: usize,
+        context: usize,
+        regex: bool,
+        path_filter: Option<&str>,
+    ) -> anyhow::Result<CodeSearchResult> {
+        let needle = query.to_ascii_lowercase();
+        let re = if regex {
+            Some(regex::Regex::new(query)?)
+        } else {
+            None
+        };
+        let mut dirs: BTreeMap<String, usize> = BTreeMap::new();
+        let mut hits = Vec::new();
+        for source in SOURCES {
+            if repo.is_some_and(|r| r != source.repo) {
+                continue;
+            }
+            if path_filter.is_some_and(|f| !source.file.contains(f)) {
+                continue;
+            }
+            let mut matched: Vec<CodeLineMatch> = Vec::new();
+            let mut raw_count = 0;
+            for (idx, &(_line, text)) in source.lines.iter().enumerate() {
+                let ok = if let Some(re) = &re {
+                    re.is_match(text)
+                } else {
+                    text.to_ascii_lowercase().contains(&needle)
+                };
+                if !ok {
+                    continue;
+                }
+                raw_count += 1;
+                let from = idx.saturating_sub(context);
+                let to = (idx + context + 1).min(source.lines.len());
+                for &(ctx_line, ctx_text) in &source.lines[from..to] {
+                    if let Some(existing) = matched.iter_mut().find(|m| m.line == ctx_line) {
+                        existing.matched |= ctx_line == source.lines[idx].0;
+                    } else {
+                        matched.push(CodeLineMatch {
+                            line: ctx_line,
+                            text: ctx_text.to_string(),
+                            matched: ctx_line == source.lines[idx].0,
+                        });
+                    }
+                }
+            }
+            if matched.is_empty() {
+                continue;
+            }
+            let dir = source
+                .file
+                .split('/')
+                .next()
+                .unwrap_or("(root)")
+                .to_string();
+            *dirs.entry(dir).or_default() += raw_count;
+            let node = NODES
+                .iter()
+                .find(|n| n.repo == source.repo && n.file == source.file)
+                .unwrap_or(&NODES[0]);
+            hits.push(CodeSearchHit {
+                node_id: node.id.to_string(),
+                name: node.name.to_string(),
+                label: node.label.to_string(),
+                file_path: source.file.to_string(),
+                start_line: node.line,
+                score: raw_count as f32,
+                matches: matched,
+            });
+        }
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+        });
+        hits.truncate(limit);
+        let mut directories: Vec<DirectoryCount> = dirs
+            .into_iter()
+            .map(|(dir, count)| DirectoryCount { dir, count })
+            .collect();
+        directories.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.dir.cmp(&b.dir)));
+        Ok(CodeSearchResult { hits, directories })
+    }
+
+    fn find_definition(&self, repo: Option<&str>, symbol: &str) -> anyhow::Result<Vec<SearchHit>> {
         Ok(Self::find_indices(repo, symbol)
             .into_iter()
             .map(|i| Self::hit(&NODES[i], 1.0, true))
@@ -265,15 +429,46 @@ impl Backend for MockBackend {
         Ok(PROCESSES
             .iter()
             .filter_map(|p| {
-                p.steps.iter().find(|(i, _)| *i == idx).map(|&(_, step)| ProcessHit {
-                    process_id: p.id.to_string(),
-                    name: p.name.to_string(),
-                    process_type: p.process_type.to_string(),
-                    step: Some(step),
-                    step_count: Some(p.steps.len() as u32),
-                })
+                p.steps
+                    .iter()
+                    .find(|(i, _)| *i == idx)
+                    .map(|&(_, step)| ProcessHit {
+                        process_id: p.id.to_string(),
+                        name: p.name.to_string(),
+                        process_type: p.process_type.to_string(),
+                        step: Some(step),
+                        step_count: Some(p.steps.len() as u32),
+                    })
             })
             .collect())
+    }
+
+    fn query_enrichment(
+        &self,
+        repo: Option<&str>,
+        node_ids: &[String],
+        include_content: bool,
+    ) -> anyhow::Result<HashMap<String, QueryEnrichment>> {
+        let mut out = HashMap::new();
+        for id in node_ids {
+            let processes = self.processes_of(repo, id)?;
+            let Some(node) = NODES
+                .iter()
+                .find(|n| n.id == id.as_str() && Self::node_in_repo(n, repo))
+            else {
+                continue;
+            };
+            out.insert(
+                id.clone(),
+                QueryEnrichment {
+                    processes,
+                    module: Some("IO Pipeline".into()),
+                    cohesion: 0.8,
+                    content: include_content.then(|| format!("fn {}() {{}}", node.name)),
+                },
+            );
+        }
+        Ok(out)
     }
 }
 
@@ -308,17 +503,23 @@ mod tests {
         let hits = b.processes_of(None, "demo:fn:handle_request").unwrap();
         assert_eq!(hits.len(), 2, "handle_request 在两条执行流里");
         assert_eq!(hits[0].process_id, "demo:proc:request-flow");
-        assert_eq!(hits[0].process_type, "call_chain");
+        assert_eq!(hits[0].process_type, "call-chain");
         assert_eq!(hits[0].step, Some(2));
         assert_eq!(hits[0].step_count, Some(4));
         assert_eq!(hits[1].process_id, "demo:proc:output-flow");
         assert_eq!(hits[1].step_count, Some(3));
 
         // repo 过滤：beta 仓库里没有 demo 的节点。
-        assert!(b.processes_of(Some("beta"), "demo:fn:handle_request").unwrap().is_empty());
+        assert!(b
+            .processes_of(Some("beta"), "demo:fn:handle_request")
+            .unwrap()
+            .is_empty());
         // 未知节点 → 空 Vec 而非错误（合同：查不到不是错误）。
         assert!(b.processes_of(None, "nope").unwrap().is_empty());
         // 不在任何流程里的节点 → 空 Vec。
-        assert!(b.processes_of(None, "beta:fn:beta_main").unwrap().is_empty());
+        assert!(b
+            .processes_of(None, "beta:fn:beta_main")
+            .unwrap()
+            .is_empty());
     }
 }

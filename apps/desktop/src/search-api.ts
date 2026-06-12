@@ -3,8 +3,7 @@
 
 import { mockSearch, type SearchResult } from "./mock";
 import { invokeDesktop, isDesktopRuntime } from "./desktop-api";
-
-const SERVER = "http://127.0.0.1:4111";
+import { apiUrl } from "./api-base";
 
 interface HitOut {
   id: string;
@@ -73,7 +72,7 @@ async function runSearchHttp(
   query: string,
   repo: string | null,
 ): Promise<{ hits?: HitOut[] }> {
-  const r = await fetch(`${SERVER}/api/query`, {
+  const r = await fetch(apiUrl("/api/query"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -127,7 +126,7 @@ export async function fetchSymbolContext(
         repo: repo ?? undefined,
       });
     }
-    const r = await fetch(`${SERVER}/api/symbol/context`, {
+    const r = await fetch(apiUrl("/api/symbol/context"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ symbol, repo: repo ?? undefined }),

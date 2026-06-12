@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "aka",
+  "productName": "AKA",
   "version": "0.1.0",
   "identifier": "com.aka.desktop",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "aka",
+        "title": "AKA",
         "width": 1440,
         "height": 900,
         "minWidth": 1024,
@@ -38,6 +38,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "resources/engine": "engine"
+    }
   }
 }

@@ -1,6 +1,6 @@
 # aka × OpenCode
 
-接入分两步：**① MCP 配置**（让 OpenCode 能调 aka 的八个工具）+ **② 插件/使用策略**（让 agent 知道什么时候用哪个工具，并给 OpenCode 一个原生 plugin 入口）。本目录就是发布包 `aka-opencode-plugin-<ver>.zip` 的内容，解压即用。
+接入分两步：**① MCP 配置**（让 OpenCode 能调 aka 的九个工具）+ **② 插件/使用策略**（让 agent 知道什么时候用哪个工具，并给 OpenCode 一个原生 plugin 入口）。本目录就是发布包 `aka-opencode-plugin-<ver>.zip` 的内容，解压即用。
 
 ```
 opencode.json.snippet              ① MCP 配置片段

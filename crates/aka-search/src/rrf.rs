@@ -97,7 +97,10 @@ mod tests {
 
         // B = 1/62 + 1/61，A = 1/61，C = 1/62 → 排序 B, A, C。
         assert_eq!(
-            merged.iter().map(|h| h.node_id.as_str()).collect::<Vec<_>>(),
+            merged
+                .iter()
+                .map(|h| h.node_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["B", "A", "C"]
         );
         assert!((merged[0].score - (1.0 / 62.0 + 1.0 / 61.0)).abs() < EPS);
@@ -143,9 +146,12 @@ mod tests {
 
     #[test]
     fn limit_truncates_after_sorting() {
-        let bm25: Vec<Hit> = (0..5).map(|i| hit(&format!("b{i}"), 5.0 - i as f32)).collect();
-        let semantic: Vec<(String, f32)> =
-            (0..5).map(|i| (format!("s{i}"), 1.0 - i as f32 * 0.1)).collect();
+        let bm25: Vec<Hit> = (0..5)
+            .map(|i| hit(&format!("b{i}"), 5.0 - i as f32))
+            .collect();
+        let semantic: Vec<(String, f32)> = (0..5)
+            .map(|i| (format!("s{i}"), 1.0 - i as f32 * 0.1))
+            .collect();
         let merged = rrf_merge(&bm25, &semantic, 3, |id| Some(hit(id, 0.0)));
         assert_eq!(merged.len(), 3);
         // 两路 rank0 并列第一（b0 / s0 各 1/61），rank1 其次。

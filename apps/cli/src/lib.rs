@@ -3,7 +3,8 @@
 pub mod backend;
 pub mod indexer;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use aka_core::{
     registry::now_unix, ArtifactDir, EngineEvent, EngineRunner, Registry, RepoEntry, RepoPaths,
@@ -12,40 +13,138 @@ use anyhow::{Context, Result};
 
 pub use backend::AkaBackend;
 
+pub type AnalyzeProgress<'a> = dyn FnMut(&EngineEvent) + 'a;
+
+fn open_artifact_after_emit(
+    artifact_dir: &Path,
+    expected_stats: &aka_core::ArtifactStats,
+) -> Result<ArtifactDir> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_err = anyhow::anyhow!("artifact open failed");
+    loop {
+        match ArtifactDir::open(artifact_dir) {
+            Ok(artifact) => {
+                let stats = &artifact.manifest.stats;
+                if stats.files == expected_stats.files
+                    && stats.nodes == expected_stats.nodes
+                    && stats.edges == expected_stats.edges
+                    && stats.chunks == expected_stats.chunks
+                {
+                    return Ok(artifact);
+                }
+                last_err = anyhow::anyhow!(
+                    "manifest stats do not match engine done event (manifest: files={} nodes={} edges={} chunks={}, done: files={} nodes={} edges={} chunks={})",
+                    stats.files,
+                    stats.nodes,
+                    stats.edges,
+                    stats.chunks,
+                    expected_stats.files,
+                    expected_stats.nodes,
+                    expected_stats.edges,
+                    expected_stats.chunks,
+                );
+            }
+            Err(err) => {
+                last_err = err.into();
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(last_err).with_context(|| {
+        format!(
+            "artifact not complete after engine emit: {}",
+            artifact_dir.display()
+        )
+    })
+}
+
 /// Full analysis pipeline: engine parse -> graph/search index -> registry.
 pub fn run_analyze(path: PathBuf, engine_dir: Option<PathBuf>, no_chunks: bool) -> Result<String> {
+    run_analyze_with_progress(path, engine_dir, no_chunks, None)
+}
+
+pub fn run_analyze_with_progress(
+    path: PathBuf,
+    engine_dir: Option<PathBuf>,
+    no_chunks: bool,
+    mut progress: Option<&mut AnalyzeProgress<'_>>,
+) -> Result<String> {
     let repo = path
         .canonicalize()
         .with_context(|| format!("仓库路径不存在: {}", path.display()))?;
     let paths = RepoPaths::for_repo(&repo);
     let artifact_dir = paths.artifact_dir();
+    if artifact_dir.exists() {
+        std::fs::remove_dir_all(&artifact_dir)
+            .with_context(|| format!("clear stale artifact dir {}", artifact_dir.display()))?;
+    }
     std::fs::create_dir_all(&artifact_dir)?;
+    let engine_cache_dir = paths.engine_cache_dir();
+    std::fs::create_dir_all(&engine_cache_dir)
+        .with_context(|| format!("create engine cache dir {}", engine_cache_dir.display()))?;
 
     let runner = EngineRunner::discover(engine_dir.as_deref())?;
+    let engine_sha = std::fs::read_to_string(runner.dir().join("ENGINE_SHA"))
+        .ok()
+        .map(|s| s.trim().to_string());
     eprintln!("aka ▸ engine 解析 {} …", repo.display());
 
     let mut last_phase = String::new();
-    runner.analyze(&repo, &artifact_dir, no_chunks, |ev| match ev {
-        EngineEvent::Phase { phase, .. } => {
-            if *phase != last_phase {
-                eprintln!("  · {phase}");
-                last_phase = phase.clone();
+    let stats = runner.analyze(
+        &repo,
+        &artifact_dir,
+        Some(&engine_cache_dir),
+        no_chunks,
+        |ev| match ev {
+            EngineEvent::Phase { phase, .. } => {
+                if *phase != last_phase {
+                    eprintln!("  · {phase}");
+                    last_phase = phase.clone();
+                }
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(ev);
+                }
             }
-        }
-        EngineEvent::Warning { message } => eprintln!("  ! {message}"),
-        EngineEvent::Done { stats } => {
-            eprintln!(
-                "  ✓ 解析完成：{} 文件 / {} 节点 / {} 边 / {} 切块",
-                stats.files, stats.nodes, stats.edges, stats.chunks
-            );
-        }
-    })?;
+            EngineEvent::Warning { message } => {
+                eprintln!("  ! {message}");
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(ev);
+                }
+            }
+            EngineEvent::Done { stats } => {
+                eprintln!(
+                    "  ✓ 解析完成：{} 文件 / {} 节点 / {} 边 / {} 切块",
+                    stats.files, stats.nodes, stats.edges, stats.chunks
+                );
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(ev);
+                }
+            }
+        },
+    )?;
 
-    let artifact = ArtifactDir::open(&artifact_dir)?;
+    if let Some(cb) = progress.as_mut() {
+        cb(&EngineEvent::Phase {
+            phase: "Building graph and search indexes".into(),
+            current: 0,
+            total: 0,
+        });
+    }
+    let artifact = open_artifact_after_emit(&artifact_dir, &stats)?;
     eprintln!("aka ▸ 构建索引 …");
     let idx = indexer::index_artifact(&artifact, &paths)?;
 
-    register(&repo, &paths, &artifact)?;
+    if let Some(cb) = progress.as_mut() {
+        cb(&EngineEvent::Phase {
+            phase: "Registering repository".into(),
+            current: 0,
+            total: 0,
+        });
+    }
+    register(&repo, &paths, &artifact, engine_sha)?;
 
     let summary = format!(
         "aka ▸ {} 就绪：{} 节点 / {} 边（悬空跳过 {}）/ {} 切块入索引{}",
@@ -65,12 +164,12 @@ pub fn run_analyze(path: PathBuf, engine_dir: Option<PathBuf>, no_chunks: bool) 
     Ok(summary)
 }
 
-fn register(repo: &std::path::Path, paths: &RepoPaths, artifact: &ArtifactDir) -> Result<()> {
-    let engine_sha = EngineRunner::discover(None)
-        .ok()
-        .and_then(|r| std::fs::read_to_string(r.dir().join("ENGINE_SHA")).ok())
-        .map(|s| s.trim().to_string());
-
+fn register(
+    repo: &std::path::Path,
+    paths: &RepoPaths,
+    artifact: &ArtifactDir,
+    engine_sha: Option<String>,
+) -> Result<()> {
     let mut registry = Registry::load()?;
     // Re-analysis and background updates inherit display/source/settings fields.
     let prev = registry.find(repo).cloned();
@@ -83,7 +182,7 @@ fn register(repo: &std::path::Path, paths: &RepoPaths, artifact: &ArtifactDir) -
         repo_path: repo.to_path_buf(),
         data_dir: paths.root.clone(),
         indexed_at: Some(now_unix()),
-        engine_sha,
+        engine_sha: engine_sha.or_else(|| prev.as_ref().and_then(|e| e.engine_sha.clone())),
         stats: artifact.manifest.stats.clone(),
         embeddings_enabled: prev.as_ref().is_some_and(|e| e.embeddings_enabled),
         source_kind: prev
@@ -102,7 +201,7 @@ pub fn run_index(path: PathBuf) -> Result<()> {
     let paths = RepoPaths::for_repo(&repo);
     let artifact = ArtifactDir::open(paths.artifact_dir()).context("工件不存在——先 aka analyze")?;
     let idx = indexer::index_artifact(&artifact, &paths)?;
-    register(&repo, &paths, &artifact)?;
+    register(&repo, &paths, &artifact, None)?;
     eprintln!(
         "aka ▸ 重建索引完成：{} 节点 / {} 边 / {} 切块",
         idx.nodes, idx.edges, idx.chunks

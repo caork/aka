@@ -1,4 +1,4 @@
-//! rmcp ServerHandler — 八个 MCP 工具，全部面向 [`Backend`] trait。
+//! rmcp ServerHandler — MCP 工具，全部面向 [`Backend`] trait。
 //!
 //! 输出统一为紧凑 JSON 文本（`Content::text`），格式见 [`crate::ops`]。
 //! Backend 执行错误走 in-band tool error（`is_error: true`），LLM 可见可重试；
@@ -7,11 +7,9 @@
 use std::sync::Arc;
 
 use rmcp::{
-    ErrorData as McpError,
-    ServerHandler,
     handler::server::wrapper::Parameters,
     model::{CallToolResult, Content},
-    tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -70,6 +68,18 @@ pub struct QueryParams {
     /// Max results to return (default 10, max 100).
     #[serde(default)]
     pub limit: Option<usize>,
+    /// GitNexus-compatible hint. Accepted for schema parity; ranking support is incremental.
+    #[serde(default)]
+    pub task_context: Option<String>,
+    /// GitNexus-compatible hint. Accepted for schema parity; ranking support is incremental.
+    #[serde(default)]
+    pub goal: Option<String>,
+    /// GitNexus-compatible process symbol cap. Current compact output uses the service default.
+    #[serde(default)]
+    pub max_symbols: Option<usize>,
+    /// GitNexus-compatible flag. Full content is intentionally omitted from compact aka query.
+    #[serde(default)]
+    pub include_content: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -123,7 +133,28 @@ pub struct AugmentParams {
     pub query: String,
 }
 
-// ---- 八个工具 ----
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CodeSearchParams {
+    /// Repository name to search in. Omit to search all indexed repositories.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Literal text or regex pattern to search in source code.
+    pub query: String,
+    /// Max result groups to return (default 10, max 100).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Context lines before/after each match (default 1, max 5).
+    #[serde(default)]
+    pub context: Option<usize>,
+    /// Treat query as a regex pattern instead of a case-insensitive literal.
+    #[serde(default)]
+    pub regex: bool,
+    /// Optional substring filter on repo-relative file path.
+    #[serde(default)]
+    pub path_filter: Option<String>,
+}
+
+// ---- 工具 ----
 
 #[tool_router]
 impl AkaMcpServer {
@@ -135,15 +166,53 @@ impl AkaMcpServer {
     }
 
     #[tool(
-        description = "Search the code knowledge graph for symbols (functions, classes, files) matching a query. Returns compact JSON hits with id, name, label, file, line, score, and an optional snippet. Hits that belong to known execution flows also carry a 'processes' array of flow names."
+        description = "Search the code knowledge graph for symbols and execution flows matching a query. Returns GitNexus-like process groups (processes), the matched symbols inside those flows (process_symbols), standalone definitions, plus a backward-compatible flat hits array."
     )]
     pub async fn query(
         &self,
         Parameters(p): Parameters<QueryParams>,
     ) -> Result<CallToolResult, McpError> {
         let limit = clamp_limit(p.limit, ops::DEFAULT_QUERY_LIMIT);
-        self.run(move |b| ops::query(b, p.repo.as_deref(), &p.query, limit))
-            .await
+        let max_symbols = ops::clamp_process_symbol_limit(p.max_symbols);
+        let include_content = p.include_content.unwrap_or(false);
+        let _ = (&p.task_context, &p.goal);
+        self.run(move |b| {
+            ops::query(
+                b,
+                p.repo.as_deref(),
+                &p.query,
+                limit,
+                max_symbols,
+                include_content,
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Search raw source code lines. Use this when you need grep-like evidence: match lines, surrounding context, and top-level directory distribution. Supports case-insensitive literal search by default, or regex when regex=true."
+    )]
+    pub async fn search_code(
+        &self,
+        Parameters(p): Parameters<CodeSearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = clamp_limit(p.limit, ops::DEFAULT_QUERY_LIMIT);
+        let context = p
+            .context
+            .unwrap_or(ops::DEFAULT_CODE_CONTEXT)
+            .min(ops::MAX_CODE_CONTEXT);
+        self.run(move |b| {
+            ops::search_code(
+                b,
+                p.repo.as_deref(),
+                &p.query,
+                limit,
+                context,
+                p.regex,
+                p.path_filter.as_deref(),
+            )
+        })
+        .await
     }
 
     #[tool(

@@ -7,7 +7,7 @@
   如果你的 OpenCode 支持原生 skills（2026-06 起），优先装 skill（按需加载更省 token），不要两者同时启用。
 -->
 
-aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM25 全文索引。MCP server `aka` 提供八个工具（OpenCode 里显示为 `aka_list_repos`、`aka_query` 等），覆盖三类任务：**检索**（query/augment）、**定位**（find_definition/context/search_references）、**分析**（impact），外加 **管理**（list_repos/analyze）。在已索引仓库里找符号定义、搜实现、评估改动影响面（blast radius）时优先用它们，比逐文件 grep/read 更省 token、更准。
+aka 把仓库解析成「符号节点 + 调用/引用边」的图，并建了 BM25 全文索引。MCP server `aka` 提供九个工具（OpenCode 里显示为 `aka_list_repos`、`aka_query` 等），覆盖三类任务：**检索**（query/augment）、**定位**（find_definition/context/search_references）、**分析**（impact），外加 **管理**（list_repos/analyze）。在已索引仓库里找符号定义、搜实现、评估改动影响面（blast radius）时优先用它们，比逐文件 grep/read 更省 token、更准。
 
 ## 第一步：永远先 list_repos
 

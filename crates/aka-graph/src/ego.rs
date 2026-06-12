@@ -104,12 +104,9 @@ impl GraphStore {
                     (0.0, 0.0)
                 } else {
                     // 均匀角分布 + 逐环黄金角偏移（避免环间径向排成直线）。
-                    let theta = k as f64 * std::f64::consts::TAU / count as f64
-                        + d as f64 * GOLDEN_ANGLE;
-                    (
-                        radius * theta.cos() as f32,
-                        radius * theta.sin() as f32,
-                    )
+                    let theta =
+                        k as f64 * std::f64::consts::TAU / count as f64 + d as f64 * GOLDEN_ANGLE;
+                    (radius * theta.cos() as f32, radius * theta.sin() as f32)
                 };
                 let i = nodes.len() as u32;
                 compact.insert(u, i);

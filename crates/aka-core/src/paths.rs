@@ -5,6 +5,7 @@
 //!   registry.json            # 仓库注册表
 //!   repos/<slug>-<hash8>/    # 每仓库数据
 //!     artifact/              # engine 产出的 NDJSON 工件
+//!     engine-cache/           # codebase-memory-mcp SQLite/cache 工作目录
 //!     graph.db               # aka-graph SQLite
 //!     search/                # tantivy 索引
 //!     vectors/               # 向量库（embedding 开启后）
@@ -27,7 +28,13 @@ pub fn repo_dir_name(repo_path: &Path) -> String {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "repo".into())
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let hash = fnv1a(repo_path.to_string_lossy().as_bytes());
     format!("{slug}-{hash:08x}")
@@ -55,6 +62,10 @@ impl RepoPaths {
 
     pub fn artifact_dir(&self) -> PathBuf {
         self.root.join("artifact")
+    }
+
+    pub fn engine_cache_dir(&self) -> PathBuf {
+        self.root.join("engine-cache")
     }
 
     pub fn graph_db(&self) -> PathBuf {

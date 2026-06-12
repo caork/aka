@@ -37,11 +37,11 @@ export default function Sidebar() {
       >
         <img
           src="/logo.png"
-          alt="aka logo"
+          alt="AKA logo"
           className="app-logo h-7 w-7"
           draggable={false}
         />
-        <div className="text-[15px] font-semibold tracking-tight text-ink">aka</div>
+        <div className="text-[15px] font-semibold tracking-tight text-ink">AKA</div>
       </button>
 
       {/* repo list */}

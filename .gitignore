@@ -5,4 +5,8 @@ dist/
 engine/vendor/**/build/
 /engine/gitnexus/
 /engine/gitnexus-shared/
+/engine/codebase-memory-mcp/
+/engine/codebase-memory-mcp-src/
+/engine/codebase-memory-mcp.exe
+/apps/desktop/src-tauri/resources/
 .playwright-mcp/

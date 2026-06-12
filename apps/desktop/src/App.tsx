@@ -6,15 +6,12 @@ import GraphView from "./components/GraphView";
 import RepoDropdown from "./components/RepoDropdown";
 import SearchBubble from "./components/SearchBubble";
 import SegmentedControl from "./components/SegmentedControl";
-import { isDesktopRuntime } from "./desktop-api";
 import { useAppStore } from "./store";
 
 export default function App() {
   const view = useAppStore((s) => s.view);
   const setView = useAppStore((s) => s.setView);
   const syncSystemTheme = useAppStore((s) => s.syncSystemTheme);
-  const needsTitlebarSafeArea =
-    isDesktopRuntime() && navigator.userAgent.includes("Mac");
 
   useEffect(() => {
     syncSystemTheme();
@@ -28,9 +25,7 @@ export default function App() {
     <div className="flex h-full">
       <div className="app-backdrop" />
       <main
-        className={`relative min-h-0 flex-1 overflow-hidden ${
-          needsTitlebarSafeArea ? "titlebar-safe" : ""
-        }`}
+        className="relative min-h-0 flex-1 overflow-hidden"
         style={{
           background: "var(--main-surface)",
           backdropFilter: "blur(24px) saturate(180%)",
@@ -38,14 +33,20 @@ export default function App() {
           boxShadow: "inset 1px 0 0 var(--main-divider)",
         }}
       >
-        {/* Logo + Search bubble — top-left, laid out in a row so search expands rightward */}
-        <div className="app-top-left-controls absolute top-3 z-20 flex items-center gap-2">
+        <div
+          className="window-drag-region absolute inset-x-0 top-0 z-10"
+          data-tauri-drag-region
+          aria-hidden
+        />
+
+        {/* Repo menu — bottom-left app tools. */}
+        <div className="absolute bottom-4 left-4 z-30 flex items-center gap-2">
           <RepoDropdown />
-          <SearchBubble />
         </div>
 
-        {/* Doc / Graph switcher — top-right corner */}
-        <div className="absolute right-3 top-3 z-20">
+        {/* Search + Code / Graph switcher — top-right, aligned to toolbar buttons. */}
+        <div className="absolute right-3 top-[9px] z-30 flex items-start gap-2">
+          <SearchBubble />
           <SegmentedControl value={view} onChange={setView} />
         </div>
 
@@ -56,7 +57,7 @@ export default function App() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
-            className="h-full"
+            className="app-content h-full"
           >
             {view === "code" && <CodeWorkspace />}
             {view === "graph" && <GraphView />}

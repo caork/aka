@@ -8,6 +8,7 @@ import {
   type ThemeMode,
 } from "./theme";
 import { invokeDesktop, isDesktopRuntime } from "./desktop-api";
+import { apiUrl } from "./api-base";
 
 export type ViewId = "code" | "graph";
 
@@ -18,6 +19,19 @@ export type RepoSourceKind = "local" | "git" | "zip";
 export interface RepoSource {
   kind: RepoSourceKind;
   url: string | null;
+}
+
+export interface RepoProgress {
+  stage: string;
+  message: string;
+  percent: number;
+  current: number | null;
+  total: number | null;
+  files: number;
+  nodes: number;
+  edges: number;
+  chunks: number;
+  logs: string[];
 }
 
 export interface Repo {
@@ -32,6 +46,8 @@ export interface Repo {
   source: RepoSource;
   /** failed 时的错误信息 */
   detail: string | null;
+  /** indexing / failed 时的实时进度和日志 */
+  progress: RepoProgress | null;
 }
 
 /* 渲染预算（与后端合同一致）：默认 5 万，硬上限 50 万，最小 1 千。 */
@@ -85,6 +101,7 @@ interface AppState {
   reposLive: boolean;
   selectedRepoId: string;
   selectRepo(id: string): void;
+  resetRepos(): void;
 
   query: string;
   setQuery(query: string): void;
@@ -113,7 +130,6 @@ interface AppState {
   clearFocusRequest(): void;
 }
 
-const SERVER = "http://127.0.0.1:4111";
 const SELECTED_KEY = "aka.selectedRepo";
 const INITIAL_THEME_MODE = readThemeMode();
 const INITIAL_RESOLVED_THEME = resolveThemeMode(INITIAL_THEME_MODE);
@@ -128,6 +144,7 @@ interface RepoOut {
   status?: string;
   source?: { kind?: string; url?: string | null } | null;
   detail?: string | null;
+  progress?: Partial<RepoProgress> | null;
 }
 
 function mapRepo(x: RepoOut): Repo {
@@ -148,7 +165,27 @@ function mapRepo(x: RepoOut): Repo {
       typeof x.render_max_nodes === "number" ? x.render_max_nodes : null,
     source: { kind, url: x.source?.url ?? null },
     detail: x.detail ?? null,
+    progress: x.progress
+      ? {
+          stage: x.progress.stage ?? status,
+          message: x.progress.message ?? status,
+          percent: clampPercent(x.progress.percent),
+          current: typeof x.progress.current === "number" ? x.progress.current : null,
+          total: typeof x.progress.total === "number" ? x.progress.total : null,
+          files: x.progress.files ?? 0,
+          nodes: x.progress.nodes ?? 0,
+          edges: x.progress.edges ?? 0,
+          chunks: x.progress.chunks ?? 0,
+          logs: Array.isArray(x.progress.logs) ? x.progress.logs : [],
+        }
+      : null,
   };
+}
+
+function clampPercent(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(100, value))
+    : 0;
 }
 
 let pollTimer: number | null = null;
@@ -167,7 +204,14 @@ export async function refreshRepos(): Promise<void> {
       : await fetchReposHttp();
     if (seq !== refreshSeq) return; /* 已被更新的一次刷新取代 */
     const repos = (body.repos ?? []).map(mapRepo);
-    if (repos.length === 0) return;
+    if (repos.length === 0) {
+      if (isDesktopRuntime()) {
+        useAppStore.getState().resetRepos();
+        useAppStore.setState({ reposLive: true });
+        schedulePoll(false);
+      }
+      return;
+    }
 
     const current = useAppStore.getState().selectedRepoId;
     const persisted = readPersistedSelection();
@@ -185,7 +229,7 @@ export async function refreshRepos(): Promise<void> {
 }
 
 async function fetchReposHttp(): Promise<{ repos?: RepoOut[] }> {
-  const r = await fetch(`${SERVER}/api/repos`, {
+  const r = await fetch(apiUrl("/api/repos"), {
     signal: AbortSignal.timeout(2500),
   });
   if (!r.ok) return {};
@@ -225,6 +269,14 @@ function persistSelection(id: string): void {
   }
 }
 
+function clearPersistedSelection(): void {
+  try {
+    window.localStorage.removeItem(SELECTED_KEY);
+  } catch {
+    /* private mode 等场景忽略 */
+  }
+}
+
 /** Mock repos — `aka serve` 不在线时的演示数据。 */
 const MOCK_REPOS: Repo[] = [
   {
@@ -237,17 +289,34 @@ const MOCK_REPOS: Repo[] = [
     renderMaxNodes: null,
     source: { kind: "local", url: null },
     detail: null,
+    progress: null,
   },
   {
-    id: "gitnexus",
-    name: "GitNexus",
-    path: "~/workSpace/GitNexus",
+    id: "codebase-memory",
+    name: "codebase-memory-mcp",
+    path: "~/workSpace/codebase-memory-mcp",
     status: "indexing",
     symbols: 52210,
     embeddings: false,
     renderMaxNodes: null,
-    source: { kind: "git", url: "https://github.com/caork/GitNexus" },
+    source: { kind: "git", url: "https://github.com/DeusData/codebase-memory-mcp" },
     detail: null,
+    progress: {
+      stage: "engine",
+      message: "Indexing source with codebase-memory-mcp",
+      percent: 42,
+      current: 128,
+      total: 320,
+      files: 128,
+      nodes: 18420,
+      edges: 27610,
+      chunks: 0,
+      logs: [
+        "checkout: Cloning git repository",
+        "codebase-memory:index: Discovering files (320)",
+        "codebase-memory:index: Parsing source with native engine (128/320)",
+      ],
+    },
   },
   {
     id: "tantivy",
@@ -259,6 +328,7 @@ const MOCK_REPOS: Repo[] = [
     renderMaxNodes: null,
     source: { kind: "local", url: null },
     detail: null,
+    progress: null,
   },
   {
     id: "linux",
@@ -270,6 +340,7 @@ const MOCK_REPOS: Repo[] = [
     renderMaxNodes: null,
     source: { kind: "local", url: null },
     detail: null,
+    progress: null,
   },
 ];
 
@@ -299,6 +370,19 @@ export const useAppStore = create<AppState>((set) => ({
   selectRepo: (selectedRepoId) => {
     persistSelection(selectedRepoId);
     set({ selectedRepoId, detailTarget: null, codeTarget: null });
+  },
+  resetRepos: () => {
+    clearPersistedSelection();
+    stopRepoPolling();
+    set({
+      repos: [],
+      selectedRepoId: "",
+      detailTarget: null,
+      egoRequest: null,
+      codeTarget: null,
+      focusRequest: null,
+      query: "",
+    });
   },
 
   query: "",

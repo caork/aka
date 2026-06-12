@@ -1,5 +1,6 @@
 //! aka desktop shell with an embedded Rust backend.
 
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -9,9 +10,58 @@ use aka_cli::AkaBackend;
 use aka_mcp::{clamp_render_nodes, ops, Backend, RepoSettingsUpdate, MAX_RENDER_NODES};
 use serde::Deserialize;
 use serde_json::json;
-use tauri::State;
+use tauri::{Manager, State};
 
 type BackendState = Arc<AkaBackend>;
+
+const AKA_HOME_DIR_NAME: &str = "aka-home";
+const APP_DATA_DIR_NAME: &str = "com.aka.desktop";
+
+fn fallback_app_data_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(APP_DATA_DIR_NAME);
+        }
+    }
+    if cfg!(target_os = "windows") {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join(APP_DATA_DIR_NAME);
+        }
+    }
+    if let Some(xdg_data_home) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(xdg_data_home).join(APP_DATA_DIR_NAME);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join(APP_DATA_DIR_NAME);
+    }
+    std::env::temp_dir().join(APP_DATA_DIR_NAME)
+}
+
+fn fallback_resource_dir() -> PathBuf {
+    let Ok(exe) = std::env::current_exe() else {
+        return std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+    };
+    if let Some(contents) = exe.parent().and_then(|macos| macos.parent()) {
+        let resources = contents.join("Resources");
+        if resources.exists() {
+            return resources;
+        }
+    }
+    if let Some(parent) = exe.parent() {
+        let resources = parent.join("resources");
+        if resources.exists() {
+            return resources;
+        }
+        return parent.to_path_buf();
+    }
+    std::env::temp_dir()
+}
 
 #[derive(Debug, Deserialize)]
 struct ImportRequest {
@@ -84,7 +134,14 @@ async fn query(
         .unwrap_or(ops::DEFAULT_QUERY_LIMIT)
         .clamp(1, ops::MAX_QUERY_LIMIT);
     run_backend(backend, move |b| {
-        ops::query(b.as_ref(), repo.as_deref(), &query, limit)
+        ops::query(
+            b.as_ref(),
+            repo.as_deref(),
+            &query,
+            limit,
+            ops::DEFAULT_QUERY_PROCESS_SYMBOL_LIMIT,
+            false,
+        )
     })
     .await
 }
@@ -276,11 +333,69 @@ async fn delete_repo(
     .await
 }
 
+#[tauri::command]
+async fn clear_app_data(
+    app: tauri::AppHandle,
+    backend: State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    if backend.has_running_jobs() {
+        return Err("Cannot clear data while indexing is running".into());
+    }
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| fallback_app_data_dir());
+    let aka_home = app_data_dir.join(AKA_HOME_DIR_NAME);
+    backend.clear_cached_handles();
+    if aka_home.exists() {
+        std::fs::remove_dir_all(&aka_home).map_err(|e| {
+            format!(
+                "failed to clear desktop data at {}: {e}",
+                aka_home.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(&aka_home).map_err(|e| {
+        format!(
+            "failed to recreate desktop data dir {}: {e}",
+            aka_home.display()
+        )
+    })?;
+    Ok(json!({ "ok": true, "path": aka_home }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(Arc::new(AkaBackend::new()))
+        .setup(|app| {
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| fallback_app_data_dir());
+            let aka_home = app_data_dir.join(AKA_HOME_DIR_NAME);
+            std::fs::create_dir_all(&aka_home)?;
+            std::env::set_var("AKA_HOME", &aka_home);
+
+            let resource_dir = app
+                .path()
+                .resource_dir()
+                .unwrap_or_else(|_| fallback_resource_dir());
+            let bundled_engine = resource_dir.join("engine");
+            let has_bundled_engine = bundled_engine.join("codebase-memory-mcp").exists()
+                || bundled_engine.join("codebase-memory-mcp.exe").exists()
+                || bundled_engine.join("build/c/codebase-memory-mcp").exists()
+                || bundled_engine
+                    .join("build/c/codebase-memory-mcp.exe")
+                    .exists();
+            let backend = if has_bundled_engine {
+                AkaBackend::with_engine_dir(bundled_engine)
+            } else {
+                AkaBackend::new()
+            };
+            app.manage(Arc::new(backend));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_repos,
             query,
@@ -297,6 +412,7 @@ pub fn run() {
             update_repo_zip,
             set_repo_settings,
             delete_repo,
+            clear_app_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,43 +1,57 @@
 #!/usr/bin/env bash
-# 从 fork 的 engine/aka 分支同步解析引擎到 engine/
-# 用法: scripts/sync-engine.sh [fork工作树路径]，默认 ~/Documents/github/GitNexus-engine
+# Fetch/build the native codebase-memory-mcp engine used by aka.
 #
-# 同步内容（rsync --delete，排除 node_modules/dist）：
-#   gitnexus/{src,scripts,vendor} + package.json/package-lock.json/tsconfig.json/vitest.config.ts
-#   gitnexus-shared/src           + package.json/package-lock.json/tsconfig.json
-# 并把来源工作树当前 HEAD（engine/aka 分支）写入 engine/ENGINE_SHA。
+# Usage:
+#   scripts/sync-engine.sh [source-or-repo-url]
 #
-# 同步后首次使用：
-#   cd engine/gitnexus-shared && npm install && npm run build
-#   cd engine/gitnexus        && npm install   # postinstall 编译 vendor 语法，prepare 产出 dist（worker 必需）
-#   npx tsx src/export/emit-cli.ts --repo <repo> --out <dir>
+# Defaults to https://github.com/DeusData/codebase-memory-mcp.git. The source is
+# cloned/copied into ignored engine/codebase-memory-mcp-src/ and built in place.
+# The resulting binary is copied to engine/codebase-memory-mcp for desktop/Docker
+# packaging, and engine/ENGINE_SHA records the upstream commit.
 set -euo pipefail
 
-SRC="${1:-$HOME/Documents/github/GitNexus-engine}"
-DST="$(cd "$(dirname "$0")/.." && pwd)/engine"
+SRC="${1:-https://github.com/DeusData/codebase-memory-mcp.git}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DST="${ROOT}/engine"
+CHECKOUT="${DST}/codebase-memory-mcp-src"
+BIN_NAME="codebase-memory-mcp"
+if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
+  BIN_NAME="codebase-memory-mcp.exe"
+fi
 
-if [[ ! -d "$SRC/gitnexus/src" || ! -d "$SRC/gitnexus-shared/src" ]]; then
-  echo "error: $SRC 不是 GitNexus 工作树（缺 gitnexus/src 或 gitnexus-shared/src）" >&2
+mkdir -p "${DST}"
+
+if [[ -d "${SRC}/.git" ]]; then
+  rm -rf "${CHECKOUT}"
+  mkdir -p "${CHECKOUT}"
+  rsync -a --delete \
+    --exclude .git \
+    --exclude build \
+    "${SRC}/" "${CHECKOUT}/"
+  SHA="$(git -C "${SRC}" rev-parse HEAD)"
+else
+  if [[ -d "${CHECKOUT}/.git" ]]; then
+    git -C "${CHECKOUT}" fetch --tags --prune origin
+    git -C "${CHECKOUT}" checkout origin/HEAD
+  else
+    rm -rf "${CHECKOUT}"
+    git clone --depth 1 "${SRC}" "${CHECKOUT}"
+  fi
+  SHA="$(git -C "${CHECKOUT}" rev-parse HEAD)"
+fi
+
+make -C "${CHECKOUT}" -f Makefile.cbm cbm
+
+BUILT="${CHECKOUT}/build/c/${BIN_NAME}"
+if [[ ! -x "${BUILT}" ]]; then
+  echo "error: build did not produce ${BUILT}" >&2
   exit 1
 fi
 
-SHA="$(git -C "$SRC" rev-parse HEAD)"
-mkdir -p "$DST/gitnexus" "$DST/gitnexus-shared"
+cp "${BUILT}" "${DST}/${BIN_NAME}"
+chmod +x "${DST}/${BIN_NAME}"
+printf '%s\n' "${SHA}" > "${DST}/ENGINE_SHA"
 
-RSYNC_OPTS=(-a --delete --exclude node_modules --exclude dist)
-
-for d in src scripts vendor; do
-  rsync "${RSYNC_OPTS[@]}" "$SRC/gitnexus/$d/" "$DST/gitnexus/$d/"
-done
-for f in package.json package-lock.json tsconfig.json vitest.config.ts; do
-  cp "$SRC/gitnexus/$f" "$DST/gitnexus/$f"
-done
-
-rsync "${RSYNC_OPTS[@]}" "$SRC/gitnexus-shared/src/" "$DST/gitnexus-shared/src/"
-for f in package.json package-lock.json tsconfig.json; do
-  cp "$SRC/gitnexus-shared/$f" "$DST/gitnexus-shared/$f"
-done
-
-printf '%s\n' "$SHA" > "$DST/ENGINE_SHA"
-echo "synced $SRC -> $DST"
-echo "ENGINE_SHA=$SHA"
+echo "synced ${SRC} -> ${CHECKOUT}"
+echo "engine binary: ${DST}/${BIN_NAME}"
+echo "ENGINE_SHA=${SHA}"

@@ -58,13 +58,41 @@ fn step_edge(source: &str, process: &str, step: u32) -> EdgeRec {
 fn mini_graph() -> (Vec<NodeRec>, Vec<EdgeRec>) {
     let nodes = vec![
         node("f1", "File", json!({"filePath": "src/main.rs"})),
-        node("main", "Function", json!({"name": "main", "filePath": "src/main.rs", "startLine": 1, "endLine": 5})),
-        node("a", "Function", json!({"name": "alpha", "filePath": "src/main.rs", "startLine": 10, "endLine": 15})),
-        node("b", "Function", json!({"name": "beta", "filePath": "src/main.rs", "startLine": 20, "endLine": 25})),
-        node("c", "Function", json!({"name": "gamma", "filePath": "src/main.rs", "startLine": 30, "endLine": 35})),
-        node("base", "Class", json!({"name": "Base", "filePath": "src/lib/types.rs", "startLine": 1})),
-        node("derived", "Class", json!({"name": "Derived", "filePath": "src/lib/types.rs", "startLine": 40})),
-        node("m", "Method", json!({"name": "run", "filePath": "src/lib/types.rs", "startLine": 5})),
+        node(
+            "main",
+            "Function",
+            json!({"name": "main", "filePath": "src/main.rs", "startLine": 1, "endLine": 5}),
+        ),
+        node(
+            "a",
+            "Function",
+            json!({"name": "alpha", "filePath": "src/main.rs", "startLine": 10, "endLine": 15}),
+        ),
+        node(
+            "b",
+            "Function",
+            json!({"name": "beta", "filePath": "src/main.rs", "startLine": 20, "endLine": 25}),
+        ),
+        node(
+            "c",
+            "Function",
+            json!({"name": "gamma", "filePath": "src/main.rs", "startLine": 30, "endLine": 35}),
+        ),
+        node(
+            "base",
+            "Class",
+            json!({"name": "Base", "filePath": "src/lib/types.rs", "startLine": 1}),
+        ),
+        node(
+            "derived",
+            "Class",
+            json!({"name": "Derived", "filePath": "src/lib/types.rs", "startLine": 40}),
+        ),
+        node(
+            "m",
+            "Method",
+            json!({"name": "run", "filePath": "src/lib/types.rs", "startLine": 5}),
+        ),
         node("com1", "Community", json!({"name": "community-one"})),
         node("com2", "Community", json!({"name": "community-two"})),
     ];
@@ -97,7 +125,8 @@ fn mini_store() -> GraphStore {
 }
 
 fn idx(adj: &Adjacency, id: &str) -> u32 {
-    adj.index_of_id(id).unwrap_or_else(|| panic!("node {id} missing"))
+    adj.index_of_id(id)
+        .unwrap_or_else(|| panic!("node {id} missing"))
 }
 
 // ── 摄取与基本查询 ───────────────────────────────────────────────
@@ -156,7 +185,10 @@ fn dangling_edges_skipped_and_counted() {
 
     // 增量摄取的边可以引用旧批次节点。
     let stats3 = store
-        .ingest(std::iter::empty(), vec![edge("n3", "n2", "CALLS")].into_iter())
+        .ingest(
+            std::iter::empty(),
+            vec![edge("n3", "n2", "CALLS")].into_iter(),
+        )
         .unwrap();
     assert_eq!(stats3.edges, 1);
     assert_eq!(stats3.dangling_edges, 0);
@@ -200,7 +232,17 @@ fn basic_queries() {
         files,
         vec![
             ("src/lib/types.rs".to_string(), 3), // base + derived + m
-            ("src/main.rs".to_string(), 4),       // main + a + b + c（f1 不计）
+            ("src/main.rs".to_string(), 4),      // main + a + b + c（f1 不计）
+        ]
+    );
+
+    // 源码搜索清单：包含只有 File 节点、没有 startLine 的文件。
+    let searchable = store.searchable_file_list().unwrap();
+    assert_eq!(
+        searchable,
+        vec![
+            ("src/lib/types.rs".to_string(), 3),
+            ("src/main.rs".to_string(), 5), // f1 + main + a + b + c
         ]
     );
 }
@@ -213,7 +255,12 @@ fn traversals_exact() {
     let adj = Adjacency::build(&store).unwrap();
     assert_eq!(adj.len(), 10);
 
-    let (main, a, b, c) = (idx(&adj, "main"), idx(&adj, "a"), idx(&adj, "b"), idx(&adj, "c"));
+    let (main, a, b, c) = (
+        idx(&adj, "main"),
+        idx(&adj, "a"),
+        idx(&adj, "b"),
+        idx(&adj, "c"),
+    );
     let (base, derived, m) = (idx(&adj, "base"), idx(&adj, "derived"), idx(&adj, "m"));
     let com2 = idx(&adj, "com2");
 
@@ -271,7 +318,10 @@ fn layout_deterministic_and_clustered() {
     let first = store.positions().unwrap();
     assert_eq!(first.len(), 10);
     for p in &first {
-        assert!(p.x.is_finite() && p.y.is_finite() && p.size.is_finite(), "NaN in {p:?}");
+        assert!(
+            p.x.is_finite() && p.y.is_finite() && p.size.is_finite(),
+            "NaN in {p:?}"
+        );
     }
 
     // 确定性：重跑坐标逐位一致。
@@ -327,21 +377,43 @@ fn layout_deterministic_and_clustered() {
 fn layout_without_communities_uses_top_dirs() {
     let mut store = GraphStore::open_in_memory().unwrap();
     let nodes = vec![
-        node("x1", "Function", json!({"name": "x1", "filePath": "core/a.rs"})),
-        node("x2", "Function", json!({"name": "x2", "filePath": "core/b.rs"})),
-        node("y1", "Function", json!({"name": "y1", "filePath": "ui/c.rs"})),
-        node("z1", "Function", json!({"name": "z1", "filePath": "root.rs"})),
+        node(
+            "x1",
+            "Function",
+            json!({"name": "x1", "filePath": "core/a.rs"}),
+        ),
+        node(
+            "x2",
+            "Function",
+            json!({"name": "x2", "filePath": "core/b.rs"}),
+        ),
+        node(
+            "y1",
+            "Function",
+            json!({"name": "y1", "filePath": "ui/c.rs"}),
+        ),
+        node(
+            "z1",
+            "Function",
+            json!({"name": "z1", "filePath": "root.rs"}),
+        ),
         node("w1", "Function", json!({"name": "w1"})),
     ];
     store
-        .ingest(nodes.into_iter(), vec![edge("x1", "x2", "CALLS")].into_iter())
+        .ingest(
+            nodes.into_iter(),
+            vec![edge("x1", "x2", "CALLS")].into_iter(),
+        )
         .unwrap();
     let adj = Adjacency::build(&store).unwrap();
     compute_layout(&store, &adj).unwrap();
 
     let cg = store.cluster_graph().unwrap();
-    let mut summary: Vec<(String, u32)> =
-        cg.nodes.iter().map(|c| (c.label.clone(), c.count)).collect();
+    let mut summary: Vec<(String, u32)> = cg
+        .nodes
+        .iter()
+        .map(|c| (c.label.clone(), c.count))
+        .collect();
     summary.sort();
     // core 2 个；ui 1 个；根级文件与无路径节点都归 (root)。
     assert_eq!(
@@ -361,11 +433,31 @@ fn layout_without_communities_uses_top_dirs() {
 fn process_store() -> GraphStore {
     let mut store = GraphStore::open_in_memory().unwrap();
     let nodes = vec![
-        node("main", "Function", json!({"name": "main", "filePath": "src/main.rs", "startLine": 0})),
-        node("a", "Function", json!({"name": "alpha", "filePath": "src/main.rs", "startLine": 9})),
-        node("b", "Function", json!({"name": "beta", "filePath": "src/lib/util.rs", "startLine": 19})),
-        node("proc1", "Process", json!({"name": "main→beta", "processType": "call-chain", "stepCount": 3})),
-        node("proc2", "Process", json!({"name": "alpha-loop", "processType": "cycle"})),
+        node(
+            "main",
+            "Function",
+            json!({"name": "main", "filePath": "src/main.rs", "startLine": 0}),
+        ),
+        node(
+            "a",
+            "Function",
+            json!({"name": "alpha", "filePath": "src/main.rs", "startLine": 9}),
+        ),
+        node(
+            "b",
+            "Function",
+            json!({"name": "beta", "filePath": "src/lib/util.rs", "startLine": 19}),
+        ),
+        node(
+            "proc1",
+            "Process",
+            json!({"name": "main→beta", "processType": "call-chain", "stepCount": 3}),
+        ),
+        node(
+            "proc2",
+            "Process",
+            json!({"name": "alpha-loop", "processType": "cycle"}),
+        ),
     ];
     let edges = vec![
         edge("main", "a", "CALLS"),
@@ -410,7 +502,10 @@ fn processes_of_node_memberships() {
     assert_eq!(ms[0].step, Some(1));
 
     // Process 自身没有出向 STEP_IN_PROCESS → 空。
-    assert!(store.processes_of_node(rowid_of("proc1")).unwrap().is_empty());
+    assert!(store
+        .processes_of_node(rowid_of("proc1"))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -421,7 +516,10 @@ fn process_steps_ordered_by_step() {
     // proc1：摄取序乱、读回按 step 升序。
     let steps = store.process_steps(rowid_of("proc1")).unwrap();
     let view: Vec<_> = steps.iter().map(|s| (s.id.as_str(), s.step)).collect();
-    assert_eq!(view, vec![("main", Some(1)), ("a", Some(2)), ("b", Some(3))]);
+    assert_eq!(
+        view,
+        vec![("main", Some(1)), ("a", Some(2)), ("b", Some(3))]
+    );
     assert_eq!(steps[0].name, "main");
     assert_eq!(steps[0].label, "Function");
     assert_eq!(steps[0].file_path.as_deref(), Some("src/main.rs"));
@@ -446,10 +544,17 @@ fn step_survives_persisted_roundtrip() {
         let mut store = GraphStore::create(&path).unwrap();
         let nodes = vec![
             node("fn1", "Function", json!({"name": "one"})),
-            node("p1", "Process", json!({"name": "proc", "processType": "call-chain", "stepCount": 1})),
+            node(
+                "p1",
+                "Process",
+                json!({"name": "proc", "processType": "call-chain", "stepCount": 1}),
+            ),
         ];
         store
-            .ingest(nodes.into_iter(), vec![step_edge("fn1", "p1", 1)].into_iter())
+            .ingest(
+                nodes.into_iter(),
+                vec![step_edge("fn1", "p1", 1)].into_iter(),
+            )
             .unwrap();
     }
     let store = GraphStore::open(&path).unwrap();
@@ -464,11 +569,31 @@ fn step_survives_persisted_roundtrip() {
 fn layout_groups_processes_into_own_cluster() {
     let mut store = GraphStore::open_in_memory().unwrap();
     let nodes = vec![
-        node("x1", "Function", json!({"name": "x1", "filePath": "core/a.rs"})),
-        node("x2", "Function", json!({"name": "x2", "filePath": "core/b.rs"})),
-        node("z1", "Function", json!({"name": "z1", "filePath": "root.rs"})),
-        node("p1", "Process", json!({"name": "proc-one", "processType": "call-chain"})),
-        node("p2", "Process", json!({"name": "proc-two", "processType": "call-chain"})),
+        node(
+            "x1",
+            "Function",
+            json!({"name": "x1", "filePath": "core/a.rs"}),
+        ),
+        node(
+            "x2",
+            "Function",
+            json!({"name": "x2", "filePath": "core/b.rs"}),
+        ),
+        node(
+            "z1",
+            "Function",
+            json!({"name": "z1", "filePath": "root.rs"}),
+        ),
+        node(
+            "p1",
+            "Process",
+            json!({"name": "proc-one", "processType": "call-chain"}),
+        ),
+        node(
+            "p2",
+            "Process",
+            json!({"name": "proc-two", "processType": "call-chain"}),
+        ),
     ];
     let edges = vec![
         edge("x1", "x2", "CALLS"),
@@ -481,8 +606,11 @@ fn layout_groups_processes_into_own_cluster() {
 
     // Process 不再混进 "(root)"：单独 "Processes" 簇，根级文件仍归 (root)。
     let cg = store.cluster_graph().unwrap();
-    let mut summary: Vec<(String, u32)> =
-        cg.nodes.iter().map(|c| (c.label.clone(), c.count)).collect();
+    let mut summary: Vec<(String, u32)> = cg
+        .nodes
+        .iter()
+        .map(|c| (c.label.clone(), c.count))
+        .collect();
     summary.sort();
     assert_eq!(
         summary,
@@ -501,7 +629,11 @@ fn layout_groups_processes_into_own_cluster() {
     let proc_cluster = cluster_of("p1");
     assert_eq!(cluster_of("p2"), proc_cluster);
     assert_eq!(cg.nodes[proc_cluster as usize].label, "Processes");
-    assert_ne!(cluster_of("z1"), proc_cluster, "根级文件不应混进 Processes 簇");
+    assert_ne!(
+        cluster_of("z1"),
+        proc_cluster,
+        "根级文件不应混进 Processes 簇"
+    );
 
     // 确定性：重跑坐标逐位一致。
     compute_layout(&store, &adj).unwrap();
@@ -557,14 +689,14 @@ fn lod_snapshot_shape_and_truncation() {
     assert_eq!(meta["count"], 5);
     assert_eq!(meta["classes"], json!(["Community", "Function", "Class"]));
     assert_eq!(meta["nodes"][0]["id"], "com2");
-    assert!(meta["nodes"][0]["x"].is_null(), "meta json should not carry coordinates");
+    assert!(
+        meta["nodes"][0]["x"].is_null(),
+        "meta json should not carry coordinates"
+    );
 
     // 未布局直接取快照 → 明确报错。
     let bare = mini_store();
-    assert!(matches!(
-        bare.lod_snapshot(10),
-        Err(GraphError::Invalid(_))
-    ));
+    assert!(matches!(bare.lod_snapshot(10), Err(GraphError::Invalid(_))));
 }
 
 // ── ego 子图 ─────────────────────────────────────────────────────
@@ -611,7 +743,10 @@ fn ego_graph_center_rings_and_edges() {
     // 与 LodGraph JSON 完全同形。
     let v = serde_json::to_value(&ego).unwrap();
     for key in ["i", "id", "x", "y", "s", "c", "l", "name"] {
-        assert!(!v["nodes"][0][key].is_null(), "missing key {key} in ego node json");
+        assert!(
+            !v["nodes"][0][key].is_null(),
+            "missing key {key} in ego node json"
+        );
     }
 }
 
@@ -744,6 +879,12 @@ fn perf_smoke_100k_nodes_500k_edges() {
         impacted.len()
     );
 
-    assert!(build_t.as_secs_f64() < 2.0, "Adjacency::build took {build_t:?} (>= 2s)");
-    assert!(layout_t.as_secs_f64() < 5.0, "compute_layout took {layout_t:?} (>= 5s)");
+    assert!(
+        build_t.as_secs_f64() < 2.0,
+        "Adjacency::build took {build_t:?} (>= 2s)"
+    );
+    assert!(
+        layout_t.as_secs_f64() < 5.0,
+        "compute_layout took {layout_t:?} (>= 5s)"
+    );
 }

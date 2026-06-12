@@ -25,6 +25,8 @@ use crate::Result;
 
 /// file_path 字段的 tokenizer 名（按非字母数字字符拆分，如 `/` `.`）。
 const PATH_TOKENIZER_NAME: &str = "path";
+const PATH_CLASS_CLEAN: &str = "clean";
+const PATH_CLASS_NOISY: &str = "noisy";
 /// name 字段查询时的权重倍数。
 const NAME_BOOST: f32 = 3.0;
 /// text 字段存储截断上限（字节），用于 snippet。
@@ -38,6 +40,16 @@ const FUZZY_MIN_TERM_CHARS: usize = 3;
 /// IndexWriter 总内存预算（2 线程平分）。
 const WRITER_MEM_BUDGET: usize = 64 * 1024 * 1024;
 const WRITER_THREADS: usize = 2;
+/// label 是真实代码符号时的轻量加权；文件/目录类节点不吃这档。
+const SYMBOL_LABEL_BOOST: f32 = 1.20;
+/// exact symbol name 命中比仅命中文本/路径更可信。
+const EXACT_NAME_BOOST: f32 = 2.40;
+/// query tokens 全部覆盖 name 时给一个中间档，提升 `prompt server` 这类查类名的体验。
+const NAME_TOKEN_COVERAGE_BOOST: f32 = 1.45;
+/// File / Folder / Project 这类容器节点通常是导航结果，不应压过真实符号。
+const CONTAINER_LABEL_PENALTY: f32 = 0.45;
+/// generated/vendor/dist/json/lockfile 等路径噪声降权。
+const NOISY_PATH_PENALTY: f32 = 0.35;
 
 /// 一条检索命中结果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +82,8 @@ struct Fields {
     text: Field,
     file_path: Field,
     label: Field,
+    /// 路径噪声分类字段；旧版索引（schema 无 `path_class`）打开时为 `None`。
+    path_class: Option<Field>,
     /// 切块类型字段；旧版索引（schema 无 `kind`）打开时为 `None`。
     kind: Option<Field>,
     start_line: Field,
@@ -135,6 +149,7 @@ fn build_schema() -> Schema {
             .set_stored(),
     );
     builder.add_text_field("label", STRING | STORED);
+    builder.add_text_field("path_class", STRING | STORED);
     builder.add_text_field("kind", STRING | STORED);
     builder.add_u64_field("start_line", STORED);
     builder.add_u64_field("end_line", STORED);
@@ -150,6 +165,7 @@ fn resolve_fields(schema: &Schema) -> Fields {
         text: field("text"),
         file_path: field("file_path"),
         label: field("label"),
+        path_class: schema.get_field("path_class").ok(),
         kind: schema.get_field("kind").ok(),
         start_line: field("start_line"),
         end_line: field("end_line"),
@@ -210,6 +226,9 @@ impl SearchIndexWriter {
             }
             if let Some(fp) = node.file_path() {
                 doc.add_text(self.fields.file_path, fp);
+                if let Some(path_class) = self.fields.path_class {
+                    doc.add_text(path_class, path_class_value(fp));
+                }
             }
             doc.add_text(self.fields.label, &node.label);
             /* 行号统一存 1-based（工件是 tree-sitter 0-based row） */
@@ -219,8 +238,7 @@ impl SearchIndexWriter {
             if let Some(line) = node.end_line_1based() {
                 doc.add_u64(self.fields.end_line, u64::from(line));
             }
-            self.node_labels
-                .insert(node.id.clone(), node.label.clone());
+            self.node_labels.insert(node.id.clone(), node.label.clone());
             self.writer.add_document(doc)?;
         }
         Ok(())
@@ -235,8 +253,14 @@ impl SearchIndexWriter {
         for chunk in chunks {
             let mut doc = TantivyDocument::new();
             doc.add_text(self.fields.node_id, &chunk.node_id);
-            doc.add_text(self.fields.text, truncate_utf8(&chunk.text, TEXT_STORE_LIMIT));
+            doc.add_text(
+                self.fields.text,
+                truncate_utf8(&chunk.text, TEXT_STORE_LIMIT),
+            );
             doc.add_text(self.fields.file_path, &chunk.file_path);
+            if let Some(path_class) = self.fields.path_class {
+                doc.add_text(path_class, path_class_value(&chunk.file_path));
+            }
             let label = self
                 .node_labels
                 .get(&chunk.node_id)
@@ -298,66 +322,57 @@ impl SearchIndex {
             return Ok(Vec::new());
         }
 
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-        for term in &terms {
-            let name_term = TermQuery::new(
-                Term::from_field_text(self.fields.name, term),
-                IndexRecordOption::WithFreqs,
-            );
-            clauses.push((
-                Occur::Should,
-                Box::new(BoostQuery::new(Box::new(name_term), NAME_BOOST)),
-            ));
-            clauses.push((
-                Occur::Should,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(self.fields.text, term),
-                    IndexRecordOption::WithFreqs,
-                )),
-            ));
-            clauses.push((
-                Occur::Should,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(self.fields.file_path, term),
-                    IndexRecordOption::WithFreqs,
-                )),
-            ));
-        }
-        if query.split_whitespace().count() < FUZZY_WORD_LIMIT {
-            for term in &terms {
-                if term.chars().count() < FUZZY_MIN_TERM_CHARS {
-                    continue;
-                }
-                clauses.push((
-                    Occur::Should,
-                    Box::new(FuzzyTermQuery::new(
-                        Term::from_field_text(self.fields.name, term),
-                        1,
-                        true,
-                    )),
-                ));
-                clauses.push((
-                    Occur::Should,
-                    Box::new(FuzzyTermQuery::new(
-                        Term::from_field_text(self.fields.text, term),
-                        1,
-                        true,
-                    )),
-                ));
-            }
-        }
-        let bool_query = BooleanQuery::new(clauses);
-
         let searcher = self.reader.searcher();
         // 多抓一些以便同 node_id 去重后仍能凑满 limit。
         let fetch = limit.saturating_mul(4).max(limit.saturating_add(16));
-        let top_docs = searcher.search(&bool_query, &TopDocs::with_limit(fetch).order_by_score())?;
 
-        let mut snippet_gen = SnippetGenerator::create(&searcher, &bool_query, self.fields.text)?;
-        snippet_gen.set_max_num_chars(SNIPPET_MAX_CHARS);
-
+        let normalized_query = normalize_for_rank(query);
+        let query_tokens = terms.clone();
         let mut order: Vec<String> = Vec::new();
         let mut best: HashMap<String, Hit> = HashMap::new();
+        if self.fields.path_class.is_some() {
+            let clean_query = build_query(self.fields, query, &terms, Some(PATH_CLASS_CLEAN));
+            self.collect_query_hits(&searcher, &clean_query, fetch, &mut order, &mut best)?;
+            if best.len() < limit {
+                let noisy_query = build_query(self.fields, query, &terms, Some(PATH_CLASS_NOISY));
+                self.collect_query_hits(&searcher, &noisy_query, fetch, &mut order, &mut best)?;
+            }
+        } else {
+            let bool_query = build_query(self.fields, query, &terms, None);
+            self.collect_query_hits(&searcher, &bool_query, fetch, &mut order, &mut best)?;
+        }
+
+        let mut hits: Vec<Hit> = order
+            .into_iter()
+            .filter_map(|id| best.remove(&id))
+            .map(|mut hit| {
+                hit.score = rerank_score(hit.score, &hit, &normalized_query, &query_tokens);
+                hit
+            })
+            .collect();
+        hits.sort_by(|a, b| {
+            rank_bucket(a, &normalized_query, &query_tokens)
+                .cmp(&rank_bucket(b, &normalized_query, &query_tokens))
+                .then_with(|| b.score.total_cmp(&a.score))
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.start_line.cmp(&b.start_line))
+                .then_with(|| a.node_id.cmp(&b.node_id))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    fn collect_query_hits(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &BooleanQuery,
+        fetch: usize,
+        order: &mut Vec<String>,
+        best: &mut HashMap<String, Hit>,
+    ) -> Result<()> {
+        let top_docs = searcher.search(query, &TopDocs::with_limit(fetch).order_by_score())?;
+        let mut snippet_gen = SnippetGenerator::create(searcher, query, self.fields.text)?;
+        snippet_gen.set_max_num_chars(SNIPPET_MAX_CHARS);
         for (score, addr) in top_docs {
             let doc: TantivyDocument = searcher.doc(addr)?;
             let Some(node_id) = str_field(&doc, self.fields.node_id) else {
@@ -368,19 +383,14 @@ impl SearchIndex {
                     order.push(node_id);
                     slot.insert(self.make_hit(score, &doc, &snippet_gen));
                 }
-                // top_docs 按分数降序，首次出现即该 node_id 的最高分；
+                // top_docs 按分数降序，首次出现即该 node_id 在本轮查询的最高分；
                 // 后续重复文档只用来补全缺失字段。
                 Entry::Occupied(mut slot) => {
                     self.fill_missing(slot.get_mut(), &doc, &snippet_gen);
                 }
             }
         }
-
-        Ok(order
-            .into_iter()
-            .take(limit)
-            .filter_map(|id| best.remove(&id))
-            .collect())
+        Ok(())
     }
 
     fn make_hit(&self, score: f32, doc: &TantivyDocument, snippets: &SnippetGenerator) -> Hit {
@@ -449,6 +459,227 @@ fn query_terms(query: &str) -> Vec<String> {
         }
     }
     seen
+}
+
+fn build_query(
+    fields: Fields,
+    raw_query: &str,
+    terms: &[String],
+    path_class: Option<&str>,
+) -> BooleanQuery {
+    let mut lexical: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    for term in terms {
+        let name_term = TermQuery::new(
+            Term::from_field_text(fields.name, term),
+            IndexRecordOption::WithFreqs,
+        );
+        lexical.push((
+            Occur::Should,
+            Box::new(BoostQuery::new(Box::new(name_term), NAME_BOOST)),
+        ));
+        lexical.push((
+            Occur::Should,
+            Box::new(TermQuery::new(
+                Term::from_field_text(fields.text, term),
+                IndexRecordOption::WithFreqs,
+            )),
+        ));
+        lexical.push((
+            Occur::Should,
+            Box::new(TermQuery::new(
+                Term::from_field_text(fields.file_path, term),
+                IndexRecordOption::WithFreqs,
+            )),
+        ));
+    }
+    if raw_query.split_whitespace().count() < FUZZY_WORD_LIMIT {
+        for term in terms {
+            if term.chars().count() < FUZZY_MIN_TERM_CHARS {
+                continue;
+            }
+            lexical.push((
+                Occur::Should,
+                Box::new(FuzzyTermQuery::new(
+                    Term::from_field_text(fields.name, term),
+                    1,
+                    true,
+                )),
+            ));
+            lexical.push((
+                Occur::Should,
+                Box::new(FuzzyTermQuery::new(
+                    Term::from_field_text(fields.text, term),
+                    1,
+                    true,
+                )),
+            ));
+        }
+    }
+    let lexical_query = BooleanQuery::new(lexical);
+    if let (Some(field), Some(class)) = (fields.path_class, path_class) {
+        return BooleanQuery::new(vec![
+            (Occur::Must, Box::new(lexical_query) as Box<dyn Query>),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(field, class),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
+    }
+    lexical_query
+}
+
+fn rerank_score(base: f32, hit: &Hit, normalized_query: &str, query_tokens: &[String]) -> f32 {
+    let mut factor = 1.0;
+    if is_symbol_label(&hit.label) {
+        factor *= SYMBOL_LABEL_BOOST;
+    }
+    if is_container_label(&hit.label) {
+        factor *= CONTAINER_LABEL_PENALTY;
+    }
+    if is_noisy_path(&hit.file_path) {
+        factor *= NOISY_PATH_PENALTY;
+    }
+
+    let normalized_name = normalize_for_rank(&hit.name);
+    if !normalized_name.is_empty() && normalized_name == normalized_query {
+        factor *= EXACT_NAME_BOOST;
+    } else if !query_tokens.is_empty() {
+        let name_tokens = query_terms(&hit.name);
+        if query_tokens
+            .iter()
+            .all(|q| name_tokens.iter().any(|n| n == q))
+        {
+            factor *= NAME_TOKEN_COVERAGE_BOOST;
+        }
+    }
+
+    base * factor
+}
+
+fn rank_bucket(hit: &Hit, normalized_query: &str, query_tokens: &[String]) -> u8 {
+    if is_noisy_path(&hit.file_path) {
+        return 5;
+    }
+    if is_container_label(&hit.label) {
+        return 4;
+    }
+
+    let normalized_name = normalize_for_rank(&hit.name);
+    if is_symbol_label(&hit.label)
+        && !normalized_name.is_empty()
+        && normalized_name == normalized_query
+    {
+        return 0;
+    }
+    if is_primary_code_symbol(&hit.label) {
+        return 1;
+    }
+    if is_symbol_label(&hit.label) {
+        return 2;
+    }
+    if !query_tokens.is_empty() {
+        let name_tokens = query_terms(&hit.name);
+        if query_tokens
+            .iter()
+            .all(|q| name_tokens.iter().any(|n| n == q))
+        {
+            return 2;
+        }
+    }
+    3
+}
+
+fn is_symbol_label(label: &str) -> bool {
+    matches!(
+        label,
+        "Function"
+            | "Method"
+            | "Class"
+            | "Interface"
+            | "Struct"
+            | "Enum"
+            | "Trait"
+            | "Type"
+            | "Const"
+            | "Variable"
+            | "Route"
+    )
+}
+
+fn is_primary_code_symbol(label: &str) -> bool {
+    matches!(
+        label,
+        "Function" | "Method" | "Class" | "Interface" | "Struct" | "Enum" | "Trait" | "Type"
+    )
+}
+
+fn is_container_label(label: &str) -> bool {
+    matches!(
+        label,
+        "File" | "Folder" | "Project" | "Package" | "Module" | "Community" | "Process"
+    )
+}
+
+fn path_class_value(path: &str) -> &'static str {
+    if is_noisy_path(path) {
+        PATH_CLASS_NOISY
+    } else {
+        PATH_CLASS_CLEAN
+    }
+}
+
+fn is_noisy_path(path: &str) -> bool {
+    let path = path.replace('\\', "/").to_ascii_lowercase();
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.iter().any(|segment| {
+        matches!(
+            *segment,
+            ".git"
+                | "node_modules"
+                | "vendor"
+                | "vendors"
+                | "dist"
+                | "build"
+                | "target"
+                | "coverage"
+                | "__pycache__"
+                | ".venv"
+                | "venv"
+                | ".next"
+                | ".nuxt"
+                | ".turbo"
+                | "generated"
+                | "gen"
+                | "third_party"
+                | "third-party"
+        )
+    }) {
+        return true;
+    }
+    path.ends_with(".min.js")
+        || path.ends_with(".min.css")
+        || path.ends_with(".json")
+        || path.ends_with(".jsonl")
+        || path.ends_with(".lock")
+        || path.ends_with("package-lock.json")
+        || path.ends_with("pnpm-lock.yaml")
+        || path.ends_with("yarn.lock")
+        || path.ends_with("composer.lock")
+        || path.ends_with("cargo.lock")
+        || path.ends_with("go.sum")
+        || path.ends_with("tokenizer.json")
+        || path.ends_with("vocab.json")
+        || path.ends_with("merges.txt")
+}
+
+fn normalize_for_rank(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn str_field(doc: &TantivyDocument, field: Field) -> Option<String> {

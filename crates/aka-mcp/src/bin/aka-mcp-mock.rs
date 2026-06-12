@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use aka_mcp::{MockBackend, serve_stdio};
+use aka_mcp::{serve_stdio, MockBackend};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

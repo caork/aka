@@ -1,6 +1,6 @@
-//! aka-mcp — rmcp MCP 服务（stdio），八个工具：
-//! `list_repos` / `query` / `context` / `find_definition` / `search_references`
-//! / `impact` / `analyze` / `augment`。
+//! aka-mcp — rmcp MCP 服务（stdio），工具：
+//! `list_repos` / `query` / `search_code` / `context` / `find_definition`
+//! / `search_references` / `impact` / `analyze` / `augment`。
 //!
 //! 数据层经 [`backend::Backend`] trait 解耦：真实实现（aka-search / aka-graph）
 //! 由集成批次接入；[`mock::MockBackend`] 提供内存假数据用于测试与手测
@@ -18,7 +18,10 @@ use rmcp::ServiceExt;
 pub use aka_core::{
     clamp_render_nodes, DEFAULT_RENDER_MAX_NODES, MAX_RENDER_NODES, MIN_RENDER_NODES,
 };
-pub use backend::{Backend, ProcessHit, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef};
+pub use backend::{
+    Backend, CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, ProcessHit,
+    QueryEnrichment, RepoInfo, RepoProgress, RepoSettingsUpdate, SearchHit, SymbolRef,
+};
 pub use mock::MockBackend;
 pub use service::AkaMcpServer;
 

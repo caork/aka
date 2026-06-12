@@ -219,17 +219,8 @@ function PanelBody({
       });
   };
 
-  /* 「查看完整文件」→ Code 视图（GitHub 式全文预览） */
+  /* 关系/流程跳转时打开 Code 视图（GitHub 式全文预览） */
   const repoName = repos.find((r) => r.id === repoId)?.name ?? repoId;
-  const openFullFile = () => {
-    if (!file) return;
-    openCode({
-      repo: repoName,
-      path: file,
-      line: line > 0 ? line : undefined,
-      endLine: line > 0 ? endLine : undefined,
-    });
-  };
 
   /* 点击关系条目：Code 视图里同时把中栏跳到该节点（跟着图谱走），
      并把抽屉重锚到它；Graph 视图里只重锚，不抢占画布。 */
@@ -385,20 +376,10 @@ function PanelBody({
         {/* 顶部互补视图：Code 模式 = ego 图谱；Graph 模式 = 源码预览 */}
         {view === "code" ? (
           <>
-            <div className="mb-1.5 flex items-baseline justify-between">
+            <div className="mb-1.5 flex items-baseline">
               <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
                 Graph
               </span>
-              {file && (
-                <button
-                  onClick={openFullFile}
-                  className="focus-ring -my-0.5 rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-medium text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)] hover:text-[#2E7CF6]"
-                  title={`跳到 ${file} 的定义`}
-                  data-testid="open-full-file"
-                >
-                  跳到定义 ↗
-                </button>
-              )}
             </div>
             <EgoMiniGraph
               centerName={target.name || target.id}
@@ -411,20 +392,10 @@ function PanelBody({
           </>
         ) : (
           <>
-            <div className="mb-1.5 flex items-baseline justify-between">
+            <div className="mb-1.5 flex items-baseline">
               <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3">
                 Source
               </span>
-              {file && (
-                <button
-                  onClick={openFullFile}
-                  className="focus-ring -my-0.5 rounded-[6px] px-1.5 py-0.5 text-[10.5px] font-medium text-ink-3 transition-colors duration-150 ease-out hover:bg-[rgba(46,124,246,0.07)] hover:text-[#2E7CF6]"
-                  title={`在 Code 视图打开 ${file}`}
-                  data-testid="open-full-file"
-                >
-                  查看完整文件 ↗
-                </button>
-              )}
             </div>
             {entry && !ownFile && (
               <div

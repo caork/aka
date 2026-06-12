@@ -153,7 +153,12 @@ fn build_index(dir: &std::path::Path) -> SearchIndex {
                     "runPipelineFromRepo",
                     "src/pipeline.rs",
                 ),
-                node("fn:kernel_add", "Function", "kernel_add", "src/kernels/math.rs"),
+                node(
+                    "fn:kernel_add",
+                    "Function",
+                    "kernel_add",
+                    "src/kernels/math.rs",
+                ),
             ]
             .into_iter(),
         )
@@ -173,8 +178,7 @@ fn pipeline_repo_recalls_and_ranks_first() {
     assert!(!hits.is_empty());
     assert_eq!(hits[0].node_id, "fn:runPipelineFromRepo");
     // 同一 node_id（node 文档 + chunk 文档）必须去重。
-    let unique: std::collections::HashSet<&str> =
-        hits.iter().map(|h| h.node_id.as_str()).collect();
+    let unique: std::collections::HashSet<&str> = hits.iter().map(|h| h.node_id.as_str()).collect();
     assert_eq!(unique.len(), hits.len(), "duplicate node_id in results");
     // 去重归并后元数据完整：name 来自 node 文档，snippet 来自 chunk 文档。
     assert_eq!(hits[0].name, "runPipelineFromRepo");
@@ -230,13 +234,29 @@ fn chunk_label_carries_node_label_with_kind_fallback() {
 
     let index = SearchIndex::open(dir.path()).unwrap();
     let hits = index.search("quixotic marker alpha", 5).unwrap();
-    let hit = hits.iter().find(|h| h.node_id == "const:emitArtifacts").unwrap();
-    assert_eq!(hit.label, "Const", "chunk 命中必须携带节点真实 label，而非 chunk kind");
-    assert_eq!(hit.kind.as_deref(), Some("char"), "切块类型保留在 kind 字段");
+    let hit = hits
+        .iter()
+        .find(|h| h.node_id == "const:emitArtifacts")
+        .unwrap();
+    assert_eq!(
+        hit.label, "Const",
+        "chunk 命中必须携带节点真实 label，而非 chunk kind"
+    );
+    assert_eq!(
+        hit.kind.as_deref(),
+        Some("char"),
+        "切块类型保留在 kind 字段"
+    );
 
     let hits = index.search("quixotic marker beta", 5).unwrap();
-    let hit = hits.iter().find(|h| h.node_id == "ghost:orphanChunk").unwrap();
-    assert_eq!(hit.label, "ast-declaration", "孤儿 chunk 的 label 回落 chunk kind");
+    let hit = hits
+        .iter()
+        .find(|h| h.node_id == "ghost:orphanChunk")
+        .unwrap();
+    assert_eq!(
+        hit.label, "ast-declaration",
+        "孤儿 chunk 的 label 回落 chunk kind"
+    );
     assert_eq!(hit.kind.as_deref(), Some("ast-declaration"));
 }
 
@@ -251,8 +271,15 @@ fn node_and_chunk_double_hit_merges_into_one() {
         .filter(|h| h.node_id == "class:KnowledgeGraph")
         .map(|h| h.node_id.as_str())
         .collect();
-    assert_eq!(dup.len(), 1, "同一符号 id 的 node/chunk 双命中必须合并成一条");
-    let merged = hits.iter().find(|h| h.node_id == "class:KnowledgeGraph").unwrap();
+    assert_eq!(
+        dup.len(),
+        1,
+        "同一符号 id 的 node/chunk 双命中必须合并成一条"
+    );
+    let merged = hits
+        .iter()
+        .find(|h| h.node_id == "class:KnowledgeGraph")
+        .unwrap();
     // 合并保留双方信息：node 侧 name/label + chunk 侧 snippet/kind。
     assert_eq!(merged.name, "KnowledgeGraph");
     assert_eq!(merged.label, "Class");
@@ -317,13 +344,11 @@ fn reopen_then_search_and_append() {
     // 增量追加（writer 重开）后新文档对 reload 过的读句柄可检索。
     let mut writer = SearchIndexWriter::open(dir.path()).unwrap();
     writer
-        .add_chunks(
-            std::iter::once(chunk(
-                "fn:freshlyAddedSymbol",
-                "src/fresh.rs",
-                "fn freshlyAddedSymbol() { zanzibar_quokka() }",
-            )),
-        )
+        .add_chunks(std::iter::once(chunk(
+            "fn:freshlyAddedSymbol",
+            "src/fresh.rs",
+            "fn freshlyAddedSymbol() { zanzibar_quokka() }",
+        )))
         .unwrap();
     writer.commit().unwrap();
     drop(writer);
@@ -342,8 +367,14 @@ fn concurrent_readers_do_not_hold_write_lock() {
 
     // 两个只读句柄并存（模拟 serve + mcp 两个进程同时打开）。
     let reader_b = SearchIndex::open(dir.path()).expect("第二个只读句柄不应撞写锁");
-    assert_eq!(reader_a.search("pipeline repo", 5).unwrap()[0].node_id, "fn:runPipelineFromRepo");
-    assert_eq!(reader_b.search("pipeline repo", 5).unwrap()[0].node_id, "fn:runPipelineFromRepo");
+    assert_eq!(
+        reader_a.search("pipeline repo", 5).unwrap()[0].node_id,
+        "fn:runPipelineFromRepo"
+    );
+    assert_eq!(
+        reader_b.search("pipeline repo", 5).unwrap()[0].node_id,
+        "fn:runPipelineFromRepo"
+    );
 
     // 读句柄开着的同时，写句柄仍可取锁写入（serve 后台导入/更新场景）。
     let mut writer = SearchIndexWriter::open(dir.path()).expect("读句柄不应阻塞写锁");
@@ -363,8 +394,14 @@ fn concurrent_readers_do_not_hold_write_lock() {
     // 旧读句柄 reload 后能看到写入。
     reader_a.reload().unwrap();
     reader_b.reload().unwrap();
-    assert_eq!(reader_a.search("xylophone wombat", 5).unwrap()[0].node_id, "fn:hotAppended");
-    assert_eq!(reader_b.search("xylophone wombat", 5).unwrap()[0].node_id, "fn:hotAppended");
+    assert_eq!(
+        reader_a.search("xylophone wombat", 5).unwrap()[0].node_id,
+        "fn:hotAppended"
+    );
+    assert_eq!(
+        reader_b.search("xylophone wombat", 5).unwrap()[0].node_id,
+        "fn:hotAppended"
+    );
 }
 
 #[test]
@@ -374,4 +411,231 @@ fn empty_query_and_zero_limit() {
     assert!(index.search("", 10).unwrap().is_empty());
     assert!(index.search("   ::: ", 10).unwrap().is_empty());
     assert!(index.search("pipeline", 0).unwrap().is_empty());
+}
+
+#[test]
+fn exact_symbol_beats_container_path_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+    writer
+        .add_nodes(
+            vec![
+                node(
+                    "file:PromptServer",
+                    "File",
+                    "PromptServer",
+                    "src/PromptServer.ts",
+                ),
+                node(
+                    "folder:prompt-server",
+                    "Folder",
+                    "PromptServer",
+                    "src/PromptServer",
+                ),
+                node(
+                    "class:PromptServer",
+                    "Class",
+                    "PromptServer",
+                    "src/server.ts",
+                ),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+    writer
+        .add_chunks(
+            vec![ChunkRec {
+                node_id: "class:PromptServer".to_owned(),
+                kind: "ast-class".to_owned(),
+                file_path: "src/server.ts".to_owned(),
+                start_line: 42,
+                end_line: 80,
+                text: "class PromptServer { async startPromptServer() {} }".to_owned(),
+            }]
+            .into_iter(),
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    drop(writer);
+
+    let index = SearchIndex::open(dir.path()).unwrap();
+    let hits = index.search("PromptServer", 10).unwrap();
+    assert_eq!(hits[0].node_id, "class:PromptServer");
+    assert_eq!(hits[0].label, "Class");
+}
+
+#[test]
+fn generated_vendor_json_is_demoted_below_source_symbol() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+    writer
+        .add_nodes(
+            vec![
+                node(
+                    "fn:loadTokenizer",
+                    "Function",
+                    "loadTokenizer",
+                    "src/tokenizer.ts",
+                ),
+                node(
+                    "data:tokenizer",
+                    "Resource",
+                    "tokenizer",
+                    "node_modules/model/tokenizer.json",
+                ),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+    writer
+        .add_chunks(
+            vec![
+                ChunkRec {
+                    node_id: "fn:loadTokenizer".to_owned(),
+                    kind: "ast-function".to_owned(),
+                    file_path: "src/tokenizer.ts".to_owned(),
+                    start_line: 3,
+                    end_line: 12,
+                    text: "function loadTokenizer() { return parseTokenizerConfig() }".to_owned(),
+                },
+                ChunkRec {
+                    node_id: "data:tokenizer".to_owned(),
+                    kind: "char".to_owned(),
+                    file_path: "node_modules/model/tokenizer.json".to_owned(),
+                    start_line: 1,
+                    end_line: 20,
+                    text: "tokenizer tokenizer tokenizer tokenizer tokenizer parse config"
+                        .to_owned(),
+                },
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    drop(writer);
+
+    let index = SearchIndex::open(dir.path()).unwrap();
+    let hits = index.search("tokenizer parse config", 10).unwrap();
+    assert_eq!(hits[0].node_id, "fn:loadTokenizer");
+    assert!(
+        hits.iter()
+            .position(|h| h.node_id == "data:tokenizer")
+            .unwrap()
+            > hits
+                .iter()
+                .position(|h| h.node_id == "fn:loadTokenizer")
+                .unwrap(),
+        "generated/vendor JSON should not outrank source symbols: {hits:?}"
+    );
+}
+
+#[test]
+fn plain_json_resource_is_demoted_below_source_symbol() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+    writer
+        .add_nodes(
+            vec![
+                node("fn:parsePolicy", "Function", "parsePolicy", "src/policy.ts"),
+                node(
+                    "resource:policy-schema",
+                    "Resource",
+                    "policy schema",
+                    "src/policy.schema.json",
+                ),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+    writer
+        .add_chunks(
+            vec![
+                ChunkRec {
+                    node_id: "fn:parsePolicy".to_owned(),
+                    kind: "ast-function".to_owned(),
+                    file_path: "src/policy.ts".to_owned(),
+                    start_line: 8,
+                    end_line: 18,
+                    text: "function parsePolicy(input: unknown) { return validatePolicy(input) }"
+                        .to_owned(),
+                },
+                ChunkRec {
+                    node_id: "resource:policy-schema".to_owned(),
+                    kind: "char".to_owned(),
+                    file_path: "src/policy.schema.json".to_owned(),
+                    start_line: 1,
+                    end_line: 60,
+                    text: "policy policy policy parse validate schema schema schema".to_owned(),
+                },
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    drop(writer);
+
+    let index = SearchIndex::open(dir.path()).unwrap();
+    let hits = index.search("policy parse validate", 10).unwrap();
+    assert_eq!(hits[0].node_id, "fn:parsePolicy");
+    assert!(
+        hits.iter()
+            .position(|h| h.node_id == "resource:policy-schema")
+            .unwrap()
+            > hits
+                .iter()
+                .position(|h| h.node_id == "fn:parsePolicy")
+                .unwrap(),
+        "plain JSON resources should not outrank source symbols: {hits:?}"
+    );
+}
+
+#[test]
+fn noisy_json_pool_cannot_hide_clean_source_symbol() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+    let mut nodes = vec![node(
+        "fn:resolvePolicy",
+        "Function",
+        "resolvePolicy",
+        "src/policy.ts",
+    )];
+    for i in 0..80 {
+        nodes.push(node(
+            &format!("resource:policy:{i}"),
+            "Resource",
+            "policy schema",
+            &format!("node_modules/pkg{i}/policy.schema.json"),
+        ));
+    }
+    writer.add_nodes(nodes.into_iter()).unwrap();
+
+    let mut chunks = vec![ChunkRec {
+        node_id: "fn:resolvePolicy".to_owned(),
+        kind: "ast-function".to_owned(),
+        file_path: "src/policy.ts".to_owned(),
+        start_line: 4,
+        end_line: 12,
+        text: "function resolvePolicy() { return parsePolicyConfig() }".to_owned(),
+    }];
+    for i in 0..80 {
+        chunks.push(ChunkRec {
+            node_id: format!("resource:policy:{i}"),
+            kind: "char".to_owned(),
+            file_path: format!("node_modules/pkg{i}/policy.schema.json"),
+            start_line: 1,
+            end_line: 20,
+            text: "policy policy policy policy policy parse config".to_owned(),
+        });
+    }
+    writer.add_chunks(chunks.into_iter()).unwrap();
+    writer.commit().unwrap();
+    drop(writer);
+
+    let index = SearchIndex::open(dir.path()).unwrap();
+    let hits = index.search("policy parse config", 5).unwrap();
+    assert_eq!(
+        hits.first().map(|h| h.node_id.as_str()),
+        Some("fn:resolvePolicy"),
+        "clean source symbol must not be hidden by noisy JSON candidates: {hits:?}"
+    );
 }

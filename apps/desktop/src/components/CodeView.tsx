@@ -108,7 +108,6 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
   const [highlight, setHighlight] = useState<LineHighlight | null>(null);
   const [pendingScroll, setPendingScroll] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -278,19 +277,6 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const lang = LANG_BY_EXT[ext] ?? (ext ? ext.toUpperCase() : null);
 
-  const copyPath = () => {
-    const text = absPath || path;
-    void navigator.clipboard
-      .writeText(text)
-      .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1600);
-      })
-      .catch(() => {
-        /* 剪贴板不可用——静默忽略 */
-      });
-  };
-
   const segments = path.split("/").filter(Boolean);
   const gutterWidth = `${Math.max(4, String(Math.max(totalLines, load.phase === "ok" ? load.lines.length : 0)).length) + 2}ch`;
 
@@ -300,8 +286,8 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
       data-testid="code-view"
     >
       {/* ---- 头部：面包屑 + 徽章 + 操作 ---- */}
-      {/* pr-[152px] reserves space for the absolute Code/Graph switcher (≈130px) at right-3 */}
-      <div className="themed-divider flex flex-none items-center gap-3 border-b pl-4 pr-[152px] py-2.5">
+      {/* pr reserves space for the absolute Search + Code/Graph controls at right-3. */}
+      <div className="themed-divider flex flex-none items-center gap-3 border-b pl-4 pr-[196px] py-2.5">
         <nav
           className="mono flex min-w-0 flex-1 items-center gap-1 text-[12px]"
           aria-label="文件路径"
@@ -380,14 +366,6 @@ function CodeBody({ repo, path }: { repo: string; path: string }) {
             在编辑器打开
           </span>
         )}
-        <button
-          onClick={copyPath}
-          className="themed-hover focus-ring flex-none rounded-[8px] px-2.5 py-1.5 text-[12px] font-medium text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
-          style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }}
-          data-testid="code-copy-path"
-        >
-          {copied ? "已复制 ✓" : "复制路径"}
-        </button>
       </div>
 
       {/* ---- 代码区 ---- */}
@@ -541,12 +519,10 @@ function renderLine(
         onClick={() => onSymbolClick(m.sym)}
         title={`${m.sym.label} · 查看图谱连接`}
         className={[
-          "focus-ring cursor-pointer rounded-[3px] align-baseline transition-colors duration-150 ease-out",
-          selected
-            ? "border-b border-[rgba(46,124,246,0.85)] bg-[var(--accent-fill-strong)] font-medium text-[var(--accent-ink)]"
-            : "border-b border-dotted border-[var(--hairline-strong)] text-ink hover:border-[rgba(46,124,246,0.75)] hover:bg-[var(--accent-fill)] hover:text-[var(--accent-ink)]",
+          "code-symbol-mark focus-ring cursor-pointer rounded-[3px] align-baseline transition-colors duration-150 ease-out",
+          selected ? "selected font-semibold text-[var(--accent-ink)]" : "text-ink hover:text-[var(--accent-ink)]",
         ].join(" ")}
-        style={{ font: "inherit", padding: "0 1px" }}
+        style={{ font: "inherit" }}
         data-testid="code-symbol"
         data-selected={selected ? "true" : undefined}
       >
