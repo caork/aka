@@ -149,7 +149,11 @@ create_zip_archive() {
         zip_args+=(-x "${pattern}")
       done
     fi
-    zip -q -X -r "${archive}" "$@" "${zip_args[@]}"
+    if [[ ${#zip_args[@]} -gt 0 ]]; then
+      zip -q -X -r "${archive}" "$@" "${zip_args[@]}"
+    else
+      zip -q -X -r "${archive}" "$@"
+    fi
     return
   fi
   if command -v 7z >/dev/null 2>&1; then
@@ -160,7 +164,11 @@ create_zip_archive() {
         seven_zip_args+=("-xr!${pattern}")
       done
     fi
-    7z a -tzip "${archive}" "$@" "${seven_zip_args[@]}" >/dev/null
+    if [[ ${#seven_zip_args[@]} -gt 0 ]]; then
+      7z a -tzip "${archive}" "$@" "${seven_zip_args[@]}" >/dev/null
+    else
+      7z a -tzip "${archive}" "$@" >/dev/null
+    fi
     return
   fi
   if command -v powershell.exe >/dev/null 2>&1 || command -v powershell >/dev/null 2>&1 || command -v pwsh >/dev/null 2>&1; then
