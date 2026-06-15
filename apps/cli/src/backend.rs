@@ -850,11 +850,18 @@ fn discover_workspace_root(start: &Path) -> Result<Option<PathBuf>> {
             }
         }
     }
-    if start.is_dir()
-        && has_workspace_marker(&start)
-        && RepoQuickState::compute(&start).is_ok_and(|state| !state.files.is_empty())
-    {
-        return Ok(Some(start));
+    let mut cursor = start.as_path();
+    loop {
+        if cursor.is_dir()
+            && has_workspace_marker(cursor)
+            && RepoQuickState::compute(cursor).is_ok_and(|state| !state.files.is_empty())
+        {
+            return Ok(Some(cursor.to_path_buf()));
+        }
+        let Some(parent) = cursor.parent() else {
+            break;
+        };
+        cursor = parent;
     }
     Ok(None)
 }
@@ -2279,8 +2286,9 @@ impl Backend for AkaBackend {
     }
 
     fn analyze(&self, repo_path: &str) -> Result<String> {
-        let path = PathBuf::from(repo_path)
-            .canonicalize()
+        let requested = PathBuf::from(repo_path);
+        let path = discover_workspace_root(&requested)?
+            .or_else(|| requested.canonicalize().ok())
             .with_context(|| format!("resolve repository path {repo_path}"))?;
         if !path.is_dir() {
             bail!("repository path is not a directory: {repo_path}");
@@ -3104,6 +3112,24 @@ mod tests {
     }
 
     #[test]
+    fn discover_workspace_root_walks_up_to_non_git_marker() {
+        let repo = temp_repo("workspace-marked-nested");
+        std::fs::create_dir_all(repo.join("src/app/api")).unwrap();
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
+        std::fs::write(
+            repo.join("src/app/api/views.py"),
+            "def list_orders(): pass\n",
+        )
+        .unwrap();
+
+        let root = discover_workspace_root(&repo.join("src/app/api"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(root, repo.canonicalize().unwrap());
+    }
+
+    #[test]
     fn unique_local_name_uses_path_hash_on_name_collision() {
         let repo = temp_repo("workspace-name");
         let other = temp_repo("other").join("workspace-name");
@@ -3171,6 +3197,37 @@ mod tests {
         let repos = backend.list_repos().unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name, derive_local_name(&repo));
+        assert_eq!(repos[0].status, "indexing");
+    }
+
+    #[test]
+    fn analyze_lifts_nested_path_to_workspace_root() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let repo = temp_repo("workspace-analyze-nested");
+        let home = temp_repo("workspace-analyze-nested-home");
+        std::fs::create_dir_all(repo.join("src/app/api")).unwrap();
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
+        std::fs::write(
+            repo.join("src/app/api/views.py"),
+            "def list_orders(): pass\n",
+        )
+        .unwrap();
+        std::env::set_var("AKA_HOME", &home);
+
+        let backend = AkaBackend::new();
+        let summary = backend
+            .analyze(repo.join("src/app/api").to_str().unwrap())
+            .unwrap();
+
+        assert!(summary.starts_with("indexing scheduled: "));
+        let repos = backend.list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, derive_local_name(&repo));
+        assert_eq!(
+            repos[0].path,
+            repo.canonicalize().unwrap().to_string_lossy()
+        );
         assert_eq!(repos[0].status, "indexing");
     }
 

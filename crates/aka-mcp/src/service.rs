@@ -232,7 +232,9 @@ pub struct ImpactParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AnalyzeParams {
-    /// Absolute path of the repository to (re)index.
+    /// Repository path to (re)index. Absolute paths, relative paths, and nested
+    /// workspace subdirectories are accepted; aka resolves them to the git or
+    /// project root before indexing.
     pub repo_path: String,
 }
 
@@ -479,7 +481,7 @@ impl AkaMcpServer {
     }
 
     #[tool(
-        description = "Ensure a local repository is indexed by absolute path. If it is new, aka registers it and schedules background indexing; if it is already registered, aka schedules an update. Use this when list_repos does not show the agent's workspace."
+        description = "Ensure a local repository is indexed by path. Accepts an absolute path, relative path, or nested workspace directory; aka resolves it to the git/project root. If it is new, aka registers it and schedules background indexing; if it is already registered, aka schedules an update. Use this when list_repos does not show the agent's workspace."
     )]
     pub async fn analyze(
         &self,
@@ -571,7 +573,7 @@ impl AkaMcpServer {
 
 #[tool_handler(
     name = "aka-mcp",
-    instructions = "Code knowledge graph for repositories. Start with list_repos to see status; every tool call tries to auto-queue MCP workspace roots when clients expose them, and stdio fallback also auto-detects its process workspace. Use analyze with an explicit absolute path if the target repo is not listed. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
+    instructions = "Code knowledge graph for repositories. Start with list_repos to see status; every tool call tries to auto-queue MCP workspace roots when clients expose them, and stdio fallback also auto-detects its process workspace. Use analyze with the workspace path, relative path, or nested directory if the target repo is not listed. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
 )]
 impl ServerHandler for AkaMcpServer {
     async fn call_tool(
