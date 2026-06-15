@@ -545,6 +545,148 @@ fn process_synthesis_uses_gitnexus_like_entry_scoring_and_dedup() {
 }
 
 #[test]
+fn process_synthesis_uses_spring_runner_source_facts_as_entry_hints() {
+    let repo = temp_repo("spring-runner-process-entry-hints");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    let main_file = "src/main/java/com/example/ops/MaintenanceConfig.java";
+    let test_file = "src/test/java/com/example/ops/FixtureConfig.java";
+    std::fs::write(
+        repo.join(main_file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.annotation.Bean;
+
+class MaintenanceConfig {
+    @Bean
+    ApplicationRunner ingestOrders(OrderService orders) {
+        return args -> orders.loadOrders();
+    }
+}
+
+class OrderService {
+    void loadOrders() {
+        persistOrders();
+    }
+
+    void persistOrders() {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(test_file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.annotation.Bean;
+
+class FixtureConfig {
+    @Bean
+    ApplicationRunner fixtureOrders(OrderService orders) {
+        return args -> orders.resetFixtures();
+    }
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", main_file, test_file]);
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Method",
+            "ingestOrders",
+            "com.example.ops.MaintenanceConfig.ingestOrders",
+            main_file,
+        ),
+        (8, 10),
+        json!({
+            "language": "java",
+            "decorators": ["@Bean"],
+            "parent_class": "com.example.ops.MaintenanceConfig",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "loadOrders",
+            "com.example.ops.OrderService.loadOrders",
+            main_file,
+        ),
+        (14, 16),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.ops.OrderService",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
+            "persistOrders",
+            "com.example.ops.OrderService.persistOrders",
+            main_file,
+        ),
+        (18, 18),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.ops.OrderService",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        4,
+        (
+            "Method",
+            "fixtureOrders",
+            "com.example.ops.FixtureConfig.fixtureOrders",
+            test_file,
+        ),
+        (8, 10),
+        json!({
+            "language": "java",
+            "decorators": ["@Bean"],
+            "parent_class": "com.example.ops.FixtureConfig",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "CALLS");
+    insert_edge(&conn, 2, 2, 3, "CALLS");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let process = synth
+        .processes
+        .iter()
+        .find(|process| process.name == "ingestOrders → persistOrders")
+        .expect("Spring runner bean method should seed process entry");
+    assert_eq!(
+        process
+            .steps
+            .iter()
+            .map(|step| step.name.as_str())
+            .collect::<Vec<_>>(),
+        ["ingestOrders", "loadOrders", "persistOrders"]
+    );
+    assert_eq!(
+        process.node_rec().properties["entryReason"],
+        "java-spring-runner-bean-source-declaration"
+    );
+    assert!(!synth
+        .processes
+        .iter()
+        .flat_map(|process| process.steps.iter())
+        .any(|step| step.name == "fixtureOrders"));
+}
+
+#[test]
 fn synthesizes_fastapi_depends_calls_for_processes() {
     let repo = temp_repo("fastapi-depends");
     std::fs::create_dir_all(repo.join("api")).unwrap();

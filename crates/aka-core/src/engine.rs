@@ -47,7 +47,10 @@ mod tool_synth;
 mod topic_synth;
 mod transaction_synth;
 use cache_synth::{synthesize_caches_from_sources, SynthCache};
-use command_synth::{synthesize_commands_from_sources, SynthCommand};
+use command_synth::{
+    command_entry_hints_from_sources, synthesize_commands_from_sources, CommandEntryHint,
+    SynthCommand,
+};
 use config_synth::{synthesize_configs_from_sources, SynthConfig};
 use dependency_synth::synthesize_dependency_edges_from_sources;
 use event_synth::{synthesize_events_from_sources, SynthEvent};
@@ -1324,6 +1327,7 @@ pub(super) struct SynthProcess {
     process_type: String,
     communities: Vec<CommunityRef>,
     steps: Vec<SynthNode>,
+    entry_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1515,6 +1519,9 @@ impl SynthProcess {
         );
         properties.insert("heuristicLabel".into(), Value::String(self.name.clone()));
         properties.insert("source".into(), Value::String("aka-cbm-synth".into()));
+        if let Some(reason) = &self.entry_reason {
+            properties.insert("entryReason".into(), Value::String(reason.clone()));
+        }
         NodeRec {
             id: self.id.clone(),
             label: "Process".into(),
@@ -1626,6 +1633,7 @@ fn synthesize_graph_with_progress(
     let synthetic_edges =
         synthesize_dependency_edges_from_sources(repo, &nodes, &existing_call_pairs);
     let calls = load_call_graph(conn, project, &nodes, &synthetic_edges)?;
+    let command_entry_hints = command_entry_hints_from_sources(repo, &nodes);
 
     emit_phase(
         on_event,
@@ -1664,6 +1672,7 @@ fn synthesize_graph_with_progress(
             &calls.adjacency,
             &calls.indegree,
             &community_memberships,
+            &command_entry_hints,
             symbol_count,
         )
     };
@@ -2285,6 +2294,7 @@ fn synthesize_processes_from_calls(
     adjacency: &BTreeMap<String, BTreeSet<String>>,
     indegree: &BTreeMap<String, usize>,
     community_memberships: &BTreeMap<String, Vec<CommunityRef>>,
+    command_entry_hints: &BTreeMap<String, CommandEntryHint>,
     symbol_count: usize,
 ) -> Vec<SynthProcess> {
     if adjacency.is_empty() {
@@ -2292,7 +2302,7 @@ fn synthesize_processes_from_calls(
     }
 
     let max_processes = dynamic_process_cap(symbol_count);
-    let mut starts = find_entry_points(nodes, adjacency, indegree);
+    let mut starts = find_entry_points(nodes, adjacency, indegree, command_entry_hints);
     if starts.is_empty() {
         starts = adjacency.keys().cloned().collect();
         starts.sort_by(|a, b| {
@@ -2319,7 +2329,9 @@ fn synthesize_processes_from_calls(
 
     traces
         .into_iter()
-        .filter_map(|trace| process_from_trace(&trace, nodes, community_memberships))
+        .filter_map(|trace| {
+            process_from_trace(&trace, nodes, community_memberships, command_entry_hints)
+        })
         .collect()
 }
 
@@ -2327,6 +2339,7 @@ fn find_entry_points(
     nodes: &BTreeMap<String, SynthNode>,
     adjacency: &BTreeMap<String, BTreeSet<String>>,
     indegree: &BTreeMap<String, usize>,
+    command_entry_hints: &BTreeMap<String, CommandEntryHint>,
 ) -> Vec<String> {
     let mut candidates = Vec::new();
     for (id, node) in nodes {
@@ -2340,7 +2353,7 @@ fn find_entry_points(
             continue;
         }
         let callers = *indegree.get(id).unwrap_or(&0);
-        let score = entry_score(node, callers, callees.len());
+        let score = entry_score(node, callers, callees.len(), command_entry_hints.get(id));
         if score > 0.0 {
             candidates.push((id.clone(), score));
         }
@@ -2447,6 +2460,7 @@ fn process_from_trace(
     path: &[String],
     nodes: &BTreeMap<String, SynthNode>,
     community_memberships: &BTreeMap<String, Vec<CommunityRef>>,
+    command_entry_hints: &BTreeMap<String, CommandEntryHint>,
 ) -> Option<SynthProcess> {
     if path.len() < PROCESS_MIN_STEPS {
         return None;
@@ -2475,6 +2489,10 @@ fn process_from_trace(
         process_type,
         communities,
         steps,
+        entry_reason: path
+            .first()
+            .and_then(|id| command_entry_hints.get(id))
+            .map(|hint| hint.strategy.clone()),
     })
 }
 
@@ -4105,7 +4123,12 @@ fn dynamic_process_cap(symbol_count: usize) -> usize {
         .max(PROCESS_MIN_COUNT)
 }
 
-fn entry_score(node: &SynthNode, caller_count: usize, callee_count: usize) -> f64 {
+fn entry_score(
+    node: &SynthNode,
+    caller_count: usize,
+    callee_count: usize,
+    command_entry_hint: Option<&CommandEntryHint>,
+) -> f64 {
     if callee_count == 0 {
         return 0.0;
     }
@@ -4124,7 +4147,17 @@ fn entry_score(node: &SynthNode, caller_count: usize, callee_count: usize) -> f6
     } else {
         node.ast_framework_multiplier
     };
-    base_score * export_multiplier * name_multiplier * framework_multiplier * ast_multiplier
+    let source_entry_multiplier = if command_entry_hint.is_some() {
+        3.0
+    } else {
+        1.0
+    };
+    base_score
+        * export_multiplier
+        * name_multiplier
+        * framework_multiplier
+        * ast_multiplier
+        * source_entry_multiplier
 }
 
 fn is_hard_entry_name(name: &str) -> bool {

@@ -22,6 +22,11 @@ pub(super) struct SynthCommand {
     handler_node: Option<SynthCommandHandlerNode>,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct CommandEntryHint {
+    pub(super) strategy: String,
+}
+
 impl SynthCommand {
     pub(super) fn handler_node_rec(&self) -> Option<NodeRec> {
         self.handler_node
@@ -143,6 +148,35 @@ pub(super) fn synthesize_commands_from_sources(
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.handler_id.cmp(&b.handler_id))
     });
+    out
+}
+
+pub(super) fn command_entry_hints_from_sources(
+    repo: &Path,
+    nodes: &BTreeMap<String, SynthNode>,
+) -> BTreeMap<String, CommandEntryHint> {
+    let project_sources = ProjectSourceSet::discover(repo);
+    let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
+    let mut out = BTreeMap::new();
+    for file_path in project_sources
+        .project_files(repo)
+        .filter(|path| is_jvm_source_path(path) || by_file.contains_key(*path))
+    {
+        if !is_jvm_source_path(file_path) {
+            continue;
+        }
+        let Some(text) = read_repo_text(repo, file_path) else {
+            continue;
+        };
+        let file_nodes = by_file.get(file_path).map(Vec::as_slice).unwrap_or(&[]);
+        for candidate in spring_runner_candidates(&text) {
+            for handler_id in candidate.entry_handler_ids(file_nodes) {
+                out.entry(handler_id.clone()).or_insert(CommandEntryHint {
+                    strategy: candidate.strategy().into(),
+                });
+            }
+        }
+    }
     out
 }
 
@@ -372,6 +406,54 @@ impl SpringRunnerCandidate {
                 .copied()
                 .filter(|node| node.label == "Method" && node.name == *method_name)
                 .min_by_key(|node| line_distance(*line, node.start_line_key())),
+        }
+    }
+
+    fn entry_handler_ids(&self, nodes: &[&SynthNode]) -> Vec<String> {
+        match self {
+            SpringRunnerCandidate::Class { class_name, line } => {
+                let mut ids: Vec<_> = nodes
+                    .iter()
+                    .copied()
+                    .filter(|node| node.label == "Method" && node.name == "run")
+                    .filter(|node| {
+                        node.parent_class
+                            .as_deref()
+                            .is_some_and(|parent| simple_name_matches(parent, class_name))
+                    })
+                    .map(|node| {
+                        (
+                            line_distance(*line, node.start_line_key()),
+                            node.aka_id.clone(),
+                        )
+                    })
+                    .collect();
+                if ids.is_empty() {
+                    if let Some(node) = self.pick_handler(nodes) {
+                        ids.push((
+                            line_distance(*line, node.start_line_key()),
+                            node.aka_id.clone(),
+                        ));
+                    }
+                }
+                ids.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                ids.into_iter().map(|(_, id)| id).collect()
+            }
+            SpringRunnerCandidate::BeanMethod {
+                method_name, line, ..
+            } => nodes
+                .iter()
+                .copied()
+                .filter(|node| node.label == "Method" && node.name == *method_name)
+                .map(|node| {
+                    (
+                        line_distance(*line, node.start_line_key()),
+                        node.aka_id.clone(),
+                    )
+                })
+                .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+                .map(|(_, id)| vec![id])
+                .unwrap_or_default(),
         }
     }
 
