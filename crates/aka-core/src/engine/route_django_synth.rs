@@ -18,12 +18,14 @@ pub(super) fn django_urlconf_routes_from_repo(
         .iter()
         .map(|file_path| (python_file_module_name(file_path), file_path.clone()))
         .collect();
+    let router_export_to_file = router_export_to_file(&file_paths);
     let mut include_edges: BTreeMap<String, Vec<DjangoUrlIncludeEdge>> = BTreeMap::new();
     for file_path in &file_paths {
         let Some(text) = read_repo_text(repo, file_path) else {
             continue;
         };
-        for include in django_urlconf_includes(&text) {
+        let imported_routers = imported_router_modules(&text, &router_export_to_file);
+        for include in django_urlconf_includes(&text, &imported_routers) {
             if let Some(target_file) = module_to_file.get(&include.module) {
                 include_edges
                     .entry(file_path.clone())
@@ -43,6 +45,7 @@ pub(super) fn django_urlconf_routes_from_repo(
         };
         let prefixes = include_prefixes.get(&file_path).cloned().unwrap_or_default();
         let mut candidates = django_urlconf_routes_with_handlers(&text, &handlers);
+        candidates.extend(drf_router_routes_with_handlers(&text, &handlers));
         if !prefixes.is_empty() {
             candidates = candidates
                 .into_iter()
@@ -81,6 +84,123 @@ fn django_urlconf_routes_with_handlers(
         }
     }
     out
+}
+
+fn drf_router_routes_with_handlers(
+    text: &str,
+    handlers: &PythonHandlerIndex<'_>,
+) -> Vec<RouteCandidate> {
+    if !(text.contains("DefaultRouter") || text.contains("SimpleRouter"))
+        || !text.contains(".register")
+    {
+        return Vec::new();
+    }
+    let routers = drf_router_names(text);
+    if routers.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for router in routers {
+        let call_name = format!("{router}.register");
+        for call in find_call_args(text, &call_name) {
+            let Some((prefix, viewset_expr)) = drf_router_register(call.args) else {
+                continue;
+            };
+            let handler = handlers.find(&viewset_expr);
+            let collection = normalize_django_path_route(&prefix);
+            out.push(RouteCandidate {
+                route: collection.clone(),
+                method: None,
+                handler_id: handler.map(|node| node.aka_id.clone()),
+                handler_name: handler.map(|node| node.display_name().to_string()),
+            });
+            out.push(RouteCandidate {
+                route: join_django_routes(&collection, "{id}"),
+                method: None,
+                handler_id: handler.map(|node| node.aka_id.clone()),
+                handler_name: handler.map(|node| node.display_name().to_string()),
+            });
+        }
+    }
+    out
+}
+
+fn drf_router_names(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for constructor in ["DefaultRouter", "SimpleRouter"] {
+        let mut offset = 0usize;
+        while let Some(pos) = text[offset..].find(constructor) {
+            let start = offset + pos;
+            let Some(router_name) = assigned_name_before_call(text, start) else {
+                offset = start + constructor.len();
+                continue;
+            };
+            out.insert(router_name);
+            offset = start + constructor.len();
+        }
+    }
+    out
+}
+
+fn assigned_name_before_call(text: &str, call_start: usize) -> Option<String> {
+    let line_start = text[..call_start].rfind('\n').map_or(0, |idx| idx + 1);
+    let before = text[line_start..call_start].trim();
+    let lhs = before.split_once('=')?.0.trim();
+    if lhs.contains(' ') || lhs.contains('.') || lhs.is_empty() {
+        return None;
+    }
+    Some(lhs.to_string()).filter(|name| name.chars().all(|ch| ch == '_' || ch.is_alphanumeric()))
+}
+
+fn drf_router_register(args: &str) -> Option<(String, String)> {
+    let parts = split_top_level_commas(args);
+    let prefix = string_arg(parts.first()?.trim())?;
+    let viewset = parts.get(1).and_then(|part| clean_handler_expr(part))?;
+    Some((prefix, viewset.to_string()))
+}
+
+fn router_export_to_file(file_paths: &[String]) -> HashMap<String, String> {
+    file_paths
+        .iter()
+        .map(|file_path| {
+            (
+                format!("{}.router", python_file_module_name(file_path)),
+                file_path.clone(),
+            )
+        })
+        .collect()
+}
+
+fn imported_router_modules(
+    text: &str,
+    router_export_to_file: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for line in text.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix("from ") else {
+            continue;
+        };
+        let Some((module, imported)) = rest.split_once(" import ") else {
+            continue;
+        };
+        for item in imported.split(',') {
+            let item = item.trim();
+            let (name, alias) = split_python_import_alias(item);
+            let exported = format!("{module}.{name}");
+            if let Some(file_path) = router_export_to_file.get(&exported) {
+                out.insert(alias.unwrap_or(name).to_string(), file_path.clone());
+            }
+        }
+    }
+    out
+}
+
+fn split_python_import_alias(item: &str) -> (&str, Option<&str>) {
+    if let Some((name, alias)) = item.split_once(" as ") {
+        (name.trim(), Some(alias.trim()))
+    } else {
+        (item.trim(), None)
+    }
 }
 
 #[derive(Debug)]
@@ -155,22 +275,29 @@ fn collect_include_prefixes(
     stack.remove(file_path);
 }
 
-fn django_urlconf_includes(text: &str) -> Vec<DjangoUrlInclude> {
+fn django_urlconf_includes(
+    text: &str,
+    imported_routers: &HashMap<String, String>,
+) -> Vec<DjangoUrlInclude> {
     let mut out = Vec::new();
     for call in find_call_args(text, "path") {
-        if let Some(include) = django_url_include(call.args, false) {
+        if let Some(include) = django_url_include(call.args, false, imported_routers) {
             out.push(include);
         }
     }
     for call in find_call_args(text, "re_path") {
-        if let Some(include) = django_url_include(call.args, true) {
+        if let Some(include) = django_url_include(call.args, true, imported_routers) {
             out.push(include);
         }
     }
     out
 }
 
-fn django_url_include(args: &str, regex: bool) -> Option<DjangoUrlInclude> {
+fn django_url_include(
+    args: &str,
+    regex: bool,
+    imported_routers: &HashMap<String, String>,
+) -> Option<DjangoUrlInclude> {
     let parts = split_top_level_commas(args);
     let route_literal = string_arg(parts.first()?.trim())?;
     let prefix = if regex {
@@ -183,8 +310,20 @@ fn django_url_include(args: &str, regex: bool) -> Option<DjangoUrlInclude> {
         return None;
     }
     let include_args = call_inner_args(include_expr, "include")?;
-    let module = django_include_module(include_args)?;
+    let module = django_include_module(include_args).or_else(|| {
+        django_include_router_file(include_args, imported_routers)
+            .map(|file_path| python_file_module_name(&file_path))
+    })?;
     Some(DjangoUrlInclude { prefix, module })
+}
+
+fn django_include_router_file(
+    args: &str,
+    imported_routers: &HashMap<String, String>,
+) -> Option<String> {
+    let first = split_top_level_commas(args).into_iter().next()?.trim();
+    let router_name = first.strip_suffix(".urls")?.trim();
+    imported_routers.get(router_name).cloned()
 }
 
 fn call_inner_args<'a>(expr: &'a str, name: &str) -> Option<&'a str> {

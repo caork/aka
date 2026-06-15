@@ -1705,6 +1705,76 @@ urlpatterns = [
 }
 
 #[test]
+fn synthesizes_drf_router_registered_viewset_routes() {
+    let repo = temp_repo("django-drf-router-routes");
+    std::fs::create_dir_all(repo.join("project")).unwrap();
+    std::fs::create_dir_all(repo.join("orders")).unwrap();
+    std::fs::write(
+        repo.join("project/urls.py"),
+        r#"from django.urls import include, path
+from orders.urls import router
+
+urlpatterns = [
+    path("api/", include(router.urls)),
+]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("orders/urls.py"),
+        r#"from rest_framework.routers import DefaultRouter
+from . import views
+
+router = DefaultRouter()
+router.register("orders", views.OrderViewSet, basename="order")
+
+urlpatterns = router.urls
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("orders/views.py"),
+        r#"class OrderViewSet:
+    def list(self, request):
+        return []
+
+    def retrieve(self, request, pk=None):
+        return {"id": pk}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "OrderViewSet", "orders.views.OrderViewSet", "orders/views.py"),
+        (1, 6),
+        json!({"language": "python"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let collection = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders")
+        .expect("drf router collection route");
+    assert_eq!(
+        collection.handler_id.as_deref(),
+        Some("cbm:1:orders.views.OrderViewSet")
+    );
+    let detail = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}")
+        .expect("drf router detail route");
+    assert_eq!(
+        detail.handler_id.as_deref(),
+        Some("cbm:1:orders.views.OrderViewSet")
+    );
+}
+
+#[test]
 fn synthesizes_fastapi_local_apirouter_prefixes() {
     let repo = temp_repo("fastapi-local-router");
     std::fs::create_dir_all(repo.join("api")).unwrap();
