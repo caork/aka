@@ -5,7 +5,9 @@ use super::super::{
     find_call_args, node_at_offset, project_code_nodes_by_file, read_repo_text,
     split_top_level_commas, ProjectSourceSet, SynthNode,
 };
-use super::detect::first_string_literal;
+use super::detect::{
+    first_callable_name, first_string_literal, is_background_task_receiver, is_python_identifier,
+};
 use super::types::{SynthJob, SynthJobTrigger};
 
 pub(super) fn attach_job_triggers(
@@ -36,6 +38,9 @@ pub(super) fn attach_job_triggers(
                 .to_string(),
             idx,
         );
+        if job.job_type == "fastapi-background-task" {
+            named_jobs.insert(job.handler_id.clone(), idx);
+        }
     }
     let mut seen: HashSet<(usize, String, String)> = HashSet::new();
     for (file_path, file_nodes) in by_file {
@@ -159,6 +164,41 @@ fn detect_named_job_dispatches(
             }
         }
     }
+    out.extend(detect_python_background_task_dispatches(
+        text, file_path, nodes, named_jobs,
+    ));
+    out
+}
+
+fn detect_python_background_task_dispatches(
+    text: &str,
+    file_path: &str,
+    nodes: &[&SynthNode],
+    named_jobs: &BTreeMap<String, usize>,
+) -> Vec<JobTriggerDetection> {
+    let mut out = Vec::new();
+    for callee in ["background_tasks.add_task", ".add_task"] {
+        for call in find_call_args(text, callee) {
+            if callee == ".add_task" && !is_background_task_receiver(text, call.start) {
+                continue;
+            }
+            let Some(source) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            let args = split_top_level_commas(call.args);
+            let Some(name) = args.first().and_then(|arg| first_callable_name(arg)) else {
+                continue;
+            };
+            if let Some(job_index) = named_jobs.get(&name) {
+                out.push(JobTriggerDetection {
+                    job_index: *job_index,
+                    node_id: source.aka_id.clone(),
+                    file_path: file_path.to_string(),
+                    strategy: "python-fastapi-background-tasks-add-task".into(),
+                });
+            }
+        }
+    }
     out
 }
 
@@ -198,26 +238,4 @@ fn receiver_ident_before(text: &str, dot_start: usize) -> Option<String> {
     }
     let ident = before[start..end].trim();
     is_python_identifier(ident).then(|| ident.to_string())
-}
-
-fn first_callable_name(arg: &str) -> Option<String> {
-    let trimmed = arg.trim();
-    let name = trimmed
-        .split_once('(')
-        .map(|(name, _)| name)
-        .unwrap_or(trimmed)
-        .rsplit('.')
-        .next()
-        .unwrap_or(trimmed)
-        .trim();
-    is_python_identifier(name).then(|| name.to_string())
-}
-
-fn is_python_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }

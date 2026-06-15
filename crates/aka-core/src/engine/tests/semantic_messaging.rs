@@ -631,6 +631,79 @@ def enqueue_orders():
 }
 
 #[test]
+fn synthesizes_python_fastapi_background_task_jobs() {
+    let repo = temp_repo("python-fastapi-background-tasks");
+    std::fs::write(
+        repo.join("api.py"),
+        r#"from fastapi import BackgroundTasks, FastAPI
+
+app = FastAPI()
+
+def send_receipt(order_id: str):
+    deliver_receipt(order_id)
+
+def deliver_receipt(order_id: str):
+    return order_id
+
+@app.post("/orders/{order_id}/receipt")
+def submit_receipt(order_id: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(send_receipt, order_id)
+    return {"queued": True}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "send_receipt",
+        "api.send_receipt",
+        "api.py",
+        (5, 6),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "deliver_receipt",
+        "api.deliver_receipt",
+        "api.py",
+        (8, 9),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "submit_receipt",
+        "api.submit_receipt",
+        "api.py",
+        (12, 14),
+        json!({
+            "decorators": ["@app.post(\"/orders/{order_id}/receipt\")"],
+            "language": "python",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "CALLS");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let job = synth
+        .jobs
+        .iter()
+        .find(|job| job.handler_id == "cbm:1:api.send_receipt")
+        .expect("fastapi background task job");
+    assert_eq!(job.job_type, "fastapi-background-task");
+    assert_eq!(job.strategy, "python-fastapi-background-task");
+    assert!(job.edge_recs().iter().any(|edge| {
+        edge.edge_type == "ENQUEUES_JOB" && edge.source_id == "cbm:3:api.submit_receipt"
+    }));
+}
+
+#[test]
 fn synthesizes_python_dramatiq_jobs() {
     let repo = temp_repo("python-dramatiq-jobs");
     std::fs::write(

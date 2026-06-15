@@ -134,6 +134,7 @@ fn detect_python_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobDetection>
     }
     if let Some(text) = text {
         out.extend(detect_python_celery_beat_entries(text, node));
+        out.extend(detect_python_background_task_entries(text, node));
     }
     out
 }
@@ -265,6 +266,74 @@ fn detect_python_celery_beat_entries(text: &str, node: &SynthNode) -> Vec<JobDet
     out
 }
 
+fn detect_python_background_task_entries(text: &str, node: &SynthNode) -> Vec<JobDetection> {
+    let mut out = Vec::new();
+    for callee in ["background_tasks.add_task", ".add_task"] {
+        for call in find_call_args(text, callee) {
+            if callee == ".add_task" && !is_background_task_receiver(text, call.start) {
+                continue;
+            }
+            let args = split_top_level_commas(call.args);
+            let Some(target) = args.first().and_then(|arg| first_callable_name(arg)) else {
+                continue;
+            };
+            if !callable_matches_node(&target, node) {
+                continue;
+            }
+            out.push(JobDetection {
+                name: format!("{} background task", node.display_name()),
+                job_type: "fastapi-background-task".into(),
+                schedule: None,
+                strategy: "python-fastapi-background-task".into(),
+            });
+        }
+    }
+    out
+}
+
+pub(super) fn first_callable_name(arg: &str) -> Option<String> {
+    let trimmed = arg.trim();
+    let name = trimmed
+        .split_once('(')
+        .map(|(name, _)| name)
+        .unwrap_or(trimmed)
+        .rsplit('.')
+        .next()
+        .unwrap_or(trimmed)
+        .trim();
+    is_python_identifier(name).then(|| name.to_string())
+}
+
+fn callable_matches_node(name: &str, node: &SynthNode) -> bool {
+    name == node.name || name == node.display_name().rsplit('.').next().unwrap_or_default()
+}
+
+pub(super) fn is_background_task_receiver(text: &str, dot_start: usize) -> bool {
+    let Some(receiver) = receiver_ident_before(text, dot_start) else {
+        return false;
+    };
+    receiver.to_ascii_lowercase().contains("background") && text.contains("BackgroundTasks")
+}
+
+fn receiver_ident_before(text: &str, dot_start: usize) -> Option<String> {
+    let before = text.get(..dot_start)?;
+    let mut end = before.len();
+    while end > 0 && before.as_bytes()[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 {
+        let ch = before[..start].chars().next_back()?;
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            start -= ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let ident = before[start..end].trim();
+    is_python_identifier(ident).then(|| ident.to_string())
+}
+
 pub(super) fn first_string_literal(args: &str) -> Option<String> {
     split_top_level_commas(args)
         .first()
@@ -332,4 +401,13 @@ fn first_raw_string_literal(text: &str) -> Option<String> {
         idx += 1;
     }
     None
+}
+
+pub(super) fn is_python_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
