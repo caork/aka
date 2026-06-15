@@ -2603,6 +2603,113 @@ interface OrderRepository extends JpaRepository<Order, Long> {
 }
 
 #[test]
+fn synthesizes_java_table_access_edges() {
+    let repo = temp_repo("java-table-access");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let entity_file = "src/main/java/com/example/orders/Order.java";
+    let repo_file = "src/main/java/com/example/orders/OrderRepository.java";
+    let service_file = "src/main/java/com/example/orders/OrderService.java";
+    std::fs::write(
+        repo.join(entity_file),
+        r#"package com.example.orders;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "orders")
+class Order {
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(repo_file),
+        r#"package com.example.orders;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+
+interface OrderRepository extends JpaRepository<Order, Long> {
+    @Query(value = "select * from orders where status = ?1", nativeQuery = true)
+    List<Order> findNative(String status);
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(service_file),
+        r#"package com.example.orders;
+
+class OrderService {
+    void cancelOrders(EntityManager em) {
+        em.createNativeQuery("update orders set status = 'CANCELLED'");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "Order", "com.example.orders.Order", entity_file),
+        (6, 9),
+        json!({
+            "decorators": ["@Entity", "@Table(name = \"orders\")"],
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "findNative",
+        "com.example.orders.OrderRepository.findNative",
+        repo_file,
+        (7, 8),
+        json!({
+            "decorators": ["@Query(value = \"select * from orders where status = ?1\", nativeQuery = true)"],
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "cancelOrders",
+        "com.example.orders.OrderService.cancelOrders",
+        service_file,
+        (4, 6),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let table_id = synth
+        .persistence
+        .node_recs()
+        .into_iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+        })
+        .expect("orders table")
+        .id;
+    let edges = synth.persistence.edge_recs();
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "READS_TABLE"
+            && edge.source_id == "cbm:2:com.example.orders.OrderRepository.findNative"
+            && edge.target_id == table_id
+    }));
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "WRITES_TABLE"
+            && edge.source_id == "cbm:3:com.example.orders.OrderService.cancelOrders"
+            && edge.target_id == table_id
+    }));
+}
+
+#[test]
 fn synthesizes_java_migration_tables() {
     let repo = temp_repo("java-migrations");
     std::fs::create_dir_all(repo.join("src/main/resources/db/migration")).unwrap();
@@ -2803,6 +2910,131 @@ class OrderRepository:
     assert!(edge_types.contains(&"MAPS_TO_TABLE".to_string()));
     assert!(edge_types.contains(&"MANAGES_ENTITY".to_string()));
     assert!(edge_types.contains(&"HAS_RELATION".to_string()));
+}
+
+#[test]
+fn synthesizes_python_table_access_edges() {
+    let repo = temp_repo("python-table-access");
+    std::fs::write(
+        repo.join("models.py"),
+        r#"from sqlalchemy import Column, Integer
+
+class Order(Base):
+    __tablename__ = "orders"
+    id = Column(Integer, primary_key=True)
+
+class Customer(Base):
+    __tablename__ = "customers"
+    id = Column(Integer, primary_key=True)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("services.py"),
+        r#"from sqlalchemy import select, text
+from models import Customer, Order
+
+def load_orders(session):
+    return session.query(Order).all()
+
+def load_customers(session):
+    return session.execute(select(Customer)).all()
+
+def archive_orders(session):
+    session.execute(text("update orders set archived = true"))
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "Order", "models.Order", "models.py"),
+        (3, 5),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        ("Class", "Customer", "models.Customer", "models.py"),
+        (7, 9),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "load_orders",
+        "services.load_orders",
+        "services.py",
+        (4, 5),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "load_customers",
+        "services.load_customers",
+        "services.py",
+        (7, 8),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        5,
+        "archive_orders",
+        "services.archive_orders",
+        "services.py",
+        (10, 11),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let nodes = synth.persistence.node_recs();
+    let orders_id = nodes
+        .iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+        })
+        .expect("orders table")
+        .id
+        .clone();
+    let customers_id = nodes
+        .iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("customers")
+        })
+        .expect("customers table")
+        .id
+        .clone();
+    let edges = synth.persistence.edge_recs();
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "READS_TABLE"
+            && edge.source_id == "cbm:3:services.load_orders"
+            && edge.target_id == orders_id
+    }));
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "READS_TABLE"
+            && edge.source_id == "cbm:4:services.load_customers"
+            && edge.target_id == customers_id
+    }));
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "WRITES_TABLE"
+            && edge.source_id == "cbm:5:services.archive_orders"
+            && edge.target_id == orders_id
+    }));
 }
 
 #[test]

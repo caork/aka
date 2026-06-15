@@ -3,6 +3,9 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
+use super::persistence_access_synth::{
+    detect_table_access_edges, normalize_table_access_key, TableAccessEntity, TableAccessRef,
+};
 use super::migration_synth::{detect_migrations, ExistingTable, MigrationTableRef, SynthMigration};
 use super::{
     find_matching_paren, project_code_nodes_by_file, read_repo_text, split_top_level_commas,
@@ -275,6 +278,20 @@ pub(super) fn synthesize_persistence_from_sources(
         migrations.insert(migration.id.clone(), migration);
     }
 
+    let table_lookup = table_access_lookup(&tables, &entity_by_name);
+    let table_access_entities = table_access_entities(&entity_by_name);
+    for (file_path, file_nodes) in &by_file {
+        let text = read_repo_text(repo, file_path).unwrap_or_default();
+        for edge in detect_table_access_edges(
+            &text,
+            file_nodes,
+            &table_lookup,
+            &table_access_entities,
+        ) {
+            edges.entry(edge.id.clone()).or_insert(edge);
+        }
+    }
+
     let mut tables: Vec<_> = tables.into_values().collect();
     tables.sort_by(|a, b| {
         a.name
@@ -453,6 +470,50 @@ fn relation_edge(source: &EntityInfo, target: &EntityInfo, strategy: &str) -> Ed
             "toTable": target.table_name,
         })),
     }
+}
+
+fn table_access_lookup(
+    tables: &BTreeMap<String, SynthTable>,
+    entities: &BTreeMap<String, EntityInfo>,
+) -> BTreeMap<String, TableAccessRef> {
+    let mut lookup = BTreeMap::new();
+    for table in tables.values() {
+        lookup.insert(
+            normalize_table_access_key(&table.name),
+            TableAccessRef {
+                table_id: table.id.clone(),
+                table_name: table.name.clone(),
+            },
+        );
+    }
+    for entity in entities.values() {
+        let table = TableAccessRef {
+            table_id: entity.table_id.clone(),
+            table_name: entity.table_name.clone(),
+        };
+        lookup.insert(normalize_table_access_key(&entity.entity_name), table.clone());
+        lookup.insert(normalize_table_access_key(&entity.table_name), table);
+    }
+    lookup
+}
+
+fn table_access_entities(
+    entities: &BTreeMap<String, EntityInfo>,
+) -> BTreeMap<String, TableAccessEntity> {
+    entities
+        .iter()
+        .map(|(name, entity)| {
+            (
+                name.clone(),
+                TableAccessEntity {
+                    entity_id: entity.entity_id.clone(),
+                    entity_name: entity.entity_name.clone(),
+                    table_id: entity.table_id.clone(),
+                    table_name: entity.table_name.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 fn migration_table_placeholder(

@@ -59,7 +59,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 
 **Transaction 事务边界节点**：`label = "Transaction"` 表示业务方法/函数上的事务边界，例如 Spring `@Transactional` 或 Django `transaction.atomic`；`properties.name` 为边界名，`manager` 表示事务管理器来源，`propagation`、`isolation`、`readOnly` 为可选属性。
 
-**Persistence/Migration 节点**：`label = "Table"` / `"Repository"` 表示由 JPA/SQLAlchemy/Django 等实体和 repository 推导出的持久化语义；`properties.tableName`、`entityName`、`columns`、`repositorySource` 等为可选属性。`label = "Migration"` 表示 Flyway/Liquibase/Alembic/Django migration 等 schema 变更脚本；`properties.migrationType`、`version`、`tables`、`operations` 描述迁移框架、版本、涉及表和 create/alter/drop 等操作。若 migration 涉及的表没有 ORM entity，adapter 可合成 `tableSource = "migration-script"` 的 Table。
+**Persistence/Migration 节点**：`label = "Table"` / `"Repository"` 表示由 JPA/SQLAlchemy/Django 等实体和 repository 推导出的持久化语义；`properties.tableName`、`entityName`、`columns`、`repositorySource` 等为可选属性。`label = "Migration"` 表示 Flyway/Liquibase/Alembic/Django migration 等 schema 变更脚本；`properties.migrationType`、`version`、`tables`、`operations` 描述迁移框架、版本、涉及表和 create/alter/drop 等操作。若 migration 涉及的表没有 ORM entity，adapter 可合成 `tableSource = "migration-script"` 的 Table。adapter 还会从高置信 SQL 字符串、Spring Data `@Query`、SQLAlchemy/Django ORM 实体查询中合成方法/函数到 Table 的读写边。
 
 ### edges.ndjson — aka contract `GraphRelationship`
 
@@ -67,7 +67,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 {"id":"...","sourceId":"...","targetId":"...","type":"CALLS","confidence":0.9,"reason":"...","step":1,"evidence":[{"kind":"...","weight":0.5}]}
 ```
 
-`type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/HTTP_CALLS/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/USES_CONFIG/HAS_TRANSACTION_BOUNDARY/MAPS_TO_TABLE/REPOSITORY_FOR/MIGRATES_TABLE/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
+`type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/HTTP_CALLS/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/USES_CONFIG/HAS_TRANSACTION_BOUNDARY/MAPS_TO_TABLE/REPOSITORY_FOR/MIGRATES_TABLE/READS_TABLE/WRITES_TABLE/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
 
 应用语义相关边的当前消费语义：
 
@@ -79,6 +79,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 - `USES_CONFIG`：业务方法/类/模块 → Config。query/context/impact 会按普通图边消费，用于定位配置键、环境变量和 settings 变更影响的代码。
 - `HAS_TRANSACTION_BOUNDARY`：业务方法/函数 → Transaction。context/impact 会按普通图边消费，用于识别 Spring/Django 等服务的事务边界。
 - `MIGRATES_TABLE`：Migration → Table。query/context/impact 会按普通图边消费，用于把 schema migration 变更映射到表、repository、entity 和业务流程风险面。
+- `READS_TABLE` / `WRITES_TABLE`：业务方法/函数 → Table。query/context/impact 会按普通图边消费，用于把 SQL/ORM 查询、写入和 schema 表影响面连接到具体服务代码。
 
 合成 Community 会追加：
 

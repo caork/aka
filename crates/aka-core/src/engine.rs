@@ -30,6 +30,7 @@ mod event_synth;
 mod graphql_synth;
 mod job_synth;
 mod migration_synth;
+mod persistence_access_synth;
 mod persistence_synth;
 mod policy_synth;
 mod property_synth;
