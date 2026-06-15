@@ -58,7 +58,7 @@ pub(super) fn attach_spring_batch_step_refs(
 fn spring_batch_step_names_in_job(text: &str, handler: &SynthNode) -> Vec<String> {
     let body = node_source_window(text, handler);
     let mut out = Vec::new();
-    for method in ["start", "next", "flow"] {
+    for method in ["start", "next", "flow", "from", "to"] {
         for args in java_chain_call_args(&body, method) {
             if let Some(name) = first_java_reference_name(args) {
                 out.push(name);

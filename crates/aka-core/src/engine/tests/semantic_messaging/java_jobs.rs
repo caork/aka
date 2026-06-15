@@ -258,12 +258,22 @@ class OrderBatchConfig {
     Job importOrdersJob(Step loadOrdersStep) {
         return new JobBuilder("orders.import")
             .start(loadOrdersStep)
+            .next(validateOrdersStep())
+            .from(loadOrdersStep)
+            .to(validateOrdersStep())
             .build();
     }
 
     @Bean
     Step loadOrdersStep() {
         return new StepBuilder("orders.load")
+            .tasklet((contribution, context) -> null)
+            .build();
+    }
+
+    @Bean
+    Step validateOrdersStep() {
+        return new StepBuilder("orders.validate")
             .tasklet((contribution, context) -> null)
             .build();
     }
@@ -288,7 +298,7 @@ class OrderImportController {
             "com.example.jobs.OrderBatchConfig.importOrdersJob",
             file,
         ),
-        (12, 16),
+        (12, 19),
         json!({
             "language": "java",
         }),
@@ -302,7 +312,7 @@ class OrderImportController {
             "com.example.jobs.OrderBatchConfig.loadOrdersStep",
             file,
         ),
-        (19, 23),
+        (22, 26),
         json!({
             "language": "java",
         }),
@@ -312,11 +322,25 @@ class OrderImportController {
         3,
         (
             "Method",
+            "validateOrdersStep",
+            "com.example.jobs.OrderBatchConfig.validateOrdersStep",
+            file,
+        ),
+        (29, 33),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        4,
+        (
+            "Method",
             "launchImport",
             "com.example.jobs.OrderImportController.launchImport",
             file,
         ),
-        (27, 29),
+        (37, 39),
         json!({
             "language": "java",
         }),
@@ -337,8 +361,13 @@ class OrderImportController {
             && edge.target_id == "cbm:2:com.example.jobs.OrderBatchConfig.loadOrdersStep"
     }));
     assert!(job.edge_recs().iter().any(|edge| {
+        edge.edge_type == "USES_STEP"
+            && edge.source_id == job.id
+            && edge.target_id == "cbm:3:com.example.jobs.OrderBatchConfig.validateOrdersStep"
+    }));
+    assert!(job.edge_recs().iter().any(|edge| {
         edge.edge_type == "ENQUEUES_JOB"
-            && edge.source_id == "cbm:3:com.example.jobs.OrderImportController.launchImport"
+            && edge.source_id == "cbm:4:com.example.jobs.OrderImportController.launchImport"
     }));
 
     let step = synth
@@ -349,4 +378,12 @@ class OrderImportController {
     assert_eq!(step.name, "orders.load");
     assert_eq!(step.job_type, "spring-batch-step");
     assert_eq!(step.strategy, "java-spring-batch-step-bean");
+
+    let validate_step = synth
+        .jobs
+        .iter()
+        .find(|job| job.handler_id == "cbm:3:com.example.jobs.OrderBatchConfig.validateOrdersStep")
+        .expect("spring batch validate step bean");
+    assert_eq!(validate_step.name, "orders.validate");
+    assert_eq!(validate_step.job_type, "spring-batch-step");
 }
