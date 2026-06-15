@@ -842,6 +842,74 @@ def sync_order(order_id: str):
 }
 
 #[test]
+fn links_python_httpx_client_consumers_to_routes() {
+    let repo = temp_repo("python-httpx-route-consumers");
+    std::fs::create_dir_all(repo.join("api")).unwrap();
+    std::fs::create_dir_all(repo.join("workers")).unwrap();
+    std::fs::write(
+        repo.join("api/orders.py"),
+        r#"from fastapi import APIRouter
+
+router = APIRouter(prefix="/api/orders")
+
+@router.get("/{id}")
+def get_order(id: str):
+    return {"id": id, "status": "ok"}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("workers/sync.py"),
+        r#"import httpx
+
+async def sync_order(order_id: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"http://orders.internal/api/orders/{order_id}")
+        data = response.json()
+        return data["status"]
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Function",
+        "get_order",
+        "api.orders.get_order",
+        "api/orders.py",
+        json!({
+            "decorators": ["@router.get(\"/{id}\")"],
+            "language": "python",
+            "route_method": "GET",
+            "route_path": "/{id}",
+        }),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Function",
+        "sync_order",
+        "workers.sync.sync_order",
+        "workers/sync.py",
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}")
+        .expect("parameterized FastAPI route");
+    assert_eq!(route.consumers.len(), 1);
+    assert_eq!(route.consumers[0].node_id, "cbm:2:workers.sync.sync_order");
+    assert!(route.consumers[0].keys.contains(&"status".to_string()));
+}
+
+#[test]
 fn synthesizes_spring_routes_with_class_prefix() {
     let repo = temp_repo("spring-routes");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
@@ -1014,6 +1082,134 @@ public class OrderWorker {
 
     let edge_types: Vec<_> = route.edge_recs().into_iter().map(|e| e.edge_type).collect();
     assert!(edge_types.contains(&"FETCHES".to_string()));
+}
+
+#[test]
+fn links_java_builder_http_consumers_to_spring_routes() {
+    let repo = temp_repo("java-builder-route-consumers");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/workers")).unwrap();
+    std::fs::write(
+        repo.join("src/main/java/com/example/orders/OrderController.java"),
+        r#"package com.example.orders;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+    @GetMapping("/{id}")
+    public OrderDto getOrder(String id) {
+        return new OrderDto(id, "ok");
+    }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/main/java/com/example/workers/OrderWorker.java"),
+        r#"package com.example.workers;
+
+import java.net.URI;
+
+public class OrderWorker {
+    public String syncOrder(String id) {
+        var request = java.net.http.HttpRequest.newBuilder()
+            .uri(URI.create("http://orders/api/orders/" + id))
+            .build();
+        OrderDto order = send(request);
+        return order.getStatus();
+    }
+
+    public String syncOrderWithOkHttp(String id) {
+        var request = new okhttp3.Request.Builder()
+            .url("http://orders/api/orders/" + id)
+            .build();
+        OrderDto order = execute(request);
+        return order.status();
+    }
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Class",
+        "OrderController",
+        "com.example.orders.OrderController",
+        "src/main/java/com/example/orders/OrderController.java",
+        json!({
+            "decorators": ["@RestController", "@RequestMapping(\"/api/orders\")"],
+            "language": "java",
+        }),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Method",
+        "getOrder",
+        "com.example.orders.OrderController.getOrder",
+        "src/main/java/com/example/orders/OrderController.java",
+        json!({
+            "decorators": ["@GetMapping(\"/{id}\")"],
+            "language": "java",
+            "parent_class": "cbm:1:com.example.orders.OrderController",
+            "route_method": "GET",
+            "route_path": "/{id}",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "DEFINES_METHOD");
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
+            "syncOrder",
+            "com.example.workers.OrderWorker.syncOrder",
+            "src/main/java/com/example/workers/OrderWorker.java",
+        ),
+        (6, 12),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        4,
+        (
+            "Method",
+            "syncOrderWithOkHttp",
+            "com.example.workers.OrderWorker.syncOrderWithOkHttp",
+            "src/main/java/com/example/workers/OrderWorker.java",
+        ),
+        (14, 20),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}")
+        .expect("spring route with class prefix");
+    let consumers: BTreeSet<_> = route
+        .consumers
+        .iter()
+        .map(|consumer| consumer.node_id.as_str())
+        .collect();
+    assert!(consumers.contains("cbm:3:com.example.workers.OrderWorker.syncOrder"));
+    assert!(consumers.contains("cbm:4:com.example.workers.OrderWorker.syncOrderWithOkHttp"));
+    assert!(route.consumers.iter().any(|consumer| {
+        consumer
+            .keys
+            .iter()
+            .any(|key| key == "getStatus" || key == "status")
+    }));
 }
 
 #[test]

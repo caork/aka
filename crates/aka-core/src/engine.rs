@@ -3782,9 +3782,6 @@ fn attach_route_consumers(
         let Some(text) = read_repo_text(repo, &file_path) else {
             continue;
         };
-        let Some(consumer) = pick_handler_node(&file_nodes) else {
-            continue;
-        };
         for (route, node_id) in java_feign_route_consumers(&file_nodes) {
             for candidate in routes.values_mut().filter(|r| r.route == route) {
                 if candidate.file_path == file_path {
@@ -3797,17 +3794,12 @@ fn attach_route_consumers(
                 });
             }
         }
-        for (route, occurrences) in route_fetch_counts(&text, &route_names) {
-            let keys = extract_accessed_keys_near_route(&text, route);
+        for (route, consumer) in route_fetch_consumers(&text, &route_names, &file_nodes) {
             for candidate in routes.values_mut().filter(|r| &r.route == route) {
                 if candidate.file_path == file_path {
                     continue;
                 }
-                candidate.consumers.push(SynthRouteConsumer {
-                    node_id: consumer.aka_id.clone(),
-                    keys: keys.clone(),
-                    fetch_count: occurrences,
-                });
+                candidate.consumers.push(consumer.clone());
             }
         }
     }
@@ -3922,7 +3914,11 @@ fn java_feign_route_consumers(nodes: &[&SynthNode]) -> Vec<(String, String)> {
     out
 }
 
-fn route_fetch_counts<'a>(text: &str, route_names: &'a [String]) -> Vec<(&'a String, u32)> {
+fn route_fetch_consumers<'a>(
+    text: &str,
+    route_names: &'a [String],
+    file_nodes: &[&SynthNode],
+) -> Vec<(&'a String, SynthRouteConsumer)> {
     if route_names.is_empty() {
         return Vec::new();
     }
@@ -3932,17 +3928,30 @@ fn route_fetch_counts<'a>(text: &str, route_names: &'a [String]) -> Vec<(&'a Str
     }
     let mut out = Vec::new();
     for route in route_names {
-        let mut matches = BTreeSet::new();
+        let mut consumers: BTreeMap<String, SynthRouteConsumer> = BTreeMap::new();
         for (window_start, window) in &fetch_windows {
-            matches.extend(
-                route_occurrences(window, route)
-                    .into_iter()
-                    .map(|idx| window_start + idx),
-            );
+            for idx in route_occurrences(window, route) {
+                let absolute_idx = window_start + idx;
+                let Some(node) = node_at_offset(text, file_nodes, absolute_idx)
+                    .or_else(|| pick_handler_node(file_nodes))
+                else {
+                    continue;
+                };
+                let entry =
+                    consumers
+                        .entry(node.aka_id.clone())
+                        .or_insert_with(|| SynthRouteConsumer {
+                            node_id: node.aka_id.clone(),
+                            keys: Vec::new(),
+                            fetch_count: 0,
+                        });
+                entry.fetch_count = entry.fetch_count.saturating_add(1);
+            }
         }
-        let count = matches.len() as u32;
-        if count > 0 {
-            out.push((route, count));
+        let keys = extract_accessed_keys_near_route(text, route);
+        for consumer in consumers.values_mut() {
+            consumer.keys = keys.clone();
+            out.push((route, consumer.clone()));
         }
     }
     out
