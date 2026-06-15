@@ -7,7 +7,7 @@
   如果你的 OpenCode 支持原生 skills（2026-06 起），优先装 skill（按需加载更省 token），不要两者同时启用。
 -->
 
-aka 把仓库解析成「符号节点 + 调用/引用/应用语义边」的图，并建了 BM25 全文索引。MCP server `aka` 提供十五个工具（OpenCode 里显示为 `aka_list_repos`、`aka_query` 等）：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**影响分析**（impact/detect_changes/api_impact/shape_check）、**应用映射**（route_map/graphql_map/tool_map），外加 **管理**（list_repos/analyze）。在已索引仓库里找符号定义、搜实现、评估改动影响面（blast radius）、检查当前 git 改动、查看 API route/GraphQL/tool 映射时优先用它们，比逐文件 grep/read 更省 token、更准。
+aka 把仓库解析成「符号节点 + 调用/引用/应用语义边」的图，并建了 BM25 全文索引。MCP server `aka` 提供十七个工具（OpenCode 里显示为 `aka_list_repos`、`aka_query` 等）：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**影响分析**（impact/detect_changes/api_impact/shape_check）、**应用映射**（route_map/graphql_map/tool_map），外加 **管理**（list_repos/analyze/import_repo/update_repo）。在已索引仓库里找符号定义、搜实现、评估改动影响面（blast radius）、检查当前 git 改动、查看 API route/GraphQL/tool 映射时优先用它们，比逐文件 grep/read 更省 token、更准。
 
 Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_TABLE/WRITES_TABLE/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/HANDLES_JOB/ENQUEUES_JOB/DEPENDS_ON/USES_CONFIG/MIGRATES_TABLE/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等是 GitNexus-like 的索引语义：可用于流程分组、HTTP API/GraphQL operation/工具入口、CLI/management command、后台任务触发、依赖注入、配置/env/settings、schema migration、表读写影响、事务边界、异步任务影响、依赖关系、消费者和响应字段检查，但不是完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义层。索引缺少相应节点/边/字段时，相关工具会返回空结果或提示缺数据。
 
@@ -16,7 +16,9 @@ Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_T
 调用任何检索工具前先 `list_repos`。HTTP MCP 会连接 AKA 桌面端本地服务；每次 MCP 工具调用都会尝试通过 roots 读取当前客户端 workspace 并自动排队索引，stdio fallback 会在工具调用时自动发现当前工作区。确认目标仓库已索引且 `status: "ready"` 后再做检索：
 
 - `status: "indexing"` → 稍后重试；`"failed"` → 看 `detail` 字段，必要时用 `analyze` 重建。
-- 目标仓库不在列表里 → 用 `analyze` 确保索引；`repo_path` 可传当前项目根目录、相对路径或仓库内任意子目录，aka 会提升到 git/project root。aka 会把本地仓库注册到同一份 GUI 可见知识库并后台索引，已注册仓库则排队更新。返回里的 `repo` 是后续工具要传的仓库名，`status:"indexing"` 时稍后先重试 `list_repos`。
+- 本地目标仓库不在列表里 → 用 `analyze` 确保索引；`repo_path` 可传当前项目根目录、相对路径或仓库内任意子目录，aka 会提升到 git/project root。aka 会把本地仓库注册到同一份 GUI 可见知识库并后台索引，已注册仓库则排队更新。
+- 远程 GitHub/Git 仓库不在本机 → 用 `import_repo`，传 `kind:"git"` 和 clone URL，可选 `name`；aka 会 clone 到受管 checkout 并后台索引。已索引仓库需要刷新时用 `update_repo`。
+- `analyze`/`import_repo`/`update_repo` 返回里的 `repo` 是后续工具要传的仓库名，`status:"indexing"` 时稍后先重试 `list_repos`。
 - 多仓库时，后续所有工具都带 `repo` 参数（用 list_repos 返回的 `name`）锁定范围，避免跨库噪音。
 
 ## 选哪个工具：决策表

@@ -519,6 +519,15 @@ impl Backend for FixtureBackend {
         ))
     }
 
+    fn import_repo(&self, kind: &str, src: &str, name: Option<&str>) -> anyhow::Result<String> {
+        let _ = (kind, src);
+        Ok(name.unwrap_or("fixture-import").to_string())
+    }
+
+    fn update_repo(&self, name: &str) -> anyhow::Result<String> {
+        Ok(format!("update scheduled: {name} (re-analyze)"))
+    }
+
     fn detect_changes(
         &self,
         repo: Option<&str>,

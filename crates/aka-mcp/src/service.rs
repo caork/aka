@@ -239,6 +239,28 @@ pub struct AnalyzeParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ImportRepoParams {
+    /// Repository source kind: git for a clone URL, or local for a local directory.
+    #[serde(default = "default_import_kind")]
+    pub kind: String,
+    /// Git clone URL or local directory path.
+    pub src: String,
+    /// Optional repository name. Omit to derive it from the URL/path.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+fn default_import_kind() -> String {
+    "git".into()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateRepoParams {
+    /// Repository name returned by list_repos/import_repo/analyze.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct DetectChangesParams {
     /// Repository name. Omit only when exactly one indexed repository exists.
     #[serde(default)]
@@ -491,6 +513,27 @@ impl AkaMcpServer {
     }
 
     #[tool(
+        description = "Import and index a repository through MCP. Use kind='git' with a GitHub/Git clone URL when the agent needs to analyze a repo that is not already local; use kind='local' with a directory path for explicit local imports. Returns the repo name and schedules background indexing."
+    )]
+    pub async fn import_repo(
+        &self,
+        Parameters(p): Parameters<ImportRepoParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(move |b| ops::import_repo(b, &p.kind, &p.src, p.name.as_deref()))
+            .await
+    }
+
+    #[tool(
+        description = "Update an indexed repository by name. Git repos are fast-forward pulled and re-indexed; local repos are re-indexed. Check list_repos for indexing progress after calling this."
+    )]
+    pub async fn update_repo(
+        &self,
+        Parameters(p): Parameters<UpdateRepoParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(move |b| ops::update_repo(b, &p.repo)).await
+    }
+
+    #[tool(
         description = "Analyze git changes in an indexed repository. Maps changed diff hunks to indexed symbols and reports affected execution flows. Use before committing or refactoring to check whether the touched symbols/processes match expectations."
     )]
     pub async fn detect_changes(
@@ -573,7 +616,7 @@ impl AkaMcpServer {
 
 #[tool_handler(
     name = "aka-mcp",
-    instructions = "Code knowledge graph for repositories. Start with list_repos to see status; every tool call tries to auto-queue MCP workspace roots when clients expose them, and stdio fallback also auto-detects its process workspace. Use analyze with the workspace path, relative path, or nested directory if the target repo is not listed. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
+    instructions = "Code knowledge graph for repositories. Start with list_repos to see status; every tool call tries to auto-queue MCP workspace roots when clients expose them, and stdio fallback also auto-detects its process workspace. Use analyze with the workspace path, relative path, or nested directory if a local target repo is not listed; use import_repo with kind='git' for a GitHub/Git URL. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
 )]
 impl ServerHandler for AkaMcpServer {
     async fn call_tool(

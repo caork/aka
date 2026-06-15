@@ -15,7 +15,7 @@ mod support;
 
 use support::fixture_backend::FixtureBackend;
 
-const EXPECTED_TOOLS: [&str; 15] = [
+const EXPECTED_TOOLS: [&str; 17] = [
     "list_repos",
     "query",
     "search_code",
@@ -30,6 +30,8 @@ const EXPECTED_TOOLS: [&str; 15] = [
     "shape_check",
     "api_impact",
     "analyze",
+    "import_repo",
+    "update_repo",
     "augment",
 ];
 
@@ -48,7 +50,7 @@ async fn initialize_list_and_call_query() -> anyhow::Result<()> {
     let info = client.peer_info().expect("server info after initialize");
     assert_eq!(info.server_info.name, "aka-mcp");
 
-    // tools/list：九个工具齐全，query 的 schema 带必填参数。
+    // tools/list：工具齐全，query 的 schema 带必填参数。
     let tools = client.list_all_tools().await?;
     let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     for expected in EXPECTED_TOOLS {

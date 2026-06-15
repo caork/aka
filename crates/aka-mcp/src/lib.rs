@@ -1,7 +1,8 @@
 //! aka-mcp — rmcp MCP 服务（stdio），工具：
 //! `list_repos` / `query` / `search_code` / `context` / `find_definition`
 //! / `search_references` / `impact` / `route_map` / `tool_map`
-//! / `graphql_map` / `analyze` / `augment`。
+//! / `graphql_map` / `shape_check` / `api_impact` / `analyze`
+//! / `import_repo` / `update_repo` / `augment`。
 //!
 //! 数据层经 [`backend::Backend`] trait 解耦：真实实现由 CLI / 桌面端注入。
 

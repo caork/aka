@@ -1,12 +1,12 @@
-//! 九个工具 handler 的输出 JSON 形状测试（直接调用，不走 transport）。
+//! MCP tool handler 输出 JSON 形状测试（直接调用，不走 transport）。
 
 use std::sync::Arc;
 
 use aka_mcp::backend::{Backend, RepoInfo, SearchHit, SymbolRef};
 use aka_mcp::service::{
     AkaMcpServer, AnalyzeParams, ApiImpactParams, AugmentParams, CodeSearchParams,
-    DetectChangesParams, GraphqlMapParams, ImpactParams, QueryParams, ReferencesParams,
-    RouteMapParams, SymbolParams, ToolMapParams,
+    DetectChangesParams, GraphqlMapParams, ImpactParams, ImportRepoParams, QueryParams,
+    ReferencesParams, RouteMapParams, SymbolParams, ToolMapParams, UpdateRepoParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -466,6 +466,41 @@ async fn analyze_shape() {
     assert_eq!(v["repo"], "fixture");
     assert_eq!(v["status"], "indexing");
     assert!(v["summary"].as_str().unwrap().contains("/tmp/fixture"));
+}
+
+#[tokio::test]
+async fn import_repo_shape() {
+    let res = server()
+        .import_repo(Parameters(ImportRepoParams {
+            kind: "git".into(),
+            src: "https://github.com/example/service.git".into(),
+            name: Some("service".into()),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(keys(&v), ["repo", "status", "summary"]);
+    assert_eq!(v["repo"], "service");
+    assert_eq!(v["status"], "indexing");
+    assert_eq!(
+        v["summary"],
+        "indexing scheduled: service (git import + analyze)"
+    );
+}
+
+#[tokio::test]
+async fn update_repo_shape() {
+    let res = server()
+        .update_repo(Parameters(UpdateRepoParams {
+            repo: "fixture".into(),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(keys(&v), ["repo", "status", "summary"]);
+    assert_eq!(v["repo"], "fixture");
+    assert_eq!(v["status"], "indexing");
+    assert_eq!(v["summary"], "update scheduled: fixture (re-analyze)");
 }
 
 #[tokio::test]

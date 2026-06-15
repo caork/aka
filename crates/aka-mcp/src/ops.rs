@@ -1457,6 +1457,29 @@ pub fn analyze(b: &dyn Backend, repo_path: &str) -> anyhow::Result<AnalyzeOut> {
     })
 }
 
+pub fn import_repo(
+    b: &dyn Backend,
+    kind: &str,
+    src: &str,
+    name: Option<&str>,
+) -> anyhow::Result<AnalyzeOut> {
+    let repo = b.import_repo(kind, src, name)?;
+    Ok(AnalyzeOut {
+        repo: Some(repo.clone()),
+        status: "indexing".into(),
+        summary: format!("indexing scheduled: {repo} ({kind} import + analyze)"),
+    })
+}
+
+pub fn update_repo(b: &dyn Backend, name: &str) -> anyhow::Result<AnalyzeOut> {
+    let summary = b.update_repo(name)?;
+    Ok(AnalyzeOut {
+        repo: analyze_repo_name(&summary).or_else(|| Some(name.to_string())),
+        status: analyze_status(&summary).to_string(),
+        summary,
+    })
+}
+
 fn analyze_repo_name(summary: &str) -> Option<String> {
     summary
         .strip_prefix("indexing scheduled: ")
