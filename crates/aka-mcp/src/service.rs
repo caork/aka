@@ -85,15 +85,27 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     if rest.is_empty() {
         return None;
     }
+    let path = local_file_uri_path(rest)?;
     #[cfg(windows)]
     {
-        let raw = rest.strip_prefix('/').unwrap_or(rest);
+        let raw = path.strip_prefix('/').unwrap_or(&path);
         Some(PathBuf::from(percent_decode(raw).replace('/', "\\")))
     }
     #[cfg(not(windows))]
     {
-        Some(PathBuf::from(percent_decode(rest)))
+        Some(PathBuf::from(percent_decode(&path)))
     }
+}
+
+fn local_file_uri_path(rest: &str) -> Option<String> {
+    if rest.starts_with('/') {
+        return Some(rest.to_string());
+    }
+    let (host, path) = rest.split_once('/')?;
+    if !matches!(host, "" | "localhost" | "127.0.0.1" | "[::1]" | "::1") {
+        return None;
+    }
+    Some(format!("/{path}"))
 }
 
 fn percent_decode(input: &str) -> String {
@@ -571,5 +583,34 @@ impl ServerHandler for AkaMcpServer {
         Self::tool_router()
             .call(ToolCallContext::new(self, request, context))
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_uri_to_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn file_uri_to_path_accepts_local_file_roots() {
+        assert_eq!(
+            file_uri_to_path("file:///tmp/my%20repo"),
+            Some(PathBuf::from("/tmp/my repo"))
+        );
+        assert_eq!(
+            file_uri_to_path("file://localhost/tmp/my%20repo"),
+            Some(PathBuf::from("/tmp/my repo"))
+        );
+        assert_eq!(
+            file_uri_to_path("file://127.0.0.1/tmp/repo"),
+            Some(PathBuf::from("/tmp/repo"))
+        );
+    }
+
+    #[test]
+    fn file_uri_to_path_rejects_remote_or_empty_roots() {
+        assert_eq!(file_uri_to_path("file://example.com/tmp/repo"), None);
+        assert_eq!(file_uri_to_path("file://"), None);
+        assert_eq!(file_uri_to_path("https://example.com/repo"), None);
     }
 }
