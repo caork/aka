@@ -4,8 +4,8 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use super::{
-    find_call_args, node_at_offset, project_code_nodes_by_file, read_repo_text, stable_hash,
-    EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
+    find_call_args, find_matching_paren, node_at_offset, project_code_nodes_by_file,
+    read_repo_text, skip_ws, stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -162,6 +162,13 @@ fn extract_resource_detections(
         "python-httpx-client",
         text.contains("httpx") || text.contains("AsyncClient") || text.contains("Client("),
     ));
+    out.extend(extract_contextual_http_client_calls(
+        text,
+        nodes,
+        "java-spring-restclient",
+        text.contains("RestClient"),
+    ));
+    out.extend(extract_spring_restclient_uri_calls(text, nodes));
     out.extend(extract_absolute_url_literals(text, nodes));
     out.sort_by(|a, b| {
         a.url
@@ -171,6 +178,104 @@ fn extract_resource_detections(
     });
     out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id && a.strategy == b.strategy);
     out
+}
+
+fn extract_spring_restclient_uri_calls(text: &str, nodes: &[&SynthNode]) -> Vec<ResourceDetection> {
+    if !text.contains("RestClient") {
+        return Vec::new();
+    }
+    let base_urls = restclient_base_urls(text);
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(rel) = text[offset..].find(".uri") {
+        let start = offset + rel;
+        let open = skip_ws(text, start + ".uri".len());
+        if text.as_bytes().get(open) != Some(&b'(') || !looks_like_restclient_chain(text, start) {
+            offset = start + ".uri".len();
+            continue;
+        }
+        let Some(close) = find_matching_paren(text, open) else {
+            offset = open + 1;
+            continue;
+        };
+        let Some(node) = node_at_offset(text, nodes, start) else {
+            offset = close + 1;
+            continue;
+        };
+        let args = &text[open + 1..close];
+        let mut urls = url_literals(args);
+        urls.extend(restclient_relative_urls(args, &base_urls));
+        urls.sort();
+        urls.dedup();
+        for url in urls {
+            out.push(ResourceDetection {
+                url,
+                node_id: node.aka_id.clone(),
+                strategy: "java-spring-restclient".into(),
+            });
+        }
+        offset = close + 1;
+    }
+    out
+}
+
+fn restclient_base_urls(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for callee in ["RestClient.create", ".baseUrl"] {
+        for call in find_call_args(text, callee) {
+            out.extend(url_literals(call.args));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.truncate(4);
+    out
+}
+
+fn restclient_relative_urls(args: &str, base_urls: &[String]) -> Vec<String> {
+    let Some(path) = first_relative_path_literal(args) else {
+        return Vec::new();
+    };
+    base_urls
+        .iter()
+        .map(|base| join_url_paths(base, &path))
+        .collect()
+}
+
+fn first_relative_path_literal(args: &str) -> Option<String> {
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let Some((literal, end)) = read_string_literal(args, idx) else {
+            idx += args[idx..].chars().next().map(char::len_utf8).unwrap_or(1);
+            continue;
+        };
+        if literal.starts_with('/') && !literal.starts_with("//") {
+            return Some(mask_dynamic_url(&literal));
+        }
+        idx = end;
+    }
+    None
+}
+
+fn join_url_paths(base: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+fn looks_like_restclient_chain(text: &str, uri_start: usize) -> bool {
+    let start = text[..uri_start].rfind(';').map_or(0, |pos| pos + 1);
+    let chain = &text[start..uri_start];
+    chain.contains("RestClient")
+        || chain.contains("restClient")
+        || chain.contains(".get()")
+        || chain.contains(".post()")
+        || chain.contains(".put()")
+        || chain.contains(".patch()")
+        || chain.contains(".delete()")
+        || chain.contains(".method(")
 }
 
 fn extract_contextual_http_client_calls(
