@@ -28,6 +28,14 @@ fn node(id: &str, label: &str, name: &str, file: &str) -> NodeRec {
     }
 }
 
+fn node_with_props(id: &str, label: &str, props: serde_json::Value) -> NodeRec {
+    NodeRec {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        properties: props.as_object().unwrap().clone(),
+    }
+}
+
 fn sample_chunks() -> Vec<ChunkRec> {
     vec![
         chunk(
@@ -258,6 +266,70 @@ fn chunk_label_carries_node_label_with_kind_fallback() {
         "孤儿 chunk 的 label 回落 chunk kind"
     );
     assert_eq!(hit.kind.as_deref(), Some("ast-declaration"));
+}
+
+#[test]
+fn process_node_text_recalls_flow_terms() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+    writer
+        .add_nodes(
+            vec![node_with_props(
+                "process:auth-invalid-token",
+                "Process",
+                serde_json::json!({
+                    "name": "Get_cart → Invalid_token",
+                    "summary": "JWT authentication rejects invalid token",
+                    "processType": "cross_community",
+                    "trace": ["get_cart", "verify_jwt", "invalid_token"],
+                    "startLine": 0,
+                    "endLine": 0
+                }),
+            )]
+            .into_iter(),
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    drop(writer);
+
+    let index = SearchIndex::open(dir.path()).unwrap();
+    let hits = index.search("jwt invalid token", 5).unwrap();
+    assert_eq!(hits[0].node_id, "process:auth-invalid-token");
+    assert_eq!(hits[0].label, "Process");
+    assert!(hits[0].snippet.is_some());
+}
+
+#[test]
+fn auth_query_expands_to_token_security_terms() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+    writer
+        .add_nodes(
+            vec![node(
+                "fn:verify_token",
+                "Function",
+                "verify_token",
+                "app/core/security.py",
+            )]
+            .into_iter(),
+        )
+        .unwrap();
+    writer
+        .add_chunks(
+            vec![chunk(
+                "fn:verify_token",
+                "app/core/security.py",
+                "def verify_token(token): return decode_access_token(token)",
+            )]
+            .into_iter(),
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    drop(writer);
+
+    let index = SearchIndex::open(dir.path()).unwrap();
+    let hits = index.search("jwt authentication", 5).unwrap();
+    assert_eq!(hits[0].node_id, "fn:verify_token");
 }
 
 #[test]

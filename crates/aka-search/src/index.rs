@@ -236,6 +236,15 @@ impl SearchIndexWriter {
                 if let Some(path_class) = self.fields.path_class {
                     doc.add_text(path_class, path_class_value(fp));
                 }
+            } else if let Some(path_class) = self.fields.path_class {
+                doc.add_text(path_class, PATH_CLASS_CLEAN);
+            }
+            let search_text = node_search_text(&node);
+            if !search_text.is_empty() {
+                doc.add_text(
+                    self.fields.text,
+                    truncate_utf8(&search_text, TEXT_STORE_LIMIT),
+                );
             }
             doc.add_text(self.fields.label, &node.label);
             /* 行号统一存 1-based（工件是 tree-sitter 0-based row） */
@@ -489,7 +498,27 @@ fn query_terms(query: &str) -> Vec<String> {
             seen.push(text.clone());
         }
     }
+    expand_query_terms(&mut seen);
     seen
+}
+
+fn expand_query_terms(terms: &mut Vec<String>) {
+    let original = terms.clone();
+    for term in original {
+        let expansions: &[&str] = match term.as_str() {
+            "jwt" => &["token", "claims"],
+            "authentication" | "auth" | "authenticate" => {
+                &["token", "security", "credential", "login"]
+            }
+            "authorization" | "authorize" => &["permission", "role", "scope"],
+            _ => &[],
+        };
+        for expansion in expansions {
+            if !terms.iter().any(|t| t == expansion) {
+                terms.push((*expansion).to_string());
+            }
+        }
+    }
 }
 
 fn build_query(
@@ -663,6 +692,59 @@ fn is_container_label(label: &str) -> bool {
         label,
         "File" | "Folder" | "Project" | "Package" | "Module" | "Community" | "Process"
     )
+}
+
+fn node_search_text(node: &NodeRec) -> String {
+    if !matches!(
+        node.label.as_str(),
+        "Process" | "Route" | "Tool" | "Community" | "Resource"
+    ) {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    push_prop_str(&mut parts, &node.properties, "name");
+    push_prop_str(&mut parts, &node.properties, "summary");
+    push_prop_str(&mut parts, &node.properties, "description");
+    push_prop_str(&mut parts, &node.properties, "processType");
+    push_prop_str(&mut parts, &node.properties, "route");
+    push_prop_str(&mut parts, &node.properties, "tool");
+    push_prop_array(&mut parts, &node.properties, "trace");
+    push_prop_array(&mut parts, &node.properties, "steps");
+    push_prop_array(&mut parts, &node.properties, "responseKeys");
+    push_prop_array(&mut parts, &node.properties, "errorKeys");
+    push_prop_array(&mut parts, &node.properties, "middleware");
+    parts.join(" ")
+}
+
+fn push_prop_str(
+    parts: &mut Vec<String>,
+    props: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) {
+    if let Some(value) = props.get(key).and_then(|v| v.as_str()) {
+        parts.push(value.to_owned());
+    }
+}
+
+fn push_prop_array(
+    parts: &mut Vec<String>,
+    props: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) {
+    let Some(values) = props.get(key).and_then(|v| v.as_array()) else {
+        return;
+    };
+    for value in values {
+        if let Some(s) = value.as_str() {
+            parts.push(s.to_owned());
+        } else if let Some(obj) = value.as_object() {
+            for key in ["name", "summary", "label", "kind"] {
+                if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+                    parts.push(s.to_owned());
+                }
+            }
+        }
+    }
 }
 
 fn path_class_value(path: &str) -> &'static str {

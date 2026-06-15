@@ -1,6 +1,7 @@
 //! Shared aka runtime used by the CLI binary and the Tauri desktop shell.
 
 pub mod backend;
+pub mod commands;
 pub mod indexer;
 
 use std::path::{Path, PathBuf};
