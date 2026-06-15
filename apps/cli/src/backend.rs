@@ -480,7 +480,12 @@ fn run_auto_analyze_job(
 }
 
 fn job_matches_key(name: &str, job: &JobInfo, key: &str) -> bool {
-    name == key || job.path.to_string_lossy() == key
+    if name == key || job.path.to_string_lossy() == key {
+        return true;
+    }
+    PathBuf::from(key)
+        .canonicalize()
+        .is_ok_and(|path| path == job.path)
 }
 
 fn run_auto_indexer(
@@ -1654,6 +1659,28 @@ impl AkaBackend {
         Ok(Some(name))
     }
 
+    fn resolve_explicit_repo_key(&self, key: &str, registry: &Registry) -> Result<Vec<RepoEntry>> {
+        if let Some(entry) = registry
+            .repos
+            .iter()
+            .find(|r| r.name == key || r.repo_path.to_string_lossy() == key)
+            .cloned()
+        {
+            return Ok(vec![entry]);
+        }
+        let requested = PathBuf::from(key);
+        let Some(repo) = discover_workspace_root(&requested)? else {
+            bail!("未注册的仓库: {key}（aka repos 查看）");
+        };
+        if let Some(entry) = registry.find(&repo).cloned() {
+            return Ok(vec![entry]);
+        }
+        if let Some(name) = self.auto_index_workspace(repo)? {
+            bail!("仓库正在自动索引中，请稍后重试: {name}");
+        }
+        bail!("仓库仍在索引中，请稍后完成后重试: {key}")
+    }
+
     /// 名字可用性守卫：已注册或有进行中任务 → 拒绝。
     fn guard_name_free(&self, name: &str) -> Result<()> {
         if Registry::load()?.find_by_name(name).is_some() {
@@ -1733,15 +1760,7 @@ impl AkaBackend {
                         _ => {}
                     }
                 }
-                let found = registry
-                    .repos
-                    .iter()
-                    .find(|r| r.name == key || r.repo_path.to_string_lossy() == key)
-                    .cloned();
-                match found {
-                    Some(e) => vec![e],
-                    None => bail!("未注册的仓库: {key}（aka repos 查看）"),
-                }
+                self.resolve_explicit_repo_key(key, &registry)?
             }
             None => registry.repos.clone(),
         };
@@ -3221,6 +3240,42 @@ mod tests {
             .unwrap();
 
         assert!(summary.starts_with("indexing scheduled: "));
+        let repos = backend.list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, derive_local_name(&repo));
+        assert_eq!(
+            repos[0].path,
+            repo.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(repos[0].status, "indexing");
+    }
+
+    #[test]
+    fn explicit_repo_path_queries_auto_queue_workspace_root() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let repo = temp_repo("workspace-query-path");
+        let home = temp_repo("workspace-query-path-home");
+        std::fs::create_dir_all(repo.join("src/app/api")).unwrap();
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
+        std::fs::write(
+            repo.join("src/app/api/views.py"),
+            "def list_orders(): pass\n",
+        )
+        .unwrap();
+        std::env::set_var("AKA_HOME", &home);
+
+        let backend = AkaBackend::new();
+        let nested = repo.join("src/app/api");
+        let err = backend
+            .search(Some(nested.to_str().unwrap()), "orders", 5)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("自动索引中") || err.contains("仍在索引中"),
+            "{err}"
+        );
         let repos = backend.list_repos().unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name, derive_local_name(&repo));
