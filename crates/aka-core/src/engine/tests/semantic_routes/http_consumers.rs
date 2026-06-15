@@ -141,7 +141,7 @@ fn synthesizes_python_routes_from_decorators_without_route_metadata() {
 
 router = APIRouter(prefix="/api/orders")
 
-@router.api_route("/{id}", methods=["GET"])
+@router.api_route("/{id}", methods=["GET", "HEAD"])
 def get_order(id: str):
     return {"id": id}
 
@@ -161,7 +161,7 @@ def reserve_order(id: str):
         "api.orders.get_order",
         "api/orders.py",
         json!({
-            "decorators": ["@router.api_route(\"/{id}\", methods=[\"GET\"])"],
+            "decorators": ["@router.api_route(\"/{id}\", methods=[\"GET\", \"HEAD\"])"],
             "language": "python",
         }),
     );
@@ -187,6 +187,24 @@ def reserve_order(id: str):
     assert_eq!(get.method.as_deref(), Some("GET"));
     assert_eq!(
         get.handler_id.as_deref(),
+        Some("cbm:1:api.orders.get_order")
+    );
+    let head = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}" && route.method.as_deref() == Some("HEAD"))
+        .unwrap_or_else(|| {
+            panic!(
+                "FastAPI api_route HEAD method from decorator source facts; got {:?}",
+                synth
+                    .routes
+                    .iter()
+                    .map(|route| (route.route.as_str(), route.method.as_deref()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        head.handler_id.as_deref(),
         Some("cbm:1:api.orders.get_order")
     );
     let post = synth

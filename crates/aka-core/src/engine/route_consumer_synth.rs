@@ -13,13 +13,15 @@ use super::{
 pub(super) fn attach_route_consumers(
     repo: &Path,
     nodes: &BTreeMap<String, SynthNode>,
-    routes: &mut BTreeMap<(String, String), SynthRoute>,
+    routes: &mut BTreeMap<(String, String, Option<String>), SynthRoute>,
 ) {
     if routes.is_empty() {
         return;
     }
     let by_file = route_nodes_by_file(nodes);
-    let route_names: Vec<String> = routes.keys().map(|(route, _)| route.clone()).collect();
+    let mut route_names: Vec<String> = routes.values().map(|route| route.route.clone()).collect();
+    route_names.sort();
+    route_names.dedup();
     for (file_path, file_nodes) in by_file {
         let Some(text) = read_repo_text(repo, &file_path) else {
             continue;
@@ -62,8 +64,12 @@ pub(super) fn attach_route_consumers(
     remove_parent_route_consumers(routes);
 }
 
-fn remove_parent_route_consumers(routes: &mut BTreeMap<(String, String), SynthRoute>) {
-    let route_names: Vec<String> = routes.values().map(|route| route.route.clone()).collect();
+fn remove_parent_route_consumers(
+    routes: &mut BTreeMap<(String, String, Option<String>), SynthRoute>,
+) {
+    let mut route_names: Vec<String> = routes.values().map(|route| route.route.clone()).collect();
+    route_names.sort();
+    route_names.dedup();
     let mut removals: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for route in routes.values() {
         let parent_routes = parent_routes_for(&route.route, &route_names);
