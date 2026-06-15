@@ -58,7 +58,7 @@ use property_synth::extract_python_class_properties;
 use property_synth::{synthesize_python_properties, SynthProperty};
 use resource_synth::{synthesize_resources_from_sources, SynthResource};
 use route_consumer_synth::attach_route_consumers;
-use route_django_synth::{django_urlconf_routes, django_urlconf_routes_from_repo};
+use route_django_synth::django_urlconf_routes_from_repo;
 use route_shape::{
     extract_error_keys, extract_middleware, extract_response_keys, literal_occurrences,
 };
@@ -2507,7 +2507,6 @@ fn synthesize_routes_from_sources(
             python_prefixes.get(file_path),
             &java_interface_routes,
         ));
-        route_candidates.extend(django_urlconf_routes(file_path, &text, &by_file));
         dedup_route_candidates(&mut route_candidates);
         if route_candidates.is_empty() {
             continue;

@@ -14,35 +14,47 @@ pub(super) fn django_urlconf_routes_from_repo(
     let handlers = PythonHandlerIndex::new(by_file);
     let mut out: BTreeMap<String, Vec<RouteCandidate>> = BTreeMap::new();
     let file_paths = django_urlconf_files(repo, project_sources);
+    let module_to_file: HashMap<String, String> = file_paths
+        .iter()
+        .map(|file_path| (python_file_module_name(file_path), file_path.clone()))
+        .collect();
+    let mut include_prefixes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for file_path in &file_paths {
+        let Some(text) = read_repo_text(repo, file_path) else {
+            continue;
+        };
+        for include in django_urlconf_includes(&text) {
+            if let Some(target_file) = module_to_file.get(&include.module) {
+                include_prefixes
+                    .entry(target_file.clone())
+                    .or_default()
+                    .push(include.prefix);
+            }
+        }
+    }
+
     for file_path in file_paths {
         let Some(text) = read_repo_text(repo, &file_path) else {
             continue;
         };
+        let prefixes = include_prefixes.get(&file_path).cloned().unwrap_or_default();
         let mut candidates = django_urlconf_routes_with_handlers(&text, &handlers);
+        if !prefixes.is_empty() {
+            candidates = candidates
+                .into_iter()
+                .flat_map(|candidate| {
+                    prefixes
+                        .iter()
+                        .map(move |prefix| prefix_route_candidate(prefix, &candidate))
+                })
+                .collect();
+        }
         if candidates.is_empty() {
             continue;
         }
         dedup_candidates(&mut candidates);
         out.insert(file_path.to_string(), candidates);
     }
-    out
-}
-
-pub(super) fn django_urlconf_routes(
-    file_path: &str,
-    text: &str,
-    by_file: &BTreeMap<String, Vec<&SynthNode>>,
-) -> Vec<RouteCandidate> {
-    if !file_path.to_ascii_lowercase().ends_with(".py")
-        || !is_django_urlconf_text(text)
-        || !(text.contains("path(") || text.contains("re_path("))
-    {
-        return Vec::new();
-    }
-
-    let handlers = PythonHandlerIndex::new(by_file);
-    let mut out = django_urlconf_routes_with_handlers(text, &handlers);
-    dedup_candidates(&mut out);
     out
 }
 
@@ -65,6 +77,87 @@ fn django_urlconf_routes_with_handlers(
         }
     }
     out
+}
+
+#[derive(Debug)]
+struct DjangoUrlInclude {
+    prefix: String,
+    module: String,
+}
+
+fn django_urlconf_includes(text: &str) -> Vec<DjangoUrlInclude> {
+    let mut out = Vec::new();
+    for call in find_call_args(text, "path") {
+        if let Some(include) = django_url_include(call.args, false) {
+            out.push(include);
+        }
+    }
+    for call in find_call_args(text, "re_path") {
+        if let Some(include) = django_url_include(call.args, true) {
+            out.push(include);
+        }
+    }
+    out
+}
+
+fn django_url_include(args: &str, regex: bool) -> Option<DjangoUrlInclude> {
+    let parts = split_top_level_commas(args);
+    let route_literal = string_arg(parts.first()?.trim())?;
+    let prefix = if regex {
+        normalize_django_regex_route(&route_literal)
+    } else {
+        normalize_django_path_route(&route_literal)
+    };
+    let include_expr = parts.get(1)?.trim();
+    if !include_expr.starts_with("include") {
+        return None;
+    }
+    let include_args = call_inner_args(include_expr, "include")?;
+    let module = django_include_module(include_args)?;
+    Some(DjangoUrlInclude { prefix, module })
+}
+
+fn call_inner_args<'a>(expr: &'a str, name: &str) -> Option<&'a str> {
+    let expr = expr.trim();
+    let rest = expr.strip_prefix(name)?;
+    let open = rest.find('(')? + name.len();
+    let close = expr.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    Some(&expr[open + 1..close])
+}
+
+fn django_include_module(args: &str) -> Option<String> {
+    let first = split_top_level_commas(args).into_iter().next()?.trim();
+    if let Some(module) = string_arg(first) {
+        return Some(module);
+    }
+    if first.starts_with('(') {
+        return string_arg(first);
+    }
+    None
+}
+
+fn prefix_route_candidate(prefix: &str, candidate: &RouteCandidate) -> RouteCandidate {
+    RouteCandidate {
+        route: join_django_routes(prefix, &candidate.route),
+        method: candidate.method.clone(),
+        handler_id: candidate.handler_id.clone(),
+        handler_name: candidate.handler_name.clone(),
+    }
+}
+
+fn join_django_routes(prefix: &str, route: &str) -> String {
+    let prefix = prefix.trim_end_matches('/');
+    let route = route.trim_start_matches('/');
+    if prefix.is_empty() || prefix == "/" {
+        format!("/{route}").trim_end_matches('/').to_string()
+    } else if route.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}/{route}")
+    }
 }
 
 fn is_django_urlconf_path(path: &str) -> bool {
@@ -399,9 +492,7 @@ impl<'a> PythonHandlerIndex<'a> {
 }
 
 fn python_module_keys(file_path: &str) -> BTreeSet<String> {
-    let normalized = file_path.replace('\\', "/");
-    let no_ext = normalized.strip_suffix(".py").unwrap_or(&normalized);
-    let dotted = no_ext.replace('/', ".");
+    let dotted = python_file_module_name(file_path);
     let mut keys = BTreeSet::new();
     keys.insert(dotted.clone());
     if let Some((_, short)) = dotted.rsplit_once('.') {
@@ -416,6 +507,12 @@ fn python_module_keys(file_path: &str) -> BTreeSet<String> {
         }
     }
     keys
+}
+
+fn python_file_module_name(file_path: &str) -> String {
+    let normalized = file_path.replace('\\', "/");
+    let no_ext = normalized.strip_suffix(".py").unwrap_or(&normalized);
+    no_ext.replace('/', ".")
 }
 
 fn node_handler_keys(node: &SynthNode) -> Vec<String> {
