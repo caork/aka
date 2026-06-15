@@ -41,6 +41,16 @@ impl ProjectSourceSet {
         self.files.iter().map(String::as_str)
     }
 
+    pub(super) fn project_files<'a>(
+        &'a self,
+        repo: &'a Path,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.files
+            .iter()
+            .map(String::as_str)
+            .filter(move |path| self.contains_project_file(repo, path))
+    }
+
     pub(super) fn has_git_listing(&self) -> bool {
         self.has_git_listing
     }

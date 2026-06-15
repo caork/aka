@@ -2166,6 +2166,7 @@ class User(Base):
 #[test]
 fn warns_when_engine_misses_repo_source_language() {
     let repo = temp_repo("missing-java-warning");
+    run_git(&repo, &["init"]);
     std::fs::create_dir_all(repo.join("src/main/java/com/example")).unwrap();
     std::fs::write(
         repo.join("src/main/java/com/example/App.java"),
@@ -2173,6 +2174,10 @@ fn warns_when_engine_misses_repo_source_language() {
     )
     .unwrap();
     std::fs::write(repo.join("application.yml"), "server: {}\n").unwrap();
+    run_git(
+        &repo,
+        &["add", "src/main/java/com/example/App.java", "application.yml"],
+    );
     let conn = test_conn();
     insert_file_hash(&conn, "application.yml");
 
@@ -2186,6 +2191,41 @@ fn warns_when_engine_misses_repo_source_language() {
 
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("0 Java source files"));
+}
+
+#[test]
+fn source_language_warning_ignores_build_configured_test_sources() {
+    let repo = temp_repo("missing-java-warning-test-source");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/test/java/com/example")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    std::fs::write(
+        repo.join("src/test/java/com/example/AppTest.java"),
+        "class AppTest {}\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("application.yml"), "server: {}\n").unwrap();
+    run_git(
+        &repo,
+        &[
+            "add",
+            "pom.xml",
+            "src/test/java/com/example/AppTest.java",
+            "application.yml",
+        ],
+    );
+    let conn = test_conn();
+    insert_file_hash(&conn, "application.yml");
+
+    let mut warnings = Vec::new();
+    warn_missing_source_extensions(&repo, &conn, "demo", &mut |ev| {
+        if let EngineEvent::Warning { message } = ev {
+            warnings.push(message.clone());
+        }
+    })
+    .unwrap();
+
+    assert!(warnings.is_empty());
 }
 
 #[test]
@@ -2938,6 +2978,7 @@ class OrderHandler {}
 #[test]
 fn ignores_test_source_command_entrypoints() {
     let repo = temp_repo("test-source-commands");
+    run_git(&repo, &["init"]);
     std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
     std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
     let file = "src/test/java/com/example/ops/TestCommand.java";
@@ -2955,6 +2996,7 @@ class TestCommand implements CommandLineRunner {
 "#,
     )
     .unwrap();
+    run_git(&repo, &["add", "pom.xml", file]);
 
     let conn = test_conn();
     insert_node_props_at(
@@ -2977,6 +3019,7 @@ fn command_synthesis_uses_project_sources_not_runner_names() {
     run_git(&repo, &["init"]);
     std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
     std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
     let tracked_file = "src/main/java/com/example/ops/StartupMaintenance.java";
     let untracked_file = "src/main/java/com/example/ops/UntrackedMaintenance.java";
     let test_file = "src/test/java/com/example/ops/TestMaintenance.java";
@@ -3024,7 +3067,7 @@ class TestMaintenance implements ApplicationRunner {
 "#,
     )
     .unwrap();
-    run_git(&repo, &["add", tracked_file, test_file]);
+    run_git(&repo, &["add", "pom.xml", tracked_file, test_file]);
 
     let conn = test_conn();
     insert_node_props_at(
@@ -3078,7 +3121,7 @@ class TestMaintenance implements ApplicationRunner {
         .collect();
     assert!(handlers.contains(&"StartupMaintenance"));
     assert!(handlers.contains(&"UntrackedMaintenance"));
-    assert!(handlers.contains(&"TestMaintenance"));
+    assert!(!handlers.contains(&"TestMaintenance"));
 }
 
 #[test]

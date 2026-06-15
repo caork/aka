@@ -639,6 +639,13 @@ fn file_hashes_path_column(conn: &Connection) -> Result<Option<&'static str>, En
 }
 
 fn repo_source_extensions(repo: &Path) -> Result<HashSet<String>, EngineError> {
+    let project_sources = ProjectSourceSet::discover(repo);
+    if project_sources.has_git_listing() {
+        return Ok(project_sources
+            .project_files(repo)
+            .filter_map(source_extension)
+            .collect());
+    }
     let mut exts = HashSet::new();
     collect_repo_source_extensions(repo, repo, &mut exts)?;
     Ok(exts)
