@@ -232,6 +232,7 @@ fn python_class_fields(text: &str) -> BTreeMap<String, Vec<String>> {
         let class_indent = leading_spaces(line);
         let mut fields = Vec::new();
         idx += 1;
+        let body_start = idx;
         while idx < lines.len() {
             let current = lines[idx];
             let current_trimmed = current.trim();
@@ -250,6 +251,7 @@ fn python_class_fields(text: &str) -> BTreeMap<String, Vec<String>> {
             }
             idx += 1;
         }
+        fields.extend(python_meta_fields(&lines[body_start..idx], class_indent));
         if !fields.is_empty()
             && (bases.contains("BaseModel")
                 || bases.contains("Schema")
@@ -261,6 +263,62 @@ fn python_class_fields(text: &str) -> BTreeMap<String, Vec<String>> {
         }
     }
     out
+}
+
+fn python_meta_fields(lines: &[&str], class_indent: usize) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    let mut idx = 0usize;
+    while idx < lines.len() {
+        let line = lines[idx];
+        let trimmed = line.trim();
+        if !(trimmed == "class Meta:" || trimmed.starts_with("class Meta(")) {
+            idx += 1;
+            continue;
+        }
+        let meta_indent = leading_spaces(line);
+        if meta_indent <= class_indent {
+            break;
+        }
+        idx += 1;
+        while idx < lines.len() {
+            let current = lines[idx];
+            let current_trimmed = current.trim();
+            let indent = leading_spaces(current);
+            if !current_trimmed.is_empty() && indent <= meta_indent {
+                break;
+            }
+            if indent == meta_indent + 4 && current_trimmed.starts_with("fields") {
+                out.extend(parse_python_fields_assignment(current_trimmed));
+            }
+            idx += 1;
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn parse_python_fields_assignment(line: &str) -> Vec<String> {
+    let Some((left, right)) = line.split_once('=') else {
+        return Vec::new();
+    };
+    if left.trim() != "fields" {
+        return Vec::new();
+    }
+    let value = right.split('#').next().unwrap_or("").trim();
+    if value == "__all__" || value == "'__all__'" || value == "\"__all__\"" {
+        return Vec::new();
+    }
+    split_top_level_commas(value.trim_matches(['[', ']', '(', ')']))
+        .into_iter()
+        .filter_map(|item| {
+            let item = item.trim().trim_end_matches(',');
+            let quote = item.as_bytes().first().copied()?;
+            if !matches!(quote, b'\'' | b'"') || item.as_bytes().last().copied() != Some(quote) {
+                return None;
+            }
+            let field = &item[1..item.len().saturating_sub(1)];
+            is_python_ident(field).then(|| field.to_string())
+        })
+        .collect()
 }
 
 fn python_class_decl(line: &str) -> Option<(String, String)> {
