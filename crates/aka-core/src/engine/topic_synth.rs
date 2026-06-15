@@ -9,6 +9,13 @@ use super::{
     string_literals, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
 };
 
+mod stream;
+
+use stream::{
+    extract_stream_bridge_topics, functional_stream_binding_detections,
+    spring_cloud_stream_bindings, stream_binding_detections, StreamBinding,
+};
+
 #[derive(Debug, Clone)]
 pub(super) struct SynthTopic {
     pub(super) id: String,
@@ -109,6 +116,7 @@ pub(super) fn synthesize_topics_from_sources(
     nodes: &BTreeMap<String, SynthNode>,
 ) -> Vec<SynthTopic> {
     let project_sources = ProjectSourceSet::discover(repo);
+    let stream_bindings = spring_cloud_stream_bindings(repo, &project_sources);
     let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
     let mut topics: BTreeMap<(String, String), SynthTopic> = BTreeMap::new();
     let mut seen_edges: HashSet<(String, String, String, String)> = HashSet::new();
@@ -116,7 +124,8 @@ pub(super) fn synthesize_topics_from_sources(
         let Some(text) = read_repo_text(repo, &file_path) else {
             continue;
         };
-        for detection in extract_topic_detections(&text, &file_path, &file_nodes) {
+        for detection in extract_topic_detections(&text, &file_path, &file_nodes, &stream_bindings)
+        {
             let key = (detection.broker.clone(), detection.topic.clone());
             let topic_id = format!(
                 "topic:heuristic:{:016x}",
@@ -165,7 +174,7 @@ pub(super) fn synthesize_topics_from_sources(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum TopicEndpointKind {
+pub(super) enum TopicEndpointKind {
     Consumer,
     Producer,
 }
@@ -180,16 +189,16 @@ impl TopicEndpointKind {
 }
 
 #[derive(Debug, Clone)]
-struct TopicDetection {
-    topic: String,
-    broker: String,
-    kind: TopicEndpointKind,
-    node_id: String,
-    strategy: String,
-    consumer_groups: Vec<String>,
+pub(super) struct TopicDetection {
+    pub(super) topic: String,
+    pub(super) broker: String,
+    pub(super) kind: TopicEndpointKind,
+    pub(super) node_id: String,
+    pub(super) strategy: String,
+    pub(super) consumer_groups: Vec<String>,
 }
 
-fn topic_detection(
+pub(super) fn topic_detection(
     topic: String,
     broker: &str,
     kind: TopicEndpointKind,
@@ -210,6 +219,7 @@ fn extract_topic_detections(
     text: &str,
     file_path: &str,
     nodes: &[&SynthNode],
+    stream_bindings: &BTreeMap<String, StreamBinding>,
 ) -> Vec<TopicDetection> {
     let mut out = Vec::new();
     let lower = file_path.to_ascii_lowercase();
@@ -225,7 +235,7 @@ fn extract_topic_detections(
             )
         })
     {
-        out.extend(extract_jvm_topic_detections(text, nodes));
+        out.extend(extract_jvm_topic_detections(text, nodes, stream_bindings));
     }
     if lower.ends_with(".py")
         || nodes
@@ -244,7 +254,11 @@ fn extract_topic_detections(
     out
 }
 
-fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDetection> {
+fn extract_jvm_topic_detections(
+    text: &str,
+    nodes: &[&SynthNode],
+    stream_bindings: &BTreeMap<String, StreamBinding>,
+) -> Vec<TopicDetection> {
     let mut out = Vec::new();
     let class_kafka_listeners = class_kafka_listeners(nodes);
     for node in nodes
@@ -281,6 +295,17 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                     }
                 }
             }
+            if decorator.contains("StreamListener") {
+                for binding in annotation_string_values(decorator, &["target", "value"]) {
+                    out.extend(stream_binding_detections(
+                        &binding,
+                        stream_bindings,
+                        TopicEndpointKind::Consumer,
+                        node.aka_id.clone(),
+                        "java-spring-cloud-stream-listener",
+                    ));
+                }
+            }
             if decorator.contains("RabbitListener") {
                 for topic in rabbit_listener_topics(decorator) {
                     out.push(topic_detection(
@@ -293,10 +318,9 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                 }
             }
             if decorator.contains("JmsListener") {
-                for topic in annotation_string_values(
-                    decorator,
-                    &["destination", "queue", "topic", "value"],
-                ) {
+                for topic in
+                    annotation_string_values(decorator, &["destination", "queue", "topic", "value"])
+                {
                     out.push(topic_detection(
                         topic,
                         "jms",
@@ -307,10 +331,9 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                 }
             }
             if decorator.contains("SqsListener") {
-                for topic in annotation_string_values(
-                    decorator,
-                    &["queueNames", "queueName", "value"],
-                ) {
+                for topic in
+                    annotation_string_values(decorator, &["queueNames", "queueName", "value"])
+                {
                     out.push(topic_detection(
                         topic,
                         "sqs",
@@ -337,7 +360,13 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                 }
             }
         }
+        out.extend(functional_stream_binding_detections(
+            text,
+            node,
+            stream_bindings,
+        ));
     }
+    out.extend(extract_stream_bridge_topics(text, nodes, stream_bindings));
     out.extend(extract_call_topic_literals(
         text,
         nodes,
