@@ -13,17 +13,16 @@ clients/claude-code/            # 插件根
 
 仓库根另有 `.claude-plugin/marketplace.json`，把本仓库变成一个可 `marketplace add` 的 marketplace，插件源指向 `./clients/claude-code`。
 
-## 前置条件：aka 二进制在 PATH 上
+## 前置条件：桌面 AKA 可执行文件可被找到
 
 `.mcp.json` 里 `command` 写的是 `"aka"`（按 PATH 解析）。插件清单不支持安装时动态探测路径，所以二选一：
 
 ```bash
-# 方式 A：装到 PATH（推荐）
-cargo install --path apps/cli            # 或
-ln -s "$(pwd)/target/release/aka" ~/.local/bin/aka
+# 方式 A：给桌面 AKA 建一个 PATH 上的软链（推荐）
+ln -s "/Applications/AKA.app/Contents/MacOS/AKA" ~/.local/bin/aka
 
 # 方式 B：不想动 PATH —— 改本目录 .mcp.json，把 "command": "aka"
-#         换成你的绝对路径，如 "/Users/you/github/aka/target/release/aka"
+#         换成你的绝对路径，如 "/Applications/AKA.app/Contents/MacOS/AKA"
 #         （改完再安装插件；插件安装时会把目录拷进缓存，装后再改源文件不生效）
 ```
 
@@ -44,10 +43,10 @@ claude --plugin-dir /absolute/path/to/aka/clients/claude-code
 也可以不走插件，直接注册 MCP server（没有 skill，但最简单）：
 
 ```bash
-claude mcp add aka -- /absolute/path/to/aka mcp
+claude mcp add aka -- /absolute/path/to/AKA mcp
 ```
 
-或直接跑仓库里的安装脚本：`clients/install.sh --client claude-code`。
+或直接跑仓库里的安装脚本：`clients/install.sh --client claude-code --bin /absolute/path/to/AKA`。
 
 ## 验证
 

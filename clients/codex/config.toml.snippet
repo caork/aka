@@ -1,7 +1,7 @@
 # aka MCP server —— 追加到 ~/.codex/config.toml
-# command 若不在 PATH 上，换成 aka 二进制的绝对路径（Codex 继承的 PATH 可能比交互 shell 窄，绝对路径最稳）。
+# command 建议写桌面 AKA 可执行文件的绝对路径（Codex 继承的 PATH 可能比交互 shell 窄，绝对路径最稳）。
 [mcp_servers.aka]
-command = "aka"
+command = "/absolute/path/to/AKA"
 args = ["mcp"]
 # 可选项：
 # startup_timeout_sec = 20            # 首次启动慢（冷启动/大注册表）时调大

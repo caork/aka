@@ -1,16 +1,15 @@
 # aka 客户端接入
 
-把 aka 接进编码 agent 客户端：Claude Code / Codex 仍可走本地 stdio MCP（`aka mcp`）；OpenCode 默认连接 AKA 桌面端内置的本地 Streamable HTTP MCP（`http://127.0.0.1:4112/mcp`）。设计文档见 [docs/clients.md](../docs/clients.md)。
+把 aka 接进编码 agent 客户端：OpenCode 默认连接 AKA 桌面端内置的本地 Streamable HTTP MCP（`http://127.0.0.1:4112/mcp`）；Claude Code / Codex 可把桌面端 `AKA` 可执行文件当作 MCP 命令运行（`AKA mcp`）。设计文档见 [docs/clients.md](../docs/clients.md)。
 
 ## 一键安装
 
 ```bash
-cargo build --release -p aka-cli                 # 先有二进制
-clients/install.sh --client claude-code          # 直连 MCP（最简）
+clients/install.sh --client opencode             # 默认连接已运行的 AKA 桌面端，需要 jq
+clients/install.sh --client claude-code --bin /path/to/AKA
+clients/install.sh --client codex --bin /path/to/AKA
 clients/install.sh --client claude-code --plugin # 插件方式（含 skill）
-clients/install.sh --client codex
-clients/install.sh --client opencode             # 需要 jq
-# 任意客户端都可加 --dry-run 预览、--bin /path/to/aka 指定二进制
+# 任意客户端都可加 --dry-run 预览
 ```
 
 脚本幂等：已配置过会提示并跳过。
@@ -31,8 +30,10 @@ clients/install.sh --client opencode             # 需要 jq
 
 ## 通用前置
 
-1. 构建二进制：`cargo build --release -p aka-cli`（脚本会自动探测 `target/{release,debug}/aka`，也认 PATH）。
-2. 至少索引一个仓库：`aka analyze /path/to/repo`（否则 agent 调 `list_repos` 得到空列表）。
-3. Claude Code / Codex 的 stdio MCP server 由客户端按需拉起；OpenCode 默认复用已经运行的 AKA 桌面端本地 MCP server。`aka serve`（HTTP :4111）仍是 REST API，不是 OpenCode 默认接入面。
+1. 安装并启动 AKA 桌面端。桌面端会启动本地 HTTP MCP：`http://127.0.0.1:4112/mcp`。
+2. 至少索引一个仓库：在桌面端导入仓库，或用桌面可执行文件运行 `AKA analyze /path/to/repo`（否则 agent 调 `list_repos` 得到空列表）。
+3. OpenCode 默认复用已经运行的 AKA 桌面端本地 MCP server；Claude Code / Codex 的 stdio MCP server 由客户端按需拉起，`--bin` 指向桌面包里的 `AKA` 可执行文件即可。
+
+源码开发时仍可 `cargo build --release -p aka-cli`，脚本也会自动探测 `target/{release,debug}/aka` 和 PATH 上的 `aka`，方便本地调试。
 
 > License 提醒：解析引擎 `codebase-memory-mcp` 为 MIT，aka 客户端接入按 MIT 口径分发。

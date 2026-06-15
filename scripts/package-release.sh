@@ -2,7 +2,7 @@
 # package-release.sh — 打包 v<ver> 发布资产到 dist/
 #
 # 用法:
-#   scripts/package-release.sh [--version 0.1.0] [--target <triple>] [--skip-build] [--clients-only] [--desktop]
+#   scripts/package-release.sh [--version 0.1.0] [--skip-build] [--clients-only] [--desktop]
 #   scripts/package-release.sh --desktop-only [--version 0.1.0] [--skip-build]
 #   scripts/package-release.sh --desktop-windows [--version 0.1.0] [--skip-build]
 #   scripts/package-release.sh --checksums-only [--version 0.1.0]
@@ -11,8 +11,6 @@
 #   dist/aka-claude-code-plugin-<ver>.zip   clients/claude-code/ 插件包
 #   dist/aka-opencode-plugin-<ver>.zip      clients/opencode/ 插件包（MCP 片段 + skill + 本地 plugin）
 #   dist/aka-clients-<ver>.tar.gz           整个 clients/ 目录
-#   dist/aka-<ver>-<host-triple>.tar.gz     strip 后的 release 二进制（tar 内单文件 aka）
-#   dist/aka-<ver>-<host-triple>.zip        Windows release 二进制（zip 内单文件 aka.exe）
 #   dist/aka-desktop-<ver>-<host-triple>.dmg
 #                                             macOS Tauri GUI app DMG
 #   dist/aka-desktop-<ver>-<host-triple>.app.zip
@@ -35,7 +33,6 @@ TAURI_DIR="${REPO_ROOT}/apps/desktop/src-tauri"
 TAURI_RESOURCES_DIR="${TAURI_DIR}/resources"
 
 VERSION=""
-TARGET=""
 SKIP_BUILD=0
 CHECKSUMS_ONLY=0
 CLIENTS_ONLY=0
@@ -53,8 +50,9 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "error: --version 需要参数" >&2; exit 1; }
       VERSION="$2"; shift 2 ;;
     --target)
-      [[ $# -ge 2 ]] || { echo "error: --target 需要参数" >&2; exit 1; }
-      TARGET="$2"; shift 2 ;;
+      echo "error: 独立 CLI/server 发布包已移除，不再支持 --target。" >&2
+      echo "       请打包桌面端（AKA 可执行文件已支持 CLI/MCP 子命令）或使用 Docker 镜像。" >&2
+      exit 1 ;;
     --skip-build)
       SKIP_BUILD=1; shift ;;
     --clients-only)
@@ -451,68 +449,6 @@ package_clients() {
   echo "==> ${CLIENTS_TAR}"
 }
 
-package_binary() {
-  local triple bin_name archive_kind build_args bin bin_archive stage arch
-  if [[ -n "${TARGET}" ]]; then
-    triple="${TARGET}"
-  else
-    case "$(uname -m)" in
-      arm64|aarch64) arch="aarch64" ;;
-      x86_64)        arch="x86_64" ;;
-      *) echo "error: 不支持的架构 $(uname -m)" >&2; exit 1 ;;
-    esac
-    case "$(uname -s)" in
-      Darwin) TRIPLE="${arch}-apple-darwin" ;;
-      Linux)  TRIPLE="${arch}-unknown-linux-gnu" ;;
-      MINGW*|MSYS*|CYGWIN*) TRIPLE="${arch}-pc-windows-msvc" ;;
-      *) echo "error: 不支持的系统 $(uname -s)" >&2; exit 1 ;;
-    esac
-    triple="${TRIPLE}"
-  fi
-
-  case "${triple}" in
-    *-pc-windows-*) bin_name="aka.exe"; archive_kind="zip" ;;
-    *) bin_name="aka"; archive_kind="tar.gz" ;;
-  esac
-
-  if [[ "${SKIP_BUILD}" -eq 0 ]]; then
-    build_args=(build --release -p aka-cli)
-    if [[ -n "${TARGET}" ]]; then
-      build_args+=(--target "${triple}")
-    fi
-    if [[ "${triple}" = "x86_64-pc-windows-msvc" ]] && [[ "$(uname -s)" = "Darwin" ]] && command -v cargo-xwin >/dev/null 2>&1; then
-      echo "==> cargo xwin ${build_args[*]}"
-      (cd "${REPO_ROOT}" && cargo xwin "${build_args[@]}")
-    else
-      echo "==> cargo ${build_args[*]}"
-      (cd "${REPO_ROOT}" && cargo "${build_args[@]}")
-    fi
-  fi
-
-  if [[ -n "${TARGET}" ]]; then
-    bin="${REPO_ROOT}/target/${triple}/release/${bin_name}"
-  else
-    bin="${REPO_ROOT}/target/release/${bin_name}"
-  fi
-  [[ -x "${bin}" ]] || { echo "error: 找不到 ${bin}（先去掉 --skip-build 构建一次）" >&2; exit 1; }
-
-  bin_archive="${DIST_DIR}/aka-${VERSION}-${triple}.${archive_kind}"
-  rm -f "${bin_archive}"
-  stage="$(mktemp -d)"
-  cp "${bin}" "${stage}/${bin_name}"
-  if [[ "${bin_name}" = "aka" ]] && command -v strip >/dev/null 2>&1; then
-    strip "${stage}/${bin_name}"
-  fi
-  if [[ "${archive_kind}" = "zip" ]]; then
-    (cd "${stage}" && create_zip_archive "${bin_archive}" "${bin_name}")
-  else
-    COPYFILE_DISABLE=1 tar -czf "${bin_archive}" -C "${stage}" "${bin_name}"
-  fi
-  rm -rf "${stage}"
-  echo "==> ${bin_archive}"
-  BIN_ARCHIVE="${bin_archive}"
-}
-
 package_desktop() {
   local host_os host_arch desktop_triple desktop_platform app_path desktop_dmg desktop_zip helper_script signed_release tauri_dmg
   host_os="$(uname -s)"
@@ -669,15 +605,13 @@ if [[ "${CLIENTS_ONLY}" -eq 1 ]]; then
   exit 0
 fi
 
-package_binary
-
 if [[ "${DESKTOP}" -eq 1 ]]; then
   package_desktop
 fi
 
 echo
 echo "==> 完成。校验和请最后单独跑: scripts/package-release.sh --checksums-only"
-ls_args=("${PLUGIN_ZIP}" "${OPENCODE_ZIP}" "${CLIENTS_TAR}" "${BIN_ARCHIVE}")
+ls_args=("${PLUGIN_ZIP}" "${OPENCODE_ZIP}" "${CLIENTS_TAR}")
 if [[ "${DESKTOP}" -eq 1 ]]; then
   ls_args+=("${DIST_DIR}/aka-desktop-${VERSION}-"*.dmg "${DIST_DIR}/aka-desktop-${VERSION}-"*.app.zip)
 fi

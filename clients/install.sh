@@ -2,12 +2,13 @@
 # aka 客户端接入安装脚本
 #
 # 用法:
-#   clients/install.sh --client claude-code [--plugin] [--bin /path/to/aka] [--dry-run]
-#   clients/install.sh --client codex       [--bin /path/to/aka] [--dry-run]
-#   clients/install.sh --client opencode    [--bin /path/to/aka] [--dry-run]
+#   clients/install.sh --client claude-code [--plugin] [--bin /path/to/AKA] [--dry-run]
+#   clients/install.sh --client codex       [--bin /path/to/AKA] [--dry-run]
+#   clients/install.sh --client opencode    [--dry-run]
 #
 # 行为:
-#   - 自动探测 aka 二进制: --bin 参数 > PATH 上的 aka > 仓库 target/release > target/debug
+#   - Claude Code / Codex 自动探测 MCP 命令: --bin 参数 > PATH 上的 aka/AKA > 仓库 target/release > target/debug
+#   - OpenCode 默认连接已运行的 AKA 桌面端本地 MCP endpoint，不需要单独的 CLI 二进制
 #   - 幂等: 目标配置里已有 aka 条目时跳过并提示, 不会重复写入
 #   - --dry-run: 只打印将要执行的动作, 不写任何文件
 #
@@ -15,7 +16,7 @@
 #   claude-code : 默认 `claude mcp add aka`(user scope); 加 --plugin 则走插件方式
 #                 (marketplace add 本仓库 + plugin install aka@aka, 含 skill)
 #   codex       : 追加 [mcp_servers.aka] 到 ~/.codex/config.toml
-#   opencode    : 合并 mcp.aka 进 ~/.config/opencode/opencode.json (需要 jq) + 装 OpenCode plugin + 使用策略 skill
+#   opencode    : 合并远程 mcp.aka 进 ~/.config/opencode/opencode.json (需要 jq) + 装 OpenCode plugin + 使用策略 skill
 
 set -euo pipefail
 
@@ -60,21 +61,32 @@ detect_bin() {
     [ -x "$BIN" ] || die "--bin 指定的文件不可执行: $BIN"
     return
   fi
-  if command -v aka >/dev/null 2>&1; then
-    BIN="$(command -v aka)"
-    return
-  fi
-  for cand in "${REPO_ROOT}/target/release/aka" "${REPO_ROOT}/target/debug/aka"; do
+  for name in aka AKA; do
+    if command -v "$name" >/dev/null 2>&1; then
+      BIN="$(command -v "$name")"
+      return
+    fi
+  done
+  for cand in \
+    "${REPO_ROOT}/target/release/aka" \
+    "${REPO_ROOT}/target/debug/aka" \
+    "${REPO_ROOT}/apps/desktop/src-tauri/target/release/AKA" \
+    "${REPO_ROOT}/apps/desktop/src-tauri/target/release/AKA.exe"
+  do
     if [ -x "$cand" ]; then
       BIN="$cand"
       return
     fi
   done
-  die "找不到 aka 二进制。先 cargo build -p aka-cli（或 --release），或用 --bin 指定路径。"
+  die "找不到可执行的 aka/AKA。请用 --bin 指向桌面包里的 AKA 可执行文件，或源码开发时先 cargo build -p aka-cli。"
 }
 
-detect_bin
-info "aka 二进制: ${BIN}"
+if [ "$CLIENT" != "opencode" ]; then
+  detect_bin
+  info "aka MCP 命令: ${BIN}"
+elif [ -n "$BIN" ]; then
+  warn "OpenCode 默认连接 http://127.0.0.1:4112/mcp，不会使用 --bin 指定的路径: ${BIN}"
+fi
 
 run() {
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -93,7 +105,7 @@ install_claude_code() {
     # 注意: 插件内 .mcp.json 的 command 是 "aka"(按 PATH 解析)。
     if ! command -v aka >/dev/null 2>&1; then
       warn "aka 不在 PATH 上。插件清单无法动态指定路径，两个选择:"
-      warn "  1) 把它加入 PATH: ln -s ${BIN} ~/.local/bin/aka"
+      warn "  1) 给桌面 AKA 建一个 aka 软链: ln -s ${BIN} ~/.local/bin/aka"
       warn "  2) 编辑 ${SCRIPT_DIR}/claude-code/.mcp.json，把 \"aka\" 换成绝对路径 ${BIN} 后重跑"
       die  "处理后重新运行本脚本。"
     fi

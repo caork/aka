@@ -93,8 +93,8 @@ git 导入的 `checkouts/`。删除容器不丢索引；要全清就 `docker vol
    覆盖 CBM native engine + SQLite->NDJSON adapter 这一关键风险点）；
 3. 推 `ghcr.io/caork/aka:<版本>` 与 `:latest`（私有 package，拉取需 `read:packages` 的 PAT：
    `echo $PAT | docker login ghcr.io -u caork --password-stdin`）；
-4. `docker save` 的镜像 tar、Linux/macOS/Windows CLI 二进制、macOS/Windows 桌面 GUI 包、
-   Claude Code/OpenCode 插件包、`clients/` 总包与 `SHA256SUMS` 挂到同名 GitHub Release——Jensen 等目标机离线
+4. `docker save` 的镜像 tar、macOS/Windows 桌面 GUI 包、Claude Code/OpenCode 插件包、
+   `clients/` 总包与 `SHA256SUMS` 挂到同名 GitHub Release——Jensen 等目标机离线
    `docker load -i aka-<版本>-linux-amd64.docker.tar.gz` 即用。
 
 ```bash
@@ -105,14 +105,16 @@ docker load -i aka-0.1.0-linux-amd64.docker.tar.gz       # 走 release 资产（
 
 发行资产：
 
-- `aka-<版本>-x86_64-unknown-linux-gnu.tar.gz` — Linux `aka`
-- `aka-<版本>-aarch64-apple-darwin.tar.gz` — macOS `aka`
-- `aka-<版本>-x86_64-pc-windows-msvc.zip` — Windows `aka.exe`
 - `aka-desktop-<版本>-aarch64-apple-darwin.dmg` — macOS GUI 安装镜像（桌面端更新检查优先展示）
 - `aka-desktop-<版本>-aarch64-apple-darwin.app.zip` — macOS GUI（zip 内是 `aka.app`）
 - `aka-desktop-<版本>-macos-open.sh` — macOS 无 Apple Developer ID/无公证包打开助手
 - `aka-desktop-<版本>-x86_64-pc-windows-msvc-setup.exe` — Windows GUI 安装包
 - `aka-desktop-<版本>-x86_64-pc-windows-msvc-portable.zip` — Windows GUI 免安装包
+- `aka-claude-code-plugin-<版本>.zip` — Claude Code 插件包
+- `aka-opencode-plugin-<版本>.zip` — OpenCode 本地 plugin + MCP/skill 配置包
+- `aka-clients-<版本>.tar.gz` — 全量客户端接入文件
+- `aka-<版本>-linux-amd64.docker.tar.gz` — Docker 镜像离线包
+- `SHA256SUMS` — 发布资产校验和
 - `latest.json` — 桌面端更新清单，可同步到 `https://aka.hawkingrad.com/releases/latest.json`
 
 桌面端 Settings → Updates 会读取 hawkingrad 的 `latest.json`。CI 在 tag release 的 checksums 阶段通过
@@ -126,10 +128,10 @@ docker load -i aka-0.1.0-linux-amd64.docker.tar.gz       # 走 release 资产（
 生成 macOS `.app.zip`、生成 Windows portable zip 前后校验 `engine/codebase-memory-mcp` 或
 `engine/codebase-memory-mcp.exe`，避免把旧的 JS/node engine 目录打进包里却没有 native binary。
 
-`aka-<版本>-...` 裸二进制是 CLI/server 包，能启动 `aka serve` / `aka mcp` / 查询既有索引，但不会打开 GUI；
-桌面窗口请下载 `aka-desktop-<版本>-...`。完整 `aka analyze` 需要 `codebase-memory-mcp` 原生二进制：
-可以使用 Docker/桌面包内置资源，或设置 `AKA_ENGINE_DIR` 指向含二进制的 engine 目录，或设置 `AKA_CBM_BIN` 指向二进制。
+Release 不再发布 `aka-<版本>-...` 裸 CLI/server 包。桌面端 `AKA` 可执行文件本身支持 `serve` / `mcp` /
+`analyze` / 查询既有索引等子命令，并且桌面包内置完整 `codebase-memory-mcp` 原生二进制；headless 场景使用
+Docker 镜像。源码开发时仍可 `cargo build --release -p aka-cli` 得到单独的 `aka` 调试二进制。
 
 arm64 镜像暂不预构建（engine 阶段需在目标架构编译 CBM native binary，QEMU 全模拟太慢）；
 需要时在 arm64 机器上 `docker build -t aka:0.1.0 .` 即可，Dockerfile 全程架构无关。
-macOS 本机 CLI/GUI 包由 `scripts/package-release.sh` 产出（不含 Docker）。
+macOS 本机桌面包由 `scripts/package-release.sh --desktop-only` 产出（不含 Docker）。

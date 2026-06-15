@@ -1,7 +1,4 @@
 # 发布流水线 —— 推送 v* tag 触发：
-#   linux-binary : ubuntu 上构建 x86_64 linux 二进制 → 挂到同名 GitHub Release
-#   macos-binary : macOS 上构建 aarch64 macOS 二进制 → 挂到同名 GitHub Release
-#   windows-binary : windows 上构建 x86_64 Windows aka.exe → zip 挂到 Release
 #   macos-desktop : macOS 上构建 Tauri GUI aka.app → dmg + zip 挂到 Release
 #   windows-desktop : Windows 上构建 Tauri GUI NSIS 安装包 + portable zip → 挂到 Release
 #   client-packages : 打包 Claude Code / OpenCode 插件包与 clients 总包 → 挂到 Release
@@ -10,7 +7,8 @@
 #                  推 ghcr.io/caork/aka → 镜像 tar 挂到 Release（便于 Jensen 离线 docker load）
 #   checksums : 全部 release 资产上传后生成 SHA256SUMS
 #
-# 不在 macOS 本机构建镜像（用户约定）；macOS 二进制可由本机或 CI 的 scripts/package-release.sh 产出。
+# 不再发布独立 CLI/server 压缩包；桌面 AKA 可执行文件本身支持 CLI/MCP 子命令。
+# 不在 macOS 本机构建镜像（用户约定）。
 name: release
 
 on:
@@ -26,123 +24,6 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/aka
 
 jobs:
-  linux-binary:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        run: |
-          cargo build --release -p aka-cli
-          strip target/release/aka
-
-      - name: Package tarball
-        id: pkg
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          [ "${GITHUB_REF_TYPE}" = "tag" ] || VERSION="dev-${GITHUB_SHA::8}"
-          NAME="aka-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-          tar -C target/release -czf "$NAME" aka
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Upload to release
-        if: github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || \
-            gh release view "$GITHUB_REF_NAME" >/dev/null
-          gh release upload "$GITHUB_REF_NAME" "${{ steps.pkg.outputs.name }}" --clobber
-
-      - uses: actions/upload-artifact@v4
-        if: github.ref_type != 'tag'
-        with:
-          name: linux-binary
-          path: aka-*.tar.gz
-
-  macos-binary:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Resolve version
-        id: ver
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          [ "${GITHUB_REF_TYPE}" = "tag" ] || VERSION="dev-${GITHUB_SHA::8}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Package macOS binary
-        run: scripts/package-release.sh --version "${{ steps.ver.outputs.version }}" --target aarch64-apple-darwin
-
-      - name: Upload to release
-        if: github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || \
-            gh release view "$GITHUB_REF_NAME" >/dev/null
-          gh release upload "$GITHUB_REF_NAME" dist/aka-*-aarch64-apple-darwin.tar.gz --clobber
-
-      - uses: actions/upload-artifact@v4
-        if: github.ref_type != 'tag'
-        with:
-          name: macos-binary
-          path: dist/aka-*-aarch64-apple-darwin.tar.gz
-
-  windows-binary:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        shell: pwsh
-        run: cargo build --release -p aka-cli
-
-      - name: Package zip
-        id: pkg
-        shell: pwsh
-        run: |
-          $version = "${env:GITHUB_REF_NAME}" -replace '^v',''
-          if ("${env:GITHUB_REF_TYPE}" -ne "tag") {
-            $version = "dev-$($env:GITHUB_SHA.Substring(0, 8))"
-          }
-          $name = "aka-$version-x86_64-pc-windows-msvc.zip"
-          Compress-Archive -Path target/release/aka.exe -DestinationPath $name -Force
-          "name=$name" >> $env:GITHUB_OUTPUT
-
-      - name: Upload to release
-        if: github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: pwsh
-        run: |
-          gh release view "$env:GITHUB_REF_NAME" *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create "$env:GITHUB_REF_NAME" --title "$env:GITHUB_REF_NAME" --generate-notes
-            if ($LASTEXITCODE -ne 0) {
-              gh release view "$env:GITHUB_REF_NAME" *> $null
-            }
-          }
-          gh release upload "$env:GITHUB_REF_NAME" "${{ steps.pkg.outputs.name }}" --clobber
-
-      - uses: actions/upload-artifact@v4
-        if: github.ref_type != 'tag'
-        with:
-          name: windows-binary
-          path: aka-*.zip
-
   macos-desktop:
     runs-on: macos-14
     steps:
@@ -367,9 +248,6 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
     needs:
-      - linux-binary
-      - macos-binary
-      - windows-binary
       - macos-desktop
       - windows-desktop
       - client-packages
