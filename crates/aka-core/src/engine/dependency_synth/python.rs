@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::json;
 
@@ -133,6 +133,18 @@ fn find_python_dependency_calls(text: &str) -> Vec<PythonDependencyCall> {
             }
         }
     }
+    let aliases = python_annotated_dependency_aliases(text, &out);
+    for (alias, calls) in aliases {
+        for usage in python_annotation_alias_usages(text, &alias) {
+            for call in &calls {
+                out.push(PythonDependencyCall {
+                    start: usage,
+                    callable: call.callable.clone(),
+                    strategy: "python-fastapi-annotated-alias".into(),
+                });
+            }
+        }
+    }
     out.sort_by(|a, b| {
         a.start
             .cmp(&b.start)
@@ -140,6 +152,156 @@ fn find_python_dependency_calls(text: &str) -> Vec<PythonDependencyCall> {
     });
     out.dedup_by(|a, b| a.start == b.start && a.callable == b.callable);
     out
+}
+
+fn python_annotated_dependency_aliases(
+    text: &str,
+    calls: &[PythonDependencyCall],
+) -> BTreeMap<String, Vec<PythonDependencyCall>> {
+    let mut aliases: BTreeMap<String, Vec<PythonDependencyCall>> = BTreeMap::new();
+    let mut offset = 0usize;
+    while let Some(rel) = text[offset..].find("Annotated[") {
+        let annotated_pos = offset + rel;
+        let line_start = text[..annotated_pos]
+            .rfind('\n')
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        let prefix = &text[line_start..annotated_pos];
+        let Some(alias) = python_annotated_alias_name(prefix) else {
+            offset = annotated_pos + "Annotated[".len();
+            continue;
+        };
+        let open = annotated_pos + "Annotated".len();
+        let Some(close) = find_matching_square_bracket(text, open) else {
+            offset = open + 1;
+            continue;
+        };
+        for call in calls
+            .iter()
+            .filter(|call| call.start > open && call.start < close)
+        {
+            aliases.entry(alias.clone()).or_default().push(call.clone());
+        }
+        offset = close + 1;
+    }
+    aliases
+}
+
+fn python_annotated_alias_name(prefix: &str) -> Option<String> {
+    let (left, _) = prefix.split_once('=')?;
+    let alias = left
+        .trim()
+        .split_once(':')
+        .map(|(alias, _)| alias)
+        .unwrap_or(left)
+        .trim();
+    is_python_identifier(alias).then(|| alias.to_string())
+}
+
+fn find_matching_square_bracket(text: &str, open: usize) -> Option<usize> {
+    if text.as_bytes().get(open) != Some(&b'[') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut escape = false;
+    for (idx, byte) in text.bytes().enumerate().skip(open) {
+        if let Some(q) = quote {
+            if escape {
+                escape = false;
+            } else if byte == b'\\' {
+                escape = true;
+            } else if byte == q {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn python_annotation_alias_usages(text: &str, alias: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for call in find_python_function_defs(text) {
+        let args = call.args;
+        let mut offset = 0usize;
+        while let Some(rel) = args[offset..].find(alias) {
+            let start = offset + rel;
+            if python_alias_annotation_boundary_ok(args, start, alias) {
+                out.push(call.start + start);
+            }
+            offset = start + alias.len();
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[derive(Debug)]
+struct PythonFunctionDef<'a> {
+    start: usize,
+    args: &'a str,
+}
+
+fn find_python_function_defs(text: &str) -> Vec<PythonFunctionDef<'_>> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(rel) = text[offset..].find("def ") {
+        let def_pos = offset + rel;
+        if !python_keyword_boundary_ok(text, def_pos, "def") {
+            offset = def_pos + "def".len();
+            continue;
+        }
+        let Some(open_rel) = text[def_pos..].find('(') else {
+            break;
+        };
+        let open = def_pos + open_rel;
+        let Some(close) = super::super::find_matching_paren(text, open) else {
+            offset = open + 1;
+            continue;
+        };
+        out.push(PythonFunctionDef {
+            start: open + 1,
+            args: &text[open + 1..close],
+        });
+        offset = close + 1;
+    }
+    out
+}
+
+fn python_alias_annotation_boundary_ok(args: &str, start: usize, alias: &str) -> bool {
+    let before = args[..start].chars().rev().find(|ch| !ch.is_whitespace());
+    let after = args[start + alias.len()..]
+        .chars()
+        .find(|ch| !ch.is_whitespace());
+    before == Some(':') && after.is_none_or(|ch| matches!(ch, ',' | '=' | ')' | ']'))
+}
+
+fn python_keyword_boundary_ok(text: &str, start: usize, keyword: &str) -> bool {
+    let before = start
+        .checked_sub(1)
+        .and_then(|idx| text.as_bytes().get(idx))
+        .copied()
+        .map(char::from);
+    let after = text
+        .as_bytes()
+        .get(start + keyword.len())
+        .copied()
+        .map(char::from);
+    before.is_none_or(|ch| !is_python_ident_continue(ch))
+        && after.is_none_or(|ch| !is_python_ident_continue(ch))
 }
 
 fn first_depends_callable(args: &str) -> Option<String> {
@@ -192,6 +354,9 @@ fn is_python_identifier(name: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    (first == '_' || first.is_ascii_alphabetic()) && chars.all(is_python_ident_continue)
+}
+
+fn is_python_ident_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }

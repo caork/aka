@@ -905,6 +905,113 @@ def create_order():
 }
 
 #[test]
+fn synthesizes_fastapi_annotated_dependency_aliases_for_processes() {
+    let repo = temp_repo("fastapi-annotated-depends");
+    std::fs::create_dir_all(repo.join("api")).unwrap();
+    std::fs::write(
+        repo.join("api/orders.py"),
+        r#"from typing import Annotated
+from fastapi import APIRouter, Depends
+
+router = APIRouter()
+
+def get_current_user():
+    return verify_token()
+
+def verify_token():
+    return "maya"
+
+CurrentUser = Annotated[
+    str,
+    Depends(get_current_user),
+]
+
+@router.get("/orders")
+def list_orders(user: CurrentUser):
+    return {"user": user}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "get_current_user",
+        "api.orders.get_current_user",
+        "api/orders.py",
+        (6, 7),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "verify_token",
+        "api.orders.verify_token",
+        "api/orders.py",
+        (9, 10),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "list_orders",
+        "api.orders.list_orders",
+        "api/orders.py",
+        (18, 19),
+        json!({
+            "decorators": ["@router.get(\"/orders\")"],
+            "language": "python",
+            "route_method": "GET",
+            "route_path": "/orders",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "CALLS");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "DEPENDS_ON"
+            && edge.source_id == "cbm:3:api.orders.list_orders"
+            && edge.target_id == "cbm:1:api.orders.get_current_user"
+            && edge
+                .evidence
+                .as_ref()
+                .and_then(|v| v.get("strategy"))
+                .and_then(Value::as_str)
+                == Some("python-fastapi-annotated-alias")
+    }));
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "CALLS"
+            && edge.source_id == "cbm:3:api.orders.list_orders"
+            && edge.target_id == "cbm:1:api.orders.get_current_user"
+            && edge
+                .evidence
+                .as_ref()
+                .and_then(|v| v.get("kind"))
+                .and_then(Value::as_str)
+                == Some("fastapi-depends")
+    }));
+
+    let process = synth
+        .processes
+        .iter()
+        .find(|process| process.name == "list_orders → verify_token")
+        .expect("Annotated dependency alias should seed dependency process");
+    assert_eq!(
+        process
+            .steps
+            .iter()
+            .map(|step| step.name.as_str())
+            .collect::<Vec<_>>(),
+        ["list_orders", "get_current_user", "verify_token"]
+    );
+}
+
+#[test]
 fn process_cap_uses_whole_graph_symbol_count_like_gitnexus() {
     let conn = test_conn();
     let mut id = 1_i64;
