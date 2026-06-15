@@ -1,0 +1,96 @@
+diff --git a/src/discover/discover.c b/src/discover/discover.c
+index 314c00c..5c0a000 100644
+--- a/src/discover/discover.c
++++ b/src/discover/discover.c
+@@ -131,6 +131,36 @@ static bool str_contains(const char *s, const char *sub) {
+     return strstr(s, sub) != NULL;
+ }
+ 
++static bool is_fast_skip_dir_name(const char *dirname) {
++    return str_in_list(dirname, FAST_SKIP_DIRS);
++}
++
++static bool is_jvm_source_package_path(const char *rel_path) {
++    if (!rel_path) {
++        return false;
++    }
++    return str_contains(rel_path, "/src/main/java/") ||
++           str_contains(rel_path, "/src/test/java/") ||
++           str_contains(rel_path, "/src/main/kotlin/") ||
++           str_contains(rel_path, "/src/test/kotlin/") ||
++           str_contains(rel_path, "/src/main/scala/") ||
++           str_contains(rel_path, "/src/test/scala/") ||
++           str_contains(rel_path, "/src/main/groovy/") ||
++           str_contains(rel_path, "/src/test/groovy/");
++}
++
++static bool keep_fast_source_package_dir(const char *entry_name, const char *rel_path,
++                                         cbm_index_mode_t mode) {
++    if (mode == CBM_MODE_FULL || !entry_name || !rel_path || !is_fast_skip_dir_name(entry_name)) {
++        return false;
++    }
++    if (!(strcmp(entry_name, "example") == 0 || strcmp(entry_name, "examples") == 0 ||
++          strcmp(entry_name, "sample") == 0 || strcmp(entry_name, "samples") == 0)) {
++        return false;
++    }
++    return is_jvm_source_package_path(rel_path);
++}
++
+ /* ── Public filter functions ─────────────────────── */
+ 
+ bool cbm_should_skip_dir(const char *dirname, cbm_index_mode_t mode) {
+@@ -275,7 +305,9 @@ static bool should_skip_directory(const char *entry_name, const char *rel_path,
+                                   const cbm_discover_opts_t *opts, const cbm_gitignore_t *gitignore,
+                                   const cbm_gitignore_t *cbmignore, const cbm_gitignore_t *local_gi,
+                                   const char *local_gi_prefix) {
+-    if (cbm_should_skip_dir(entry_name, opts ? opts->mode : CBM_MODE_FULL)) {
++    cbm_index_mode_t mode = opts ? opts->mode : CBM_MODE_FULL;
++    if (cbm_should_skip_dir(entry_name, mode) &&
++        !keep_fast_source_package_dir(entry_name, rel_path, mode)) {
+         return true;
+     }
+     if (gitignore && cbm_gitignore_matches(gitignore, rel_path, true)) {
+diff --git a/tests/test_discover.c b/tests/test_discover.c
+index af51a92..4b90abc 100644
+--- a/tests/test_discover.c
++++ b/tests/test_discover.c
+@@ -605,6 +605,31 @@ TEST(discover_generic_dirs_fast_mode) {
+     PASS();
+ }
+ 
++TEST(discover_fast_keeps_jvm_example_package_dirs) {
++    char *base = th_mktempdir("cbm_disc_jvm_example");
++    ASSERT(base != NULL);
++
++    th_write_file(TH_PATH(base, "example/ignored.go"), "package ignored\n");
++    th_write_file(TH_PATH(base, "services/order/src/main/java/com/example/App.java"),
++                  "package com.example;\nclass App {}\n");
++    th_write_file(TH_PATH(base, "services/order/src/test/java/com/example/AppTest.java"),
++                  "package com.example;\nclass AppTest {}\n");
++
++    cbm_discover_opts_t opts = {.mode = CBM_MODE_FAST};
++    cbm_file_info_t *files = NULL;
++    int count = 0;
++
++    int rc = cbm_discover(base, &opts, &files, &count);
++    ASSERT_EQ(rc, 0);
++    ASSERT_EQ(count, 2);
++    ASSERT_STR_EQ(files[0].rel_path, "services/order/src/main/java/com/example/App.java");
++    ASSERT_STR_EQ(files[1].rel_path, "services/order/src/test/java/com/example/AppTest.java");
++
++    cbm_discover_free(files, count);
++    th_cleanup(base);
++    PASS();
++}
++
+ TEST(discover_cbmignore_no_git) {
+     char *base = th_mktempdir("cbm_disc_nogit");
+     ASSERT(base != NULL);
+@@ -792,6 +817,7 @@ SUITE(discover) {
+     RUN_TEST(discover_new_ignore_patterns);
+     RUN_TEST(discover_generic_dirs_full_mode);
+     RUN_TEST(discover_generic_dirs_fast_mode);
++    RUN_TEST(discover_fast_keeps_jvm_example_package_dirs);
+     RUN_TEST(discover_cbmignore_no_git);
+ 
+     /* Nested .gitignore tests (issue #178) */

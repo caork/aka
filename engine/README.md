@@ -12,5 +12,10 @@ scripts/sync-engine.sh
 
 脚本会 clone / build `DeusData/codebase-memory-mcp` 到被 git 忽略的
 `engine/codebase-memory-mcp-src/`，复制可执行文件到 `engine/codebase-memory-mcp`，
-并把来源 commit 写入 `engine/ENGINE_SHA`。需要本地调 parser 时，请在 CBM
-上游或本地 checkout 中改动后再重新运行同步脚本，不要把大体积源码塞进本仓库。
+并把来源 commit 写入 `engine/ENGINE_SHA`。
+
+aka 侧需要临时补齐但尚未进入 CBM 上游的修复，放在
+`engine/patches/codebase-memory-mcp/*.patch`。同步脚本会在构建前按文件名顺序
+应用这些补丁；`engine/ENGINE_SHA` 始终保持为官方 CBM base commit。需要本地调
+parser 时，请在 CBM 上游或本地 checkout 中改动后再重新运行同步脚本，不要把
+大体积源码塞进本仓库。
