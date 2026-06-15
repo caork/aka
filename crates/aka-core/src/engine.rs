@@ -42,6 +42,8 @@ mod route_consumer_synth;
 mod route_django_synth;
 mod route_realtime_synth;
 mod route_shape;
+mod route_shape_java;
+mod route_shape_python;
 mod route_spring_functional_synth;
 mod source_scan;
 mod tool_synth;
