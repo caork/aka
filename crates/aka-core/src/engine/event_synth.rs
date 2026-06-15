@@ -23,6 +23,7 @@ pub(super) struct SynthEventEndpoint {
     node_id: String,
     file_path: String,
     strategy: String,
+    metadata: BTreeMap<String, String>,
 }
 
 impl SynthEvent {
@@ -74,6 +75,7 @@ impl SynthEvent {
                 "event": self.name,
                 "strategy": endpoint.strategy,
                 "filePath": endpoint.file_path,
+                "metadata": endpoint.metadata,
             })),
         }
     }
@@ -117,6 +119,7 @@ pub(super) fn synthesize_events_from_sources(
                 node_id: detection.node_id,
                 file_path: file_path.clone(),
                 strategy: detection.strategy,
+                metadata: detection.metadata,
             };
             match detection.kind {
                 EventEndpointKind::Publisher => event.publishers.push(endpoint),
@@ -157,6 +160,24 @@ struct EventDetection {
     kind: EventEndpointKind,
     node_id: String,
     strategy: String,
+    metadata: BTreeMap<String, String>,
+}
+
+fn event_detection(
+    name: String,
+    bus: &str,
+    kind: EventEndpointKind,
+    node_id: String,
+    strategy: String,
+) -> EventDetection {
+    EventDetection {
+        name,
+        bus: bus.into(),
+        kind,
+        node_id,
+        strategy,
+        metadata: BTreeMap::new(),
+    }
 }
 
 fn extract_event_detections(
@@ -207,13 +228,15 @@ fn extract_jvm_event_detections(text: &str, nodes: &[&SynthNode]) -> Vec<EventDe
                 continue;
             }
             for event_name in event_names_from_listener(decorator, node) {
-                out.push(EventDetection {
-                    name: event_name,
-                    bus: "spring-application-event".into(),
-                    kind: EventEndpointKind::Handler,
-                    node_id: node.aka_id.clone(),
-                    strategy: format!("java-spring-{}", name.to_ascii_lowercase()),
-                });
+                let mut detection = event_detection(
+                    event_name,
+                    "spring-application-event",
+                    EventEndpointKind::Handler,
+                    node.aka_id.clone(),
+                    format!("java-spring-{}", name.to_ascii_lowercase()),
+                );
+                detection.metadata = spring_event_listener_metadata(decorator);
+                out.push(detection);
             }
         }
     }
@@ -247,6 +270,7 @@ fn extract_python_event_detections(text: &str, nodes: &[&SynthNode]) -> Vec<Even
                     kind: EventEndpointKind::Handler,
                     node_id: node.aka_id.clone(),
                     strategy: "python-signal-receiver".into(),
+                    metadata: BTreeMap::new(),
                 });
             }
         }
@@ -323,6 +347,7 @@ fn extract_call_event_literals(
                 kind,
                 node_id: node.aka_id.clone(),
                 strategy: strategy.into(),
+                metadata: BTreeMap::new(),
             });
         }
     }
@@ -351,6 +376,7 @@ fn extract_python_signal_sends(text: &str, nodes: &[&SynthNode]) -> Vec<EventDet
                     kind: EventEndpointKind::Publisher,
                     node_id: node.aka_id.clone(),
                     strategy: strategy.into(),
+                    metadata: BTreeMap::new(),
                 });
             }
         }
@@ -378,11 +404,41 @@ fn extract_python_signal_definitions(text: &str, nodes: &[&SynthNode]) -> Vec<Ev
                 kind: EventEndpointKind::Publisher,
                 node_id: node.aka_id.clone(),
                 strategy: "python-signal-definition".into(),
+                metadata: BTreeMap::new(),
             });
             offset = start + marker.len();
         }
     }
     out
+}
+
+fn spring_event_listener_metadata(decorator: &str) -> BTreeMap<String, String> {
+    let mut metadata = BTreeMap::new();
+    let Some(open) = decorator.find('(') else {
+        return metadata;
+    };
+    let close = find_matching_paren(decorator, open).unwrap_or(decorator.len());
+    let args = &decorator[open + 1..close];
+    for key in ["condition", "phase"] {
+        if let Some(value) = annotation_value(args, key) {
+            metadata.insert(key.into(), value);
+        }
+    }
+    metadata
+}
+
+fn annotation_value(args: &str, expected: &str) -> Option<String> {
+    for part in split_top_level_commas(args) {
+        let (key, value) = part.split_once('=')?;
+        if !key.trim().ends_with(expected) {
+            continue;
+        }
+        return event_name_literals(value)
+            .into_iter()
+            .next()
+            .or_else(|| Some(value.trim().trim_matches('"').to_string()));
+    }
+    None
 }
 
 fn receiver_ident_before(text: &str, dot_start: usize) -> Option<String> {

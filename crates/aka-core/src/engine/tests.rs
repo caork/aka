@@ -2,6 +2,7 @@ use super::*;
 use std::collections::BTreeSet;
 
 mod semantic_messaging;
+mod semantic_events;
 
 fn test_conn() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
