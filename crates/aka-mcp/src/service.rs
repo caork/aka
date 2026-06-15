@@ -288,6 +288,16 @@ pub struct ToolMapParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GraphqlMapParams {
+    /// Repository name. Omit when only one indexed repository exists.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Optional GraphQL operation substring, for example order or createOrder.
+    #[serde(default)]
+    pub operation: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ApiImpactParams {
     /// Repository name. Omit when only one indexed repository exists.
     #[serde(default)]
@@ -497,6 +507,17 @@ impl AkaMcpServer {
         Parameters(p): Parameters<ToolMapParams>,
     ) -> Result<CallToolResult, McpError> {
         self.run(move |b| ops::tool_map(b, p.repo.as_deref(), p.tool.as_deref()))
+            .await
+    }
+
+    #[tool(
+        description = "Show GraphQL operations: query/mutation/subscription/field nodes, resolver files, handlers, and linked execution flows. Use before editing GraphQL resolvers or schema-facing API behavior."
+    )]
+    pub async fn graphql_map(
+        &self,
+        Parameters(p): Parameters<GraphqlMapParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(move |b| ops::graphql_map(b, p.repo.as_deref(), p.operation.as_deref()))
             .await
     }
 

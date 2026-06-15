@@ -5,8 +5,8 @@ use std::sync::Arc;
 use aka_mcp::backend::{Backend, RepoInfo, SearchHit, SymbolRef};
 use aka_mcp::service::{
     AkaMcpServer, AnalyzeParams, ApiImpactParams, AugmentParams, CodeSearchParams,
-    DetectChangesParams, ImpactParams, QueryParams, ReferencesParams, RouteMapParams, SymbolParams,
-    ToolMapParams,
+    DetectChangesParams, GraphqlMapParams, ImpactParams, QueryParams, ReferencesParams,
+    RouteMapParams, SymbolParams, ToolMapParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -548,6 +548,31 @@ async fn tool_map_shape() {
         "handle_request"
     );
     assert_eq!(tool["flows"].as_array().unwrap()[0], "main → write_output");
+}
+
+#[tokio::test]
+async fn graphql_map_shape() {
+    let res = server()
+        .graphql_map(Parameters(GraphqlMapParams {
+            repo: Some("fixture".into()),
+            operation: Some("order".into()),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["total"], 1);
+    let operation = &v["operations"].as_array().unwrap()[0];
+    assert_eq!(operation["name"], "order");
+    assert_eq!(operation["operationType"], "query");
+    assert_eq!(operation["filePath"], "src/graphql/schema.rs");
+    assert_eq!(
+        operation["handlers"].as_array().unwrap()[0]["name"],
+        "handle_request"
+    );
+    assert_eq!(
+        operation["flows"].as_array().unwrap()[0],
+        "main → read_file"
+    );
 }
 
 #[tokio::test]

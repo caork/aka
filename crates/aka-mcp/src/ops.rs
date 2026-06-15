@@ -9,8 +9,8 @@ use serde::Serialize;
 
 use crate::backend::{
     Backend, ChangeDetection, ChangedRange, ChangedSymbol, CodeLineMatch, CodeSearchHit,
-    DirectoryCount, ImpactDirection, ProcessHit, RepoInfo, RepoProgress, RouteConsumer,
-    RouteMapEntry, SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
+    DirectoryCount, GraphqlMapEntry, ImpactDirection, ProcessHit, RepoInfo, RepoProgress,
+    RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
 };
 
 /// 检索命中（短字段名版）。
@@ -529,6 +529,39 @@ pub struct ToolMapOut {
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct GraphqlOut {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "operationType")]
+    pub operation_type: String,
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    pub handlers: Vec<HitOut>,
+    pub flows: Vec<String>,
+}
+
+impl From<GraphqlMapEntry> for GraphqlOut {
+    fn from(g: GraphqlMapEntry) -> Self {
+        Self {
+            id: g.id,
+            name: g.name,
+            operation_type: g.operation_type,
+            file_path: g.file_path,
+            handlers: g.handlers.into_iter().map(Into::into).collect(),
+            flows: g.flows,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct GraphqlMapOut {
+    pub operations: Vec<GraphqlOut>,
+    pub total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ShapeConsumerOut {
     pub name: String,
     #[serde(rename = "filePath")]
@@ -939,6 +972,28 @@ pub fn tool_map(
     });
     Ok(ToolMapOut {
         tools,
+        total,
+        message,
+    })
+}
+
+pub fn graphql_map(
+    b: &dyn Backend,
+    repo: Option<&str>,
+    operation: Option<&str>,
+) -> anyhow::Result<GraphqlMapOut> {
+    let operations: Vec<GraphqlOut> = b
+        .graphql_map(repo, operation)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let total = operations.len();
+    let message = (total == 0).then(|| match operation {
+        Some(operation) => format!("No GraphQL operations matching {operation:?}"),
+        None => "No GraphQL operations found.".to_string(),
+    });
+    Ok(GraphqlMapOut {
+        operations,
         total,
         message,
     })

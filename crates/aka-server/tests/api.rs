@@ -151,6 +151,19 @@ async fn route_tool_shape_and_api_impact_endpoints() {
 
     let res = app()
         .oneshot(post_json(
+            "/api/graphql-map",
+            json!({ "repo": "fixture", "operation": "order" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["operations"][0]["name"], "order");
+    assert_eq!(v["operations"][0]["operationType"], "query");
+    assert_eq!(v["operations"][0]["handlers"][0]["name"], "handle_request");
+
+    let res = app()
+        .oneshot(post_json(
             "/api/shape-check",
             json!({ "repo": "fixture", "route": "config" }),
         ))

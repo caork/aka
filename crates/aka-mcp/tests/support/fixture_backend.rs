@@ -18,8 +18,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use aka_mcp::{
     Backend, ChangeDetection, ChangedRange, ChangedSymbol, CodeLineMatch, CodeSearchHit,
-    CodeSearchResult, DirectoryCount, ProcessHit, QueryEnrichment, RepoInfo, RouteConsumer,
-    RouteMapEntry, SearchHit, SymbolRef, ToolMapEntry,
+    CodeSearchResult, DirectoryCount, GraphqlMapEntry, ProcessHit, QueryEnrichment, RepoInfo,
+    RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, ToolMapEntry,
 };
 
 #[derive(Debug, Clone)]
@@ -222,6 +222,31 @@ fn fixture_tools(repo: Option<&str>, tool: Option<&str>) -> Vec<ToolMapEntry> {
     [entry]
         .into_iter()
         .filter(|t| tool.is_none_or(|needle| t.name.contains(needle)))
+        .collect()
+}
+
+fn fixture_graphql(repo: Option<&str>, operation: Option<&str>) -> Vec<GraphqlMapEntry> {
+    if repo.is_some_and(|r| r != "fixture") {
+        return Vec::new();
+    }
+    let handler = NODES
+        .iter()
+        .find(|n| n.name == "handle_request")
+        .map(|n| FixtureBackend::hit(n, 1.0, false))
+        .into_iter()
+        .collect();
+    let entry = GraphqlMapEntry {
+        id: "fixture:graphql:order".into(),
+        name: "order".into(),
+        operation_type: "query".into(),
+        file_path: "src/graphql/schema.rs".into(),
+        handlers: handler,
+        flows: vec!["main → read_file".into()],
+        properties: None,
+    };
+    [entry]
+        .into_iter()
+        .filter(|g| operation.is_none_or(|needle| g.name.contains(needle)))
         .collect()
 }
 
@@ -537,6 +562,14 @@ impl Backend for FixtureBackend {
         tool: Option<&str>,
     ) -> anyhow::Result<Vec<ToolMapEntry>> {
         Ok(fixture_tools(repo, tool))
+    }
+
+    fn graphql_map(
+        &self,
+        repo: Option<&str>,
+        operation: Option<&str>,
+    ) -> anyhow::Result<Vec<GraphqlMapEntry>> {
+        Ok(fixture_graphql(repo, operation))
     }
 
     fn processes_of(&self, repo: Option<&str>, node_id: &str) -> anyhow::Result<Vec<ProcessHit>> {

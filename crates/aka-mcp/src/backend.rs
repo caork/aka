@@ -285,6 +285,20 @@ pub struct ToolMapEntry {
     pub properties: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct GraphqlMapEntry {
+    pub id: String,
+    pub name: String,
+    pub operation_type: String,
+    pub file_path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handlers: Vec<SearchHit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flows: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Value>,
+}
+
 /// 后台导入 / 更新任务的实时进度。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoProgress {
@@ -558,6 +572,15 @@ pub trait Backend: Send + Sync + 'static {
     ) -> anyhow::Result<Vec<ToolMapEntry>> {
         let _ = (repo, tool);
         anyhow::bail!("tool_map not supported by this backend")
+    }
+
+    fn graphql_map(
+        &self,
+        repo: Option<&str>,
+        operation: Option<&str>,
+    ) -> anyhow::Result<Vec<GraphqlMapEntry>> {
+        let _ = (repo, operation);
+        anyhow::bail!("graphql_map not supported by this backend")
     }
 
     /// 图 LOD 快照（aka-graph `LodGraph` 的 JSON 形状），给可视化用。

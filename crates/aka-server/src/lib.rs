@@ -76,6 +76,7 @@ pub fn router(backend: Arc<dyn Backend>) -> Router {
         .route("/api/detect-changes", post(detect_changes))
         .route("/api/route-map", post(route_map))
         .route("/api/tool-map", post(tool_map))
+        .route("/api/graphql-map", post(graphql_map))
         .route("/api/shape-check", post(shape_check))
         .route("/api/api-impact", post(api_impact))
         .route("/api/search/code", post(search_code))
@@ -292,6 +293,14 @@ pub struct ToolMapRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GraphqlMapRequest {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub operation: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ApiImpactRequest {
     #[serde(default)]
     pub repo: Option<String>,
@@ -391,6 +400,16 @@ async fn tool_map(
 ) -> Result<Json<ops::ToolMapOut>, ApiError> {
     run(b, move |b| {
         ops::tool_map(b, req.repo.as_deref(), req.tool.as_deref())
+    })
+    .await
+}
+
+async fn graphql_map(
+    State(b): State<AppState>,
+    Json(req): Json<GraphqlMapRequest>,
+) -> Result<Json<ops::GraphqlMapOut>, ApiError> {
+    run(b, move |b| {
+        ops::graphql_map(b, req.repo.as_deref(), req.operation.as_deref())
     })
     .await
 }

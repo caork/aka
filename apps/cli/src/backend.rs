@@ -31,9 +31,9 @@ use aka_core::{
 use aka_graph::{Adjacency, GraphStore, NodeRow};
 use aka_mcp::{
     backend::dedup_symbol_refs, Backend, ChangeDetection, ChangedRange, ChangedSymbol,
-    CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, ImpactDirection, ProcessHit,
-    QueryEnrichment, RepoInfo, RepoProgress, RepoSettingsUpdate, RouteConsumer, RouteMapEntry,
-    SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
+    CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, GraphqlMapEntry,
+    ImpactDirection, ProcessHit, QueryEnrichment, RepoInfo, RepoProgress, RepoSettingsUpdate,
+    RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
 };
 use aka_search::SearchIndex;
 use git2::{
@@ -2381,6 +2381,61 @@ impl Backend for AkaBackend {
             }
         }
         out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        Ok(out)
+    }
+
+    fn graphql_map(
+        &self,
+        repo: Option<&str>,
+        operation: Option<&str>,
+    ) -> Result<Vec<GraphqlMapEntry>> {
+        let mut out = Vec::new();
+        for handle in self.targets(repo)? {
+            let store = handle.store.lock().expect("store lock");
+            for row in store.nodes_by_label("GraphQL", operation, 500)? {
+                let handlers = store
+                    .incoming_linked_nodes(row.rowid, &["HANDLES_GRAPHQL"])?
+                    .into_iter()
+                    .map(|linked| row_to_hit(&linked.node, 1.0))
+                    .collect::<Vec<_>>();
+                let mut flows = Vec::new();
+                for p in store.entry_processes_of_node(row.rowid)? {
+                    flows.push(p.name);
+                }
+                if flows.is_empty() {
+                    for p in store.processes_of_node(row.rowid)? {
+                        flows.push(p.name);
+                    }
+                }
+                flows.sort();
+                flows.dedup();
+                out.push(GraphqlMapEntry {
+                    id: row.id.clone(),
+                    name: row
+                        .name
+                        .clone()
+                        .or_else(|| string_prop(&row.props, "operationName"))
+                        .or_else(|| string_prop(&row.props, "name"))
+                        .unwrap_or_else(|| row.id.clone()),
+                    operation_type: string_prop(&row.props, "operationType")
+                        .unwrap_or_else(|| "query".into()),
+                    file_path: row
+                        .file_path
+                        .clone()
+                        .or_else(|| string_prop(&row.props, "filePath"))
+                        .unwrap_or_default(),
+                    handlers,
+                    flows,
+                    properties: Some(row.props.clone()),
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            a.operation_type
+                .cmp(&b.operation_type)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
+        });
         Ok(out)
     }
 

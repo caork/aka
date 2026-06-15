@@ -1,6 +1,7 @@
 //! aka-mcp — rmcp MCP 服务（stdio），工具：
 //! `list_repos` / `query` / `search_code` / `context` / `find_definition`
-//! / `search_references` / `impact` / `analyze` / `augment`。
+//! / `search_references` / `impact` / `route_map` / `tool_map`
+//! / `graphql_map` / `analyze` / `augment`。
 //!
 //! 数据层经 [`backend::Backend`] trait 解耦：真实实现由 CLI / 桌面端注入。
 
@@ -21,9 +22,9 @@ pub use aka_core::{
 };
 pub use backend::{
     Backend, ChangeDetection, ChangedRange, ChangedSymbol, CodeLineMatch, CodeSearchHit,
-    CodeSearchResult, DirectoryCount, ImpactDirection, ProcessHit, QueryEnrichment, RepoInfo,
-    RepoProgress, RepoSettingsUpdate, RouteConsumer, RouteMapEntry, SearchHit, SymbolRef,
-    SymbolSelector, ToolMapEntry,
+    CodeSearchResult, DirectoryCount, GraphqlMapEntry, ImpactDirection, ProcessHit,
+    QueryEnrichment, RepoInfo, RepoProgress, RepoSettingsUpdate, RouteConsumer, RouteMapEntry,
+    SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
 };
 pub use service::AkaMcpServer;
 
