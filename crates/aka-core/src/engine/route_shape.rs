@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use super::route_shape_java::extract_java_map_response_keys;
+use super::route_shape_java::{
+    extract_java_map_response_keys, extract_java_response_model_keys_for_file,
+};
 use super::route_shape_python::{
     extract_python_response_model_keys, extract_python_response_model_keys_for_file,
 };
@@ -245,7 +247,12 @@ pub(super) fn extract_response_keys_for_file(
 ) -> Vec<String> {
     extract_response_keys_with_extra(
         text,
-        extract_python_response_model_keys_for_file(repo, file_path, text),
+        extract_python_response_model_keys_for_file(repo, file_path, text)
+            .into_iter()
+            .chain(extract_java_response_model_keys_for_file(
+                repo, file_path, text,
+            ))
+            .collect(),
     )
 }
 

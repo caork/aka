@@ -804,6 +804,112 @@ public class OrderWorker {
 }
 
 #[test]
+fn extracts_spring_imported_dto_response_shape_keys() {
+    let repo = temp_repo("java-spring-imported-dto-response-shapes");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/workers")).unwrap();
+    std::fs::write(
+        repo.join("src/main/java/com/example/orders/OrderDto.java"),
+        r#"package com.example.orders;
+
+public record OrderDto(String id, String status, int total, String error) {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/main/java/com/example/orders/OrderController.java"),
+        r#"package com.example.orders;
+
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import com.example.orders.OrderDto;
+
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+    @GetMapping("/{id}")
+    public ResponseEntity<OrderDto> getOrder(String id) {
+        return ResponseEntity.ok(new OrderDto(id, "ok", 42, null));
+    }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/main/java/com/example/workers/OrderWorker.java"),
+        r#"package com.example.workers;
+
+import org.springframework.web.client.RestTemplate;
+
+public class OrderWorker {
+    private final RestTemplate restTemplate = new RestTemplate();
+
+    public String syncOrder(String id) {
+        OrderDto order = restTemplate.getForObject("http://orders/api/orders/" + id, OrderDto.class);
+        return order.status() + order.missing();
+    }
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Class",
+        "OrderController",
+        "com.example.orders.OrderController",
+        "src/main/java/com/example/orders/OrderController.java",
+        json!({
+            "decorators": ["@RestController", "@RequestMapping(\"/api/orders\")"],
+            "language": "java",
+        }),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Method",
+        "getOrder",
+        "com.example.orders.OrderController.getOrder",
+        "src/main/java/com/example/orders/OrderController.java",
+        json!({
+            "decorators": ["@GetMapping(\"/{id}\")"],
+            "language": "java",
+            "parent_class": "cbm:1:com.example.orders.OrderController",
+            "route_method": "GET",
+            "route_path": "/{id}",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "DEFINES_METHOD");
+    insert_node_props(
+        &conn,
+        3,
+        "Method",
+        "syncOrder",
+        "com.example.workers.OrderWorker.syncOrder",
+        "src/main/java/com/example/workers/OrderWorker.java",
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}")
+        .expect("spring route with imported DTO response shape");
+    assert!(route.response_keys.contains(&"id".to_string()));
+    assert!(route.response_keys.contains(&"status".to_string()));
+    assert!(route.response_keys.contains(&"total".to_string()));
+    assert!(route.error_keys.contains(&"error".to_string()));
+    assert_eq!(route.consumers.len(), 1);
+    assert!(route.consumers[0].keys.contains(&"status".to_string()));
+    assert!(route.consumers[0].keys.contains(&"missing".to_string()));
+}
+
+#[test]
 fn links_java_builder_http_consumers_to_spring_routes() {
     let repo = temp_repo("java-builder-route-consumers");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
