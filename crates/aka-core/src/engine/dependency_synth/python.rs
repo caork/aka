@@ -20,7 +20,9 @@ pub(super) fn detect_python_dependency_edges(
     }
     let mut out = Vec::new();
     for call in find_python_dependency_calls(text) {
-        let Some(source) = node_at_offset(text, nodes, call.start) else {
+        let Some(source) = node_at_offset(text, nodes, call.start)
+            .or_else(|| next_python_function_node(text, nodes, call.start))
+        else {
             continue;
         };
         let Some(target) = lookup.resolve_python_callable(file_path, &call.callable) else {
@@ -62,6 +64,53 @@ pub(super) fn detect_python_dependency_edges(
         }
     }
     out
+}
+
+fn next_python_function_node<'a>(
+    text: &str,
+    nodes: &[&'a SynthNode],
+    offset: usize,
+) -> Option<&'a SynthNode> {
+    let line = line_number_at_offset(text, offset);
+    let node = nodes
+        .iter()
+        .copied()
+        .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+        .filter(|node| node.start_line_key() >= line)
+        .min_by_key(|node| node.start_line_key())?;
+    dependency_call_is_in_decorator_window(text, offset, node.start_line_key()).then_some(node)
+}
+
+fn dependency_call_is_in_decorator_window(text: &str, offset: usize, node_line: i64) -> bool {
+    if node_line <= 1 {
+        return false;
+    }
+    let call_line = line_number_at_offset(text, offset);
+    if call_line >= node_line {
+        return false;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let from = call_line.saturating_sub(1) as usize;
+    let to = (node_line.saturating_sub(1) as usize).min(lines.len());
+    from < to
+        && lines[from..to].iter().all(|line| {
+            let trimmed = line.trim();
+            trimmed.is_empty() || trimmed.starts_with('@') || trimmed.starts_with("dependencies=")
+        })
+}
+
+fn line_number_at_offset(text: &str, offset: usize) -> i64 {
+    let bounded = offset.min(text.len());
+    let mut line = 1i64;
+    for (idx, ch) in text.char_indices() {
+        if idx >= bounded {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    line
 }
 
 #[derive(Debug, Clone)]

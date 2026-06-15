@@ -661,6 +661,107 @@ def get_order(id: str, user = Depends(get_current_user)):
 }
 
 #[test]
+fn synthesizes_fastapi_decorator_dependencies_for_processes() {
+    let repo = temp_repo("fastapi-decorator-depends");
+    std::fs::create_dir_all(repo.join("api")).unwrap();
+    std::fs::write(
+        repo.join("api/orders.py"),
+        r#"from fastapi import APIRouter, Depends
+
+router = APIRouter()
+
+def require_user():
+    return verify_token()
+
+def verify_token():
+    return "maya"
+
+@router.post("/orders", dependencies=[Depends(require_user)])
+def create_order():
+    return {"ok": True}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "require_user",
+        "api.orders.require_user",
+        "api/orders.py",
+        (5, 6),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "verify_token",
+        "api.orders.verify_token",
+        "api/orders.py",
+        (8, 9),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "create_order",
+        "api.orders.create_order",
+        "api/orders.py",
+        (12, 13),
+        json!({
+            "decorators": ["@router.post(\"/orders\", dependencies=[Depends(require_user)])"],
+            "language": "python",
+            "route_method": "POST",
+            "route_path": "/orders",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "CALLS");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "DEPENDS_ON"
+            && edge.source_id == "cbm:3:api.orders.create_order"
+            && edge.target_id == "cbm:1:api.orders.require_user"
+            && edge
+                .evidence
+                .as_ref()
+                .and_then(|v| v.get("kind"))
+                .and_then(Value::as_str)
+                == Some("python-fastapi-dependency")
+    }));
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "CALLS"
+            && edge.source_id == "cbm:3:api.orders.create_order"
+            && edge.target_id == "cbm:1:api.orders.require_user"
+            && edge
+                .evidence
+                .as_ref()
+                .and_then(|v| v.get("kind"))
+                .and_then(Value::as_str)
+                == Some("fastapi-depends")
+    }));
+
+    let process = synth
+        .processes
+        .iter()
+        .find(|process| process.name == "create_order → verify_token")
+        .expect("decorator dependency should seed route dependency process");
+    assert_eq!(
+        process
+            .steps
+            .iter()
+            .map(|step| step.name.as_str())
+            .collect::<Vec<_>>(),
+        ["create_order", "require_user", "verify_token"]
+    );
+}
+
+#[test]
 fn process_cap_uses_whole_graph_symbol_count_like_gitnexus() {
     let conn = test_conn();
     let mut id = 1_i64;
