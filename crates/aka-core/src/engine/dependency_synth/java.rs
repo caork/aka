@@ -1,5 +1,10 @@
+use std::collections::HashSet;
+
+use serde_json::json;
+
 use super::super::{
-    find_matching_paren, is_ident_continue, skip_ws, split_top_level_commas, EdgeRec, SynthNode,
+    find_call_args, find_matching_paren, is_ident_continue, node_at_offset, skip_ws,
+    split_top_level_commas, stable_hash, EdgeRec, SynthNode,
 };
 use super::dependency_edge;
 use super::lookup::{is_meaningful_java_type, simple_type_name, NodeLookup};
@@ -9,11 +14,17 @@ pub(super) fn detect_java_dependency_edges(
     file_path: &str,
     nodes: &[&SynthNode],
     lookup: &NodeLookup<'_>,
+    existing_call_pairs: &HashSet<(String, String)>,
 ) -> Vec<EdgeRec> {
     if !is_java_like_file(file_path, nodes) {
         return Vec::new();
     }
     let mut out = Vec::new();
+    out.extend(detect_java_direct_call_edges(
+        text,
+        nodes,
+        existing_call_pairs,
+    ));
     for class_node in nodes
         .iter()
         .copied()
@@ -61,6 +72,134 @@ pub(super) fn detect_java_dependency_edges(
         }
     }
     out
+}
+
+fn detect_java_direct_call_edges(
+    text: &str,
+    nodes: &[&SynthNode],
+    existing_call_pairs: &HashSet<(String, String)>,
+) -> Vec<EdgeRec> {
+    let methods = java_file_methods(nodes);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for target in methods {
+        for call in find_call_args(text, target.name) {
+            if !java_direct_call_site_ok(text, call.start, target.name) {
+                continue;
+            }
+            let Some(source) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            if source.aka_id == target.node.aka_id
+                || existing_call_pairs
+                    .contains(&(source.aka_id.clone(), target.node.aka_id.clone()))
+            {
+                continue;
+            }
+            let key = (source.aka_id.clone(), target.node.aka_id.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            out.push(EdgeRec {
+                id: format!(
+                    "java-direct-call:{:016x}",
+                    stable_hash(&format!(
+                        "{}|{}|{}",
+                        source.aka_id, target.node.aka_id, target.name
+                    ))
+                ),
+                source_id: source.aka_id.clone(),
+                target_id: target.node.aka_id.clone(),
+                edge_type: "CALLS".into(),
+                confidence: 0.68,
+                reason: "aka Java direct call synthesis".into(),
+                step: None,
+                evidence: Some(json!({
+                    "source": "aka-cbm-synth",
+                    "kind": "java-direct-call",
+                    "strategy": "java-same-file-direct-call",
+                    "callable": target.name,
+                })),
+            });
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy)]
+struct JavaMethodNode<'a> {
+    name: &'a str,
+    node: &'a SynthNode,
+}
+
+fn java_file_methods<'a>(nodes: &[&'a SynthNode]) -> Vec<JavaMethodNode<'a>> {
+    let mut out: Vec<_> = nodes
+        .iter()
+        .copied()
+        .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+        .filter(|node| is_java_method_name(&node.name))
+        .map(|node| JavaMethodNode {
+            name: node.name.as_str(),
+            node,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.name
+            .cmp(b.name)
+            .then_with(|| a.node.aka_id.cmp(&b.node.aka_id))
+    });
+    out.dedup_by(|a, b| a.name == b.name && a.node.aka_id == b.node.aka_id);
+    out
+}
+
+fn java_direct_call_site_ok(text: &str, start: usize, name: &str) -> bool {
+    let line_start = text[..start].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+    let prefix = text[line_start..start].trim_start();
+    if prefix.starts_with('@') {
+        return false;
+    }
+    if declaration_prefix_before_name(prefix) {
+        return false;
+    }
+    let before = text[..start].chars().rev().find(|ch| !ch.is_whitespace());
+    if matches!(before, Some('@')) {
+        return false;
+    }
+    let after = text[start + name.len()..]
+        .chars()
+        .find(|ch| !ch.is_whitespace());
+    after == Some('(')
+}
+
+fn declaration_prefix_before_name(prefix: &str) -> bool {
+    let tokens: Vec<_> = prefix
+        .split_whitespace()
+        .filter(|token| !token.starts_with('@'))
+        .collect();
+    tokens.iter().any(|token| {
+        matches!(
+            token.trim_matches(','),
+            "public"
+                | "protected"
+                | "private"
+                | "static"
+                | "final"
+                | "abstract"
+                | "synchronized"
+                | "native"
+                | "strictfp"
+                | "default"
+        )
+    }) || tokens.len() >= 2
+}
+
+fn is_java_method_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
 #[derive(Debug, Clone)]

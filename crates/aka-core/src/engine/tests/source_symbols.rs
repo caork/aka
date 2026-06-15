@@ -82,6 +82,81 @@ class OrderService {
 }
 
 #[test]
+fn synthesizes_java_direct_call_edges_for_fallback_source_symbols() {
+    let repo = temp_repo("java-source-symbol-call-fallback");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/OrderWorkflow.java";
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+class OrderWorkflow {
+    void createOrder() {
+        validateOrder();
+    }
+
+    void validateOrder() {
+        persistOrder();
+    }
+
+    void persistOrder() {}
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", file]);
+
+    let conn = test_conn();
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+
+    let create = synth
+        .source_symbols
+        .iter()
+        .find(|symbol| symbol.node().qn == "com.example.orders.OrderWorkflow.createOrder")
+        .expect("createOrder fallback symbol")
+        .node()
+        .aka_id
+        .clone();
+    let validate = synth
+        .source_symbols
+        .iter()
+        .find(|symbol| symbol.node().qn == "com.example.orders.OrderWorkflow.validateOrder")
+        .expect("validateOrder fallback symbol")
+        .node()
+        .aka_id
+        .clone();
+    let persist = synth
+        .source_symbols
+        .iter()
+        .find(|symbol| symbol.node().qn == "com.example.orders.OrderWorkflow.persistOrder")
+        .expect("persistOrder fallback symbol")
+        .node()
+        .aka_id
+        .clone();
+
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "CALLS" && edge.source_id == create && edge.target_id == validate
+    }));
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "CALLS" && edge.source_id == validate && edge.target_id == persist
+    }));
+    assert!(
+        synth
+            .processes
+            .iter()
+            .any(|process| { process.name.as_str() == "createOrder → persistOrder" }),
+        "processes: {:?}",
+        synth
+            .processes
+            .iter()
+            .map(|process| process.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn synthesizes_python_source_symbols_when_cbm_misses_python_nodes() {
     let repo = temp_repo("python-source-symbol-fallback");
     run_git(&repo, &["init"]);

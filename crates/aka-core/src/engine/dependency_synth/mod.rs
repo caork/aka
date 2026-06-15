@@ -34,6 +34,7 @@ pub(super) fn synthesize_dependency_edges_from_sources(
             &file_path,
             &file_nodes,
             &lookup,
+            existing_call_pairs,
         ));
         out.extend(detect_python_dependency_edges(
             &text,
