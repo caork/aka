@@ -29,6 +29,7 @@ mod job_synth;
 mod persistence_synth;
 mod policy_synth;
 mod property_synth;
+mod resource_synth;
 mod source_scan;
 mod topic_synth;
 use cache_synth::{synthesize_caches_from_sources, SynthCache};
@@ -39,6 +40,7 @@ use policy_synth::{synthesize_policies_from_sources, SynthPolicy};
 #[cfg(test)]
 use property_synth::extract_python_class_properties;
 use property_synth::{synthesize_python_properties, SynthProperty};
+use resource_synth::{synthesize_resources_from_sources, SynthResource};
 use source_scan::{
     find_call_args, find_matching_paren, is_ident_continue, is_noisy_source_path, node_at_offset,
     nodes_by_file, pick_handler_node, read_repo_text, skip_ws, split_top_level_commas, stable_hash,
@@ -802,6 +804,12 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for resource in &synth.resources {
+        let node = resource.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     for node in synth.persistence.node_recs() {
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
@@ -892,6 +900,7 @@ fn export_edges(
         .chain(synth.caches.iter().flat_map(SynthCache::edge_recs))
         .chain(synth.events.iter().flat_map(SynthEvent::edge_recs))
         .chain(synth.policies.iter().flat_map(SynthPolicy::edge_recs))
+        .chain(synth.resources.iter().flat_map(SynthResource::edge_recs))
         .chain(synth.persistence.edge_recs())
         .chain(synth.edges.iter().cloned())
     {
@@ -1152,6 +1161,7 @@ struct SynthGraph {
     caches: Vec<SynthCache>,
     events: Vec<SynthEvent>,
     policies: Vec<SynthPolicy>,
+    resources: Vec<SynthResource>,
     persistence: SynthPersistenceGraph,
     properties: Vec<SynthProperty>,
     edges: Vec<EdgeRec>,
@@ -1663,6 +1673,13 @@ fn synthesize_graph_with_progress(
     let policies = synthesize_policies_from_sources(repo, &nodes);
     emit_phase(
         on_event,
+        "codebase-memory:export-artifacts:synthesize:resources",
+        0,
+        0,
+    );
+    let resources = synthesize_resources_from_sources(repo, &nodes);
+    emit_phase(
+        on_event,
         "codebase-memory:export-artifacts:synthesize:persistence",
         0,
         0,
@@ -1679,6 +1696,7 @@ fn synthesize_graph_with_progress(
         caches,
         events,
         policies,
+        resources,
         persistence,
         properties,
         edges: synthetic_edges,
@@ -7916,6 +7934,103 @@ def read_order(user=Security(require_user, scopes=["orders:read"])):
             .find(|policy| policy.name == "orders:read")
             .expect("fastapi security scope");
         assert_eq!(scope.policy_type, "scope");
+    }
+
+    #[test]
+    fn synthesizes_python_external_http_resources() {
+        let repo = temp_repo("python-resources");
+        std::fs::write(
+            repo.join("payments.py"),
+            r#"import requests
+
+def charge(order_id):
+    response = requests.post(f"https://payments.example.com/v1/orders/{order_id}/charge")
+    return response.json()
+"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "charge",
+            "payments.charge",
+            "payments.py",
+            (3, 5),
+            json!({
+                "language": "python",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let resource = synth
+            .resources
+            .iter()
+            .find(|resource| {
+                resource.url == "https://payments.example.com/v1/orders/{param}/charge"
+            })
+            .expect("external payment resource");
+        assert_eq!(resource.resource_type, "http");
+        assert_eq!(resource.callers.len(), 1);
+        let edge_types: Vec<_> = resource
+            .edge_recs()
+            .into_iter()
+            .map(|edge| edge.edge_type)
+            .collect();
+        assert!(edge_types.contains(&"HTTP_CALLS".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_java_external_http_resources() {
+        let repo = temp_repo("java-resources");
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/inventory")).unwrap();
+        let file = "src/main/java/com/example/inventory/InventoryClient.java";
+        std::fs::write(
+            repo.join(file),
+            r#"package com.example.inventory;
+
+import org.springframework.web.client.RestTemplate;
+
+class InventoryClient {
+    private final RestTemplate restTemplate = new RestTemplate();
+
+    String reserve(String sku) {
+        return restTemplate.getForObject("https://inventory.example.com/api/stock/" + sku, String.class);
+    }
+}"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "reserve",
+            "com.example.inventory.InventoryClient.reserve",
+            file,
+            (8, 10),
+            json!({
+                "language": "java",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let resource = synth
+            .resources
+            .iter()
+            .find(|resource| resource.url == "https://inventory.example.com/api/stock/")
+            .expect("external inventory resource");
+        assert_eq!(resource.callers.len(), 1);
+        let edge = resource
+            .edge_recs()
+            .into_iter()
+            .next()
+            .expect("http call edge");
+        assert_eq!(
+            edge.source_id,
+            "cbm:1:com.example.inventory.InventoryClient.reserve"
+        );
     }
 
     #[test]

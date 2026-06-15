@@ -742,6 +742,9 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "eventSource");
     push_prop_str(&mut parts, &node.properties, "policyType");
     push_prop_str(&mut parts, &node.properties, "policySource");
+    push_prop_str(&mut parts, &node.properties, "url");
+    push_prop_str(&mut parts, &node.properties, "resourceType");
+    push_prop_str(&mut parts, &node.properties, "resourceSource");
     push_prop_str(&mut parts, &node.properties, "route");
     push_prop_str(&mut parts, &node.properties, "tool");
     push_prop_array(&mut parts, &node.properties, "trace");
@@ -941,6 +944,18 @@ mod tests {
         policy_props.insert("policyType".into(), Value::String("permission".into()));
         policy_props.insert("policySource".into(), Value::String("source-scan".into()));
 
+        let mut resource_props = Map::new();
+        resource_props.insert(
+            "name".into(),
+            Value::String("payments.example.com/v1/orders/{param}/charge".into()),
+        );
+        resource_props.insert(
+            "url".into(),
+            Value::String("https://payments.example.com/v1/orders/{param}/charge".into()),
+        );
+        resource_props.insert("resourceType".into(), Value::String("http".into()));
+        resource_props.insert("resourceSource".into(), Value::String("source-scan".into()));
+
         let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
         writer
             .add_nodes(
@@ -974,6 +989,11 @@ mod tests {
                         id: "policy:orders-view".into(),
                         label: "Policy".into(),
                         properties: policy_props,
+                    },
+                    NodeRec {
+                        id: "resource:payments-charge".into(),
+                        label: "Resource".into(),
+                        properties: resource_props,
                     },
                 ]
                 .into_iter(),
@@ -1013,5 +1033,10 @@ mod tests {
         let policy_hit = policy_hits.first().expect("policy search hit");
         assert_eq!(policy_hit.node_id, "policy:orders-view");
         assert_eq!(policy_hit.label, "Policy");
+
+        let resource_hits = index.search("payments charge http resource", 5).unwrap();
+        let resource_hit = resource_hits.first().expect("resource search hit");
+        assert_eq!(resource_hit.node_id, "resource:payments-charge");
+        assert_eq!(resource_hit.label, "Resource");
     }
 }
