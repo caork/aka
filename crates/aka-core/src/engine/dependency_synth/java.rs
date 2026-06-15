@@ -82,48 +82,78 @@ fn detect_java_direct_call_edges(
     let methods = java_file_methods(nodes);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
+    let mut context = JavaDirectCallContext {
+        text,
+        nodes,
+        existing_call_pairs,
+        seen: &mut seen,
+        out: &mut out,
+    };
     for target in methods {
         for call in find_call_args(text, target.name) {
-            if !java_direct_call_site_ok(text, call.start, target.name) {
-                continue;
-            }
-            let Some(source) = node_at_offset(text, nodes, call.start) else {
+            let Some(strategy) = java_direct_call_strategy(text, call.start, target.name) else {
                 continue;
             };
-            if source.aka_id == target.node.aka_id
-                || existing_call_pairs
-                    .contains(&(source.aka_id.clone(), target.node.aka_id.clone()))
-            {
+            context.push(target, call.start, strategy);
+        }
+        let receiver_callee = format!(".{}", target.name);
+        for call in find_call_args(text, &receiver_callee) {
+            let Some(strategy) = java_receiver_call_strategy(text, call.start + 1, target.name)
+            else {
                 continue;
-            }
-            let key = (source.aka_id.clone(), target.node.aka_id.clone());
-            if !seen.insert(key) {
-                continue;
-            }
-            out.push(EdgeRec {
-                id: format!(
-                    "java-direct-call:{:016x}",
-                    stable_hash(&format!(
-                        "{}|{}|{}",
-                        source.aka_id, target.node.aka_id, target.name
-                    ))
-                ),
-                source_id: source.aka_id.clone(),
-                target_id: target.node.aka_id.clone(),
-                edge_type: "CALLS".into(),
-                confidence: 0.68,
-                reason: "aka Java direct call synthesis".into(),
-                step: None,
-                evidence: Some(json!({
-                    "source": "aka-cbm-synth",
-                    "kind": "java-direct-call",
-                    "strategy": "java-same-file-direct-call",
-                    "callable": target.name,
-                })),
-            });
+            };
+            context.push(target, call.start, strategy);
         }
     }
     out
+}
+
+struct JavaDirectCallContext<'a, 'b> {
+    text: &'a str,
+    nodes: &'a [&'a SynthNode],
+    existing_call_pairs: &'a HashSet<(String, String)>,
+    seen: &'b mut HashSet<(String, String)>,
+    out: &'b mut Vec<EdgeRec>,
+}
+
+impl JavaDirectCallContext<'_, '_> {
+    fn push(&mut self, target: JavaMethodNode<'_>, call_start: usize, strategy: &'static str) {
+        let Some(source) = node_at_offset(self.text, self.nodes, call_start) else {
+            return;
+        };
+        if source.aka_id == target.node.aka_id
+            || self
+                .existing_call_pairs
+                .contains(&(source.aka_id.clone(), target.node.aka_id.clone()))
+        {
+            return;
+        }
+        let key = (source.aka_id.clone(), target.node.aka_id.clone());
+        if !self.seen.insert(key) {
+            return;
+        }
+        self.out.push(EdgeRec {
+            id: format!(
+                "java-direct-call:{:016x}",
+                stable_hash(&format!(
+                    "{}|{}|{}",
+                    source.aka_id, target.node.aka_id, target.name
+                ))
+            ),
+            source_id: source.aka_id.clone(),
+            target_id: target.node.aka_id.clone(),
+            edge_type: "CALLS".into(),
+            confidence: 0.68,
+            reason: "aka Java direct call synthesis".into(),
+            step: None,
+            evidence: Some(json!({
+                "source": "aka-cbm-synth",
+                "kind": "java-direct-call",
+                "strategy": strategy,
+                "callable": target.name,
+            })),
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -152,23 +182,49 @@ fn java_file_methods<'a>(nodes: &[&'a SynthNode]) -> Vec<JavaMethodNode<'a>> {
     out
 }
 
-fn java_direct_call_site_ok(text: &str, start: usize, name: &str) -> bool {
+fn java_direct_call_strategy(text: &str, start: usize, name: &str) -> Option<&'static str> {
     let line_start = text[..start].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
     let prefix = text[line_start..start].trim_start();
     if prefix.starts_with('@') {
-        return false;
+        return None;
     }
     if declaration_prefix_before_name(prefix) {
-        return false;
+        return None;
     }
     let before = text[..start].chars().rev().find(|ch| !ch.is_whitespace());
     if matches!(before, Some('@')) {
-        return false;
+        return None;
+    }
+    if matches!(before, Some('.')) {
+        return None;
     }
     let after = text[start + name.len()..]
         .chars()
         .find(|ch| !ch.is_whitespace());
-    after == Some('(')
+    (after == Some('(')).then_some("java-same-file-direct-call")
+}
+
+fn java_receiver_call_strategy(text: &str, name_start: usize, name: &str) -> Option<&'static str> {
+    java_receiver_before_dot(text, name_start)
+        .filter(|receiver| *receiver == "this")
+        .and_then(|_| {
+            let after = text[name_start + name.len()..]
+                .chars()
+                .find(|ch| !ch.is_whitespace());
+            (after == Some('(')).then_some("java-same-file-receiver-call")
+        })
+}
+
+fn java_receiver_before_dot(text: &str, name_start: usize) -> Option<&str> {
+    let dot = text[..name_start].rfind('.')?;
+    let before_dot = text[..dot].trim_end();
+    let receiver_end = before_dot.len();
+    let receiver_start = before_dot
+        .rfind(|ch: char| !(ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()))
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let receiver = &before_dot[receiver_start..receiver_end];
+    is_java_method_name(receiver).then_some(receiver)
 }
 
 fn declaration_prefix_before_name(prefix: &str) -> bool {
