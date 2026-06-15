@@ -310,6 +310,11 @@ class OrderBatchConfig {
     assert_eq!(job.name, "orders.import");
     assert_eq!(job.job_type, "spring-batch-job");
     assert_eq!(job.strategy, "java-spring-batch-job-bean");
+    assert!(job.edge_recs().iter().any(|edge| {
+        edge.edge_type == "USES_STEP"
+            && edge.source_id == job.id
+            && edge.target_id == "cbm:2:com.example.jobs.OrderBatchConfig.loadOrdersStep"
+    }));
 
     let step = synth
         .jobs

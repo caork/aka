@@ -14,12 +14,20 @@ pub(crate) struct SynthJob {
     pub(crate) strategy: String,
     pub(crate) process_ids: Vec<String>,
     pub(crate) triggers: Vec<SynthJobTrigger>,
+    pub(crate) step_refs: Vec<SynthJobStepRef>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct SynthJobTrigger {
     pub(crate) node_id: String,
     pub(crate) file_path: String,
+    pub(crate) strategy: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct SynthJobStepRef {
+    pub(crate) node_id: String,
+    pub(crate) step_name: String,
     pub(crate) strategy: String,
 }
 
@@ -102,6 +110,29 @@ impl SynthJob {
                     "jobType": self.job_type,
                     "strategy": trigger.strategy,
                     "filePath": trigger.file_path,
+                })),
+            });
+        }
+        for step_ref in &self.step_refs {
+            out.push(EdgeRec {
+                id: format!(
+                    "{}:step-ref:{:016x}",
+                    self.id,
+                    stable_hash(&format!("{}|{}", step_ref.node_id, step_ref.strategy))
+                ),
+                source_id: self.id.clone(),
+                target_id: step_ref.node_id.clone(),
+                edge_type: "USES_STEP".into(),
+                confidence: 0.66,
+                reason: "aka spring batch step synthesis".into(),
+                step: None,
+                evidence: Some(json!({
+                    "source": "aka-cbm-synth",
+                    "kind": "spring-batch-step-ref",
+                    "job": self.name,
+                    "jobType": self.job_type,
+                    "step": step_ref.step_name,
+                    "strategy": step_ref.strategy,
                 })),
             });
         }

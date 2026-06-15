@@ -67,7 +67,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 {"id":"...","sourceId":"...","targetId":"...","type":"CALLS","confidence":0.9,"reason":"...","step":1,"evidence":[{"kind":"...","weight":0.5}]}
 ```
 
-`type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/DEPENDS_ON/HTTP_CALLS/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/HANDLES_JOB/ENQUEUES_JOB/USES_CONFIG/HAS_TRANSACTION_BOUNDARY/MAPS_TO_TABLE/REPOSITORY_FOR/MIGRATES_TABLE/READS_TABLE/WRITES_TABLE/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
+`type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/DEPENDS_ON/HTTP_CALLS/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/HANDLES_JOB/ENQUEUES_JOB/USES_STEP/USES_CONFIG/HAS_TRANSACTION_BOUNDARY/MAPS_TO_TABLE/REPOSITORY_FOR/MIGRATES_TABLE/READS_TABLE/WRITES_TABLE/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
 
 应用语义相关边的当前消费语义：
 
@@ -77,6 +77,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 - `HANDLES_TOOL`：handler 符号/文件 → Tool。`tool_map` 用它列工具处理函数。
 - `HANDLES_COMMAND`：handler 符号/类 → Command。query/context/impact 会按普通定义节点和图边消费，用于识别运维脚本、管理命令和 CLI 入口的业务影响面。
 - `HANDLES_JOB` / `ENQUEUES_JOB`：Job handler → Job、业务方法/函数 → Job。query/context/impact 会按普通图边消费，用于识别 Spring scheduled/async、Celery/RQ/APScheduler 等后台任务及其触发者。
+- `USES_STEP`：Spring Batch Job → Step handler。query/context/impact 会按普通图边消费，用于识别批处理 Job 对 Step Bean 的编排依赖。
 - `DEPENDS_ON`：业务类/方法/函数 → 被依赖的类/接口/函数。adapter 从项目源码事实中合成，例如 Spring 构造/字段注入、`@Bean` 参数、FastAPI `Depends`/`Security`；测试源码会按 git/project source set 和构建配置声明的 test roots 排除。
 - `USES_CONFIG`：业务方法/类/模块 → Config。query/context/impact 会按普通图边消费，用于定位配置键、环境变量和 settings 变更影响的代码。
 - `HAS_TRANSACTION_BOUNDARY`：业务方法/函数 → Transaction。context/impact 会按普通图边消费，用于识别 Spring/Django 等服务的事务边界。
