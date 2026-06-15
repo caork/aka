@@ -138,15 +138,30 @@ fn extract_resource_detections(
         ("httpx.put", "python-httpx"),
         ("httpx.patch", "python-httpx"),
         ("httpx.delete", "python-httpx"),
+        ("aiohttp.request", "python-aiohttp"),
         (".getForObject", "java-resttemplate"),
         (".getForEntity", "java-resttemplate"),
         (".postForObject", "java-resttemplate"),
         (".postForEntity", "java-resttemplate"),
+        ("URI.create", "java-http-client"),
+        (".url", "java-okhttp"),
         (".exchange", "java-http-client"),
         (".uri", "java-webclient"),
     ] {
         out.extend(extract_call_url_detections(text, nodes, callee, strategy));
     }
+    out.extend(extract_contextual_http_client_calls(
+        text,
+        nodes,
+        "python-aiohttp",
+        text.contains("aiohttp") || text.contains("ClientSession"),
+    ));
+    out.extend(extract_contextual_http_client_calls(
+        text,
+        nodes,
+        "python-httpx-client",
+        text.contains("httpx") || text.contains("AsyncClient") || text.contains("Client("),
+    ));
     out.extend(extract_absolute_url_literals(text, nodes));
     out.sort_by(|a, b| {
         a.url
@@ -155,6 +170,24 @@ fn extract_resource_detections(
             .then_with(|| a.strategy.cmp(&b.strategy))
     });
     out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id && a.strategy == b.strategy);
+    out
+}
+
+fn extract_contextual_http_client_calls(
+    text: &str,
+    nodes: &[&SynthNode],
+    strategy: &str,
+    enabled: bool,
+) -> Vec<ResourceDetection> {
+    if !enabled {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for method in [
+        ".get", ".post", ".put", ".patch", ".delete", ".request", ".stream",
+    ] {
+        out.extend(extract_call_url_detections(text, nodes, method, strategy));
+    }
     out
 }
 

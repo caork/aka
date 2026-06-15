@@ -4101,11 +4101,23 @@ fn synthesizes_python_external_http_resources() {
     let repo = temp_repo("python-resources");
     std::fs::write(
         repo.join("payments.py"),
-        r#"import requests
+        r#"import aiohttp
+import httpx
+import requests
 
 def charge(order_id):
     response = requests.post(f"https://payments.example.com/v1/orders/{order_id}/charge")
     return response.json()
+
+async def reserve(sku):
+    async with aiohttp.ClientSession() as session:
+        response = await session.get(f"https://inventory.example.com/api/stock/{sku}")
+        return await response.json()
+
+async def notify(order_id):
+    async with httpx.AsyncClient() as client:
+        response = await client.post("https://events.example.com/orders", json={"id": order_id})
+        return response.status_code
 "#,
     )
     .unwrap();
@@ -4117,7 +4129,29 @@ def charge(order_id):
         "charge",
         "payments.charge",
         "payments.py",
-        (3, 5),
+        (5, 7),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "reserve",
+        "payments.reserve",
+        "payments.py",
+        (9, 12),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "notify",
+        "payments.notify",
+        "payments.py",
+        (14, 17),
         json!({
             "language": "python",
         }),
@@ -4137,6 +4171,18 @@ def charge(order_id):
         .map(|edge| edge.edge_type)
         .collect();
     assert!(edge_types.contains(&"HTTP_CALLS".to_string()));
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "https://inventory.example.com/api/stock/{param}"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.edge_type == "HTTP_CALLS" && edge.source_id == "cbm:2:payments.reserve"
+            })
+    }));
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "https://events.example.com/orders"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.edge_type == "HTTP_CALLS" && edge.source_id == "cbm:3:payments.notify"
+            })
+    }));
 }
 
 #[test]
@@ -4149,12 +4195,25 @@ fn synthesizes_java_external_http_resources() {
             r#"package com.example.inventory;
 
 import org.springframework.web.client.RestTemplate;
+import java.net.URI;
 
 class InventoryClient {
     private final RestTemplate restTemplate = new RestTemplate();
 
     String reserve(String sku) {
         return restTemplate.getForObject("https://inventory.example.com/api/stock/" + sku, String.class);
+    }
+
+    java.net.http.HttpRequest reorder(String sku) {
+        return java.net.http.HttpRequest.newBuilder()
+            .uri(URI.create("https://supply.example.com/api/reorders/" + sku))
+            .build();
+    }
+
+    okhttp3.Request availability(String sku) {
+        return new okhttp3.Request.Builder()
+            .url("https://catalog.example.com/api/availability/" + sku)
+            .build();
     }
 }"#,
         )
@@ -4168,6 +4227,28 @@ class InventoryClient {
         "com.example.inventory.InventoryClient.reserve",
         file,
         (8, 10),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "reorder",
+        "com.example.inventory.InventoryClient.reorder",
+        file,
+        (12, 16),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "availability",
+        "com.example.inventory.InventoryClient.availability",
+        file,
+        (18, 22),
         json!({
             "language": "java",
         }),
@@ -4189,6 +4270,20 @@ class InventoryClient {
         edge.source_id,
         "cbm:1:com.example.inventory.InventoryClient.reserve"
     );
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "https://supply.example.com/api/reorders/"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.edge_type == "HTTP_CALLS"
+                    && edge.source_id == "cbm:2:com.example.inventory.InventoryClient.reorder"
+            })
+    }));
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "https://catalog.example.com/api/availability/"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.edge_type == "HTTP_CALLS"
+                    && edge.source_id == "cbm:3:com.example.inventory.InventoryClient.availability"
+            })
+    }));
 }
 
 #[test]
