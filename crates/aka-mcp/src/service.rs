@@ -7,8 +7,9 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use rmcp::{
+    handler::server::tool::ToolCallContext,
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, Content},
+    model::{CallToolRequestParams, CallToolResult, Content},
     service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
 };
@@ -539,4 +540,15 @@ impl AkaMcpServer {
     name = "aka-mcp",
     instructions = "Code knowledge graph for repositories. Start with list_repos; aka auto-queues MCP workspace roots when clients expose them, and stdio fallback also auto-detects its process workspace. Use analyze with an explicit absolute path if the target repo is not listed. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
 )]
-impl ServerHandler for AkaMcpServer {}
+impl ServerHandler for AkaMcpServer {
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.queue_client_roots(context.clone()).await;
+        Self::tool_router()
+            .call(ToolCallContext::new(self, request, context))
+            .await
+    }
+}
