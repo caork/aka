@@ -246,6 +246,7 @@ fn extract_topic_detections(
 
 fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDetection> {
     let mut out = Vec::new();
+    let class_kafka_listeners = class_kafka_listeners(nodes);
     for node in nodes
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
@@ -263,6 +264,21 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                     );
                     detection.consumer_groups = consumer_groups.clone();
                     out.push(detection);
+                }
+            }
+            if decorator.contains("KafkaHandler") {
+                for listener in class_kafka_listeners_for_node(node, &class_kafka_listeners) {
+                    for topic in &listener.topics {
+                        let mut detection = topic_detection(
+                            topic.clone(),
+                            "kafka",
+                            TopicEndpointKind::Consumer,
+                            node.aka_id.clone(),
+                            "java-kafka-handler-class-listener",
+                        );
+                        detection.consumer_groups = listener.consumer_groups.clone();
+                        out.push(detection);
+                    }
                 }
             }
             if decorator.contains("RabbitListener") {
@@ -396,6 +412,73 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
         1,
     ));
     out
+}
+
+#[derive(Debug, Clone)]
+struct ClassKafkaListener {
+    topics: Vec<String>,
+    consumer_groups: Vec<String>,
+}
+
+fn class_kafka_listeners(nodes: &[&SynthNode]) -> BTreeMap<String, Vec<ClassKafkaListener>> {
+    let mut out: BTreeMap<String, Vec<ClassKafkaListener>> = BTreeMap::new();
+    for node in nodes
+        .iter()
+        .filter(|node| matches!(node.label.as_str(), "Class" | "Interface" | "Record"))
+    {
+        let mut listeners = Vec::new();
+        for decorator in &node.decorators {
+            if !decorator.contains("KafkaListener") {
+                continue;
+            }
+            let topics = annotation_string_values(decorator, &["topics", "topic", "value"]);
+            if topics.is_empty() {
+                continue;
+            }
+            listeners.push(ClassKafkaListener {
+                topics,
+                consumer_groups: annotation_string_values(decorator, &["groupId", "group"]),
+            });
+        }
+        if listeners.is_empty() {
+            continue;
+        }
+        for key in class_node_keys(node) {
+            out.entry(key).or_default().extend(listeners.clone());
+        }
+    }
+    out
+}
+
+fn class_kafka_listeners_for_node<'a>(
+    node: &SynthNode,
+    listeners: &'a BTreeMap<String, Vec<ClassKafkaListener>>,
+) -> &'a [ClassKafkaListener] {
+    let Some(parent) = node.parent_class.as_deref() else {
+        return &[];
+    };
+    listeners
+        .get(parent)
+        .or_else(|| simple_class_name(parent).and_then(|simple| listeners.get(simple)))
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn class_node_keys(node: &SynthNode) -> Vec<String> {
+    let mut keys = vec![node.aka_id.clone(), node.qn.clone(), node.name.clone()];
+    if let Some(simple) = simple_class_name(&node.qn) {
+        keys.push(simple.to_string());
+    }
+    keys.sort();
+    keys.dedup();
+    keys.retain(|key| !key.is_empty());
+    keys
+}
+
+fn simple_class_name(name: &str) -> Option<&str> {
+    name.rsplit(['.', '$'])
+        .next()
+        .filter(|value| !value.is_empty())
 }
 
 fn extract_python_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDetection> {
