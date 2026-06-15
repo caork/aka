@@ -31,7 +31,7 @@ Rust core       aka-search (tantivy BM25 + usearch 向量 + RRF)
 
 - **M0** ✅ codebase-memory-mcp native engine 接入、SQLite->NDJSON 工件层（合同 v0）、demo-ts E2E
 - **M1** ✅ Rust 索引核心：tantivy(代码感知 tokenizer) + usearch + RRF + SQLite/CSR 图存储；`aka analyze/search/context/lod`
-- **M2** ✅ MCP 九工具（rmcp stdio，含 `search_code` 行级源码搜索）+ axum HTTP；`aka mcp` 可直接接 Claude Code
+- **M2** ✅ MCP 工具面（rmcp stdio/HTTP，含 `search_code` 行级源码搜索、影响分析和仓库管理工具）+ axum HTTP；`aka mcp` 可直接接 Claude Code
 - **M3** ✅ 桌面 MVP：液态玻璃三视图全接真实数据；WebGL2 渲染器 500K 节点/1M 边 60fps
 - **M4** ◐ `aka serve` headless 可用；Docker 化 + Jensen 部署 + 远程模式待做
 - 待办：embedding 开关落地（本地 fastembed，默认关）、增量索引接 fileHashes、Tauri 打包内置 CBM native binary、wiki/group 按需补齐
@@ -82,6 +82,8 @@ clients/install.sh --client opencode      # OpenCode（opencode.json）
 ```
 
 Claude Code 也可直接装插件（捆绑 MCP server + 使用策略 skill）：`claude plugin marketplace add <本仓库>` → `claude plugin install aka@aka`。设计文档（能力矩阵、远程模式演进）见 [docs/clients.md](docs/clients.md)。
+
+Agent 不必先通过桌面端手动导入仓库：HTTP MCP 每次工具调用都会尝试读取客户端 workspace roots 并自动排队索引；stdio fallback 也会自动发现当前工作区。本地仓库没出现在 `list_repos` 时，让 agent 调 `analyze` 并传仓库根目录或任意子目录即可；远程 GitHub/Git 仓库用 `import_repo kind=git`。
 
 ## Release 产物
 

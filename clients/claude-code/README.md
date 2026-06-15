@@ -1,6 +1,6 @@
 # aka × Claude Code 插件
 
-把 aka 作为 Claude Code 插件安装：捆绑 **AKA 桌面端本地 HTTP MCP 配置**（十五工具）+ **aka-code-graph skill**（指导 agent 何时用哪个工具）。AI 的索引/查询结果会进入同一份 GUI 可见知识库。
+把 aka 作为 Claude Code 插件安装：捆绑 **AKA 桌面端本地 HTTP MCP 配置**（17 个工具）+ **aka-code-graph skill**（指导 agent 何时用哪个工具）。AI 的索引/查询结果会进入同一份 GUI 可见知识库。
 
 ## 目录结构
 
