@@ -7,13 +7,15 @@ publish.workspace = true
 [dependencies]
 aka-core = { path = "../aka-core" }
 anyhow = "1"
-# default features = base64 + macros + server；transport-io 提供服务端 stdio。
-rmcp = { version = "1.7", features = ["transport-io"] }
+axum = "0.8"
+# default features = base64 + macros + server；transport-io 提供服务端 stdio；
+# transport-streamable-http-server 提供桌面/远程 MCP HTTP endpoint。
+rmcp = { version = "1.7", features = ["transport-io", "transport-streamable-http-server"] }
 regex = "1"
 schemars = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 
 [dev-dependencies]
 # 端到端测试需要 client 角色（内存 duplex transport 走 transport-async-rw，已随 server 启用）。

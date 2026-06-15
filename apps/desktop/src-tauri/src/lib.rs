@@ -1,5 +1,6 @@
 //! aka desktop shell with an embedded Rust backend.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -16,6 +17,11 @@ type BackendState = Arc<AkaBackend>;
 
 const AKA_HOME_DIR_NAME: &str = "aka-home";
 const APP_DATA_DIR_NAME: &str = "com.aka.desktop";
+const DESKTOP_MCP_ADDR: &str = "127.0.0.1:4112";
+
+struct DesktopMcpRuntime {
+    _rt: tokio::runtime::Runtime,
+}
 
 #[cfg(target_os = "windows")]
 const EMBEDDED_CBM_ENGINE: &[u8] =
@@ -192,6 +198,21 @@ fn configure_backend(app: &tauri::App, _app_data_dir: &std::path::Path) -> anyho
     } else {
         AkaBackend::new()
     })
+}
+
+fn start_desktop_mcp_server(backend: BackendState) -> anyhow::Result<DesktopMcpRuntime> {
+    let addr: SocketAddr = DESKTOP_MCP_ADDR.parse()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("aka-desktop-mcp")
+        .enable_all()
+        .build()?;
+    let backend: Arc<dyn Backend> = backend;
+    rt.spawn(async move {
+        if let Err(e) = aka_mcp::serve_http(backend, addr).await {
+            eprintln!("aka desktop MCP server stopped: {e:#}");
+        }
+    });
+    Ok(DesktopMcpRuntime { _rt: rt })
 }
 
 #[tauri::command]
@@ -514,7 +535,16 @@ pub fn run() {
                 Box::<dyn std::error::Error>::from(format!("configure desktop runtime: {e:#}"))
             })?;
             backend.start_auto_indexer();
-            app.manage(Arc::new(backend));
+            let backend = Arc::new(backend);
+            match start_desktop_mcp_server(Arc::clone(&backend)) {
+                Ok(mcp_runtime) => {
+                    app.manage(mcp_runtime);
+                }
+                Err(e) => {
+                    eprintln!("aka desktop MCP server unavailable: {e:#}");
+                }
+            }
+            app.manage(backend);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

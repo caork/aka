@@ -194,13 +194,13 @@ install_opencode() {
   fi
   if ! command -v jq >/dev/null 2>&1; then
     warn "未安装 jq，无法安全合并 JSON。请手动把下面片段合并进 ${cfg}:"
-    printf '{\n  "mcp": {\n    "aka": { "type": "local", "command": ["%s", "mcp"], "enabled": true }\n  }\n}\n' "${BIN}"
+    printf '{\n  "mcp": {\n    "aka": { "type": "remote", "url": "http://127.0.0.1:4112/mcp", "enabled": true }\n  }\n}\n'
     install_opencode_plugin
     install_opencode_skill
     return
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    info "[dry-run] 将向 ${cfg} 合并 mcp.aka = {type:local, command:[${BIN}, mcp], enabled:true}"
+    info "[dry-run] 将向 ${cfg} 合并 mcp.aka = {type:remote, url:http://127.0.0.1:4112/mcp, enabled:true}"
     install_opencode_plugin
     install_opencode_skill
     return
@@ -210,9 +210,9 @@ install_opencode() {
   [ -f "$cfg" ] || printf '{ "$schema": "https://opencode.ai/config.json" }\n' > "$cfg"
   local tmp
   tmp="$(mktemp)"
-  jq --arg bin "$BIN" '.mcp.aka = {type: "local", command: [$bin, "mcp"], enabled: true}' "$cfg" > "$tmp"
+  jq '.mcp.aka = {type: "remote", url: "http://127.0.0.1:4112/mcp", enabled: true}' "$cfg" > "$tmp"
   mv "$tmp" "$cfg"
-  info "完成。验证: 启动 opencode，会话里让它调用 aka 的 list_repos。"
+  info "完成。验证: 先启动 AKA 桌面端，再启动 opencode，让它调用 aka 的 list_repos。"
   install_opencode_plugin
   install_opencode_skill
 }

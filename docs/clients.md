@@ -4,7 +4,7 @@
 
 ## 1. 设计目标与原则
 
-- **一个接入面，N 种包装**：所有客户端统一走 MCP 协议接 `aka mcp`（rmcp stdio，九工具）。客户端差异只体现在「配置格式 + 分发方式」这一薄层，不为任何客户端做专属代码（不动 crates/、不绕过 `Backend` trait 接缝）。
+- **一个协议，N 种包装**：所有客户端统一走 MCP 协议。Claude Code / Codex 可接 `aka mcp`（rmcp stdio）；OpenCode 默认接 AKA 桌面端内置的本地 Streamable HTTP MCP（`http://127.0.0.1:4112/mcp`），让“启动桌面 AKA”就等同于启动可用的 MCP server。客户端差异只体现在「配置格式 + 分发方式」这一薄层，不绕过 `Backend` trait 接缝。
 - **零常驻**：stdio server 由客户端按需 spawn，进程随会话生灭；数据（`~/.aka/`）由 CLI 的 `analyze` 预先建好，MCP 进程只读。
 - **路径不写死**：仓库内任何配置不含机器特定路径；`clients/install.sh` 安装时探测（`command -v aka` → `target/release` → `target/debug`），插件场景靠 PATH 解析。
 
@@ -17,13 +17,14 @@ agent 客户端                              agent 客户端
   │ spawn 子进程 (stdio)                    │ Streamable HTTP (+token)
   ▼                                        ▼
 aka mcp ──读──▶ ~/.aka/                   aka serve :4111 (Docker @ Jensen)
-  (tantivy + SQLite/CSR)                    ├ /mcp  Streamable HTTP 端点(新增)
+  (tantivy + SQLite/CSR)                    ├ /mcp  Streamable HTTP 端点(远程模式)
+AKA desktop ─▶ http://127.0.0.1:4112/mcp ──┘
                                             └ REST  (桌面端复用现有路由)
                                               │
                                               ~/.aka/（服务器侧索引）
 ```
 
-- **阶段一（现状）**：本地 stdio。索引和查询都在用户机器上，`aka analyze` 建索引 → 客户端 spawn `aka mcp` 查询。优点：零网络、零认证、数据不出机。
+- **阶段一（现状）**：本机运行。桌面端负责索引/浏览，并内置 `127.0.0.1:4112/mcp` 给 OpenCode；Claude Code / Codex 仍可 spawn `aka mcp`。优点：零外网、数据不出机。
 - **阶段二（M4 远程模式）**：`aka serve` 增加 MCP Streamable HTTP 端点（rmcp 已支持该 transport，README 架构图中已预留）。三个客户端 2026 年中均已支持远程 MCP：
   - Claude Code：`claude mcp add --transport http aka https://host/mcp`；
   - Codex：`[mcp_servers.aka]` 里 `url = "..."` + `bearer_token_env_var`；
@@ -36,7 +37,8 @@ aka mcp ──读──▶ ~/.aka/                   aka serve :4111 (Docker @ J
 
 | 能力 | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
-| 本地 stdio MCP | ✅ `claude mcp add` / 插件 `.mcp.json` | ✅ `[mcp_servers.x]` command/args | ✅ `mcp.x` type:"local"，command 为数组 |
+| 本地 stdio MCP | ✅ `claude mcp add` / 插件 `.mcp.json` | ✅ `[mcp_servers.x]` command/args | 可用，但默认不推荐 |
+| 桌面端本地 HTTP MCP | 可配 HTTP transport | 可配 `url` | ✅ 默认 `type:"remote"` + `http://127.0.0.1:4112/mcp` |
 | 远程 HTTP MCP | ✅ `--transport http` | ✅ `url` + `bearer_token_env_var` | ✅ type:"remote" + OAuth |
 | 插件/捆绑分发 | ✅ 插件体系（marketplace + plugin.json，可捆绑 MCP+skills+hooks+agents） | ❌ 无插件体系，只有 config.toml | ✅ 本地/ npm plugin（JS/TS）；MCP 仍写 opencode.json |
 | 用法指导（何时用哪个工具） | ✅ skill（`skills/aka-code-graph/`） | ⚠️ 仅靠工具 description / AGENTS.md | ✅ 原生 skill；AGENTS/instructions 备选 |
@@ -63,8 +65,8 @@ aka mcp ──读──▶ ~/.aka/                   aka serve :4111 (Docker @ J
 
 ### OpenCode（[clients/opencode/](../clients/opencode/)）
 
-- `opencode.json`（全局 `~/.config/opencode/` 或项目根）`mcp` 键；本地 `type:"local"` 且 **`command` 是数组**，`environment` 传 env，`enabled` 开关；远程 `type:"remote"` + `url`。
-- 本地 plugin 放 `~/.config/opencode/plugins/` 或 `.opencode/plugins/`，是导出 plugin 函数的 JS/TS module。aka 的 `plugins/aka.js` 只做集成加载自检；真正工具面仍由 `mcp.aka` 启动 `aka mcp`。
+- `opencode.json`（全局 `~/.config/opencode/` 或项目根）`mcp` 键；默认 `type:"remote"` + `url:"http://127.0.0.1:4112/mcp"`，连接正在运行的 AKA 桌面端。
+- 本地 plugin 放 `~/.config/opencode/plugins/` 或 `.opencode/plugins/`，是导出 plugin 函数的 JS/TS module。aka 的 `plugins/aka.js` 只做集成加载自检；真正工具面由 `mcp.aka` 连接桌面端 MCP endpoint。
 - 使用策略优先走 `skills/aka-code-graph/SKILL.md`；旧版/常驻场景用 `AGENTS-aka.md` 或 `instructions` 数组。
 - 来源：[opencode.ai/docs/mcp-servers](https://opencode.ai/docs/mcp-servers/)、[opencode.ai/docs/config](https://opencode.ai/docs/config/)、[opencode.ai/docs/plugins](https://opencode.ai/docs/plugins/)、[opencode.ai/docs/skills](https://opencode.ai/docs/skills/)。
 
@@ -78,5 +80,5 @@ aka mcp ──读──▶ ~/.aka/                   aka serve :4111 (Docker @ J
 ## 6. 已知限制 / 待办
 
 - 插件方式要求 aka 在 PATH（插件清单无法在安装时探测路径）；install.sh 已给出 symlink/改 `.mcp.json` 两条出路。`userConfig`（enable 时弹窗让用户填二进制路径，`${user_config.aka_bin}` 替换进 command）是更优解，等用户群 Claude Code 版本普遍支持后再启用。
-- OpenCode 的「装好验证」主要依赖 TUI 交互，没有 `claude mcp list` 这样的一行命令式探针；plugin 会写一条加载日志，但 MCP 是否可用仍以会话里触发 `aka_list_repos` 为准。
+- OpenCode 的「装好验证」主要依赖 TUI 交互，没有 `claude mcp list` 这样的一行命令式探针；plugin 会写一条加载日志，但 MCP 是否可用仍以会话里触发 `aka_list_repos` 为准。默认配置要求 AKA 桌面端已启动。
 - 远程模式（M4）落地时：aka-server 挂 rmcp Streamable HTTP、加 token 认证、Docker 镜像；届时在 clients/ 各 README 补远程配置片段。
