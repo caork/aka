@@ -252,6 +252,20 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                     });
                 }
             }
+            if decorator.contains("SqsListener") {
+                for topic in annotation_string_values(
+                    decorator,
+                    &["queueNames", "queueName", "value"],
+                ) {
+                    out.push(TopicDetection {
+                        topic,
+                        broker: "sqs".into(),
+                        kind: TopicEndpointKind::Consumer,
+                        node_id: node.aka_id.clone(),
+                        strategy: "java-sqs-listener".into(),
+                    });
+                }
+            }
         }
     }
     out.extend(extract_call_topic_literals(
@@ -271,6 +285,24 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
         "jms",
         TopicEndpointKind::Producer,
         "java-jms-template-send",
+        0,
+    ));
+    out.extend(extract_call_topic_literals(
+        text,
+        nodes,
+        "sqsTemplate.send",
+        "sqs",
+        TopicEndpointKind::Producer,
+        "java-sqs-template-send",
+        0,
+    ));
+    out.extend(extract_call_topic_literals(
+        text,
+        nodes,
+        "sqsTemplate.convertAndSend",
+        "sqs",
+        TopicEndpointKind::Producer,
+        "java-sqs-template-convert-and-send",
         0,
     ));
     out
