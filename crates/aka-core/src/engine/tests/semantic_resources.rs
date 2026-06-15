@@ -50,6 +50,54 @@ async def charge_order(order_id):
 }
 
 #[test]
+fn synthesizes_aiohttp_client_base_url_resources() {
+    let repo = temp_repo("python-aiohttp-client-resources");
+    std::fs::create_dir_all(repo.join("inventory")).unwrap();
+    let file = "inventory/client.py";
+    std::fs::write(
+        repo.join(file),
+        r#"import aiohttp
+
+async def reserve_stock(sku):
+    async with aiohttp.ClientSession(base_url="https://inventory.example.com") as session:
+        async with session.get(f"/api/stock/{sku}/reserve") as response:
+            return await response.json()
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "reserve_stock",
+        "inventory.client.reserve_stock",
+        file,
+        (3, 6),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let resource = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "https://inventory.example.com/api/stock/{param}/reserve")
+        .expect("aiohttp base_url resource");
+    let edge = resource
+        .edge_recs()
+        .into_iter()
+        .find(|edge| edge.source_id == "cbm:1:inventory.client.reserve_stock")
+        .expect("aiohttp HTTP_CALLS edge");
+    assert_eq!(edge.edge_type, "HTTP_CALLS");
+    assert_eq!(
+        edge.evidence.as_ref().unwrap()["strategy"],
+        "python-aiohttp"
+    );
+}
+
+#[test]
 fn synthesizes_spring_restclient_external_http_resources() {
     let repo = temp_repo("spring-restclient-resources");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();

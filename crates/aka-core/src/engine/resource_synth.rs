@@ -157,6 +157,7 @@ fn extract_resource_detections(
         "python-aiohttp",
         text.contains("aiohttp") || text.contains("ClientSession"),
     ));
+    out.extend(extract_python_aiohttp_client_relative_calls(text, nodes));
     out.extend(extract_contextual_http_client_calls(
         text,
         nodes,
@@ -179,6 +180,56 @@ fn extract_resource_detections(
             .then_with(|| a.strategy.cmp(&b.strategy))
     });
     out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id && a.strategy == b.strategy);
+    out
+}
+
+fn extract_python_aiohttp_client_relative_calls(
+    text: &str,
+    nodes: &[&SynthNode],
+) -> Vec<ResourceDetection> {
+    if !(text.contains("aiohttp") || text.contains("ClientSession")) {
+        return Vec::new();
+    }
+    let base_urls = aiohttp_base_urls(text);
+    if base_urls.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for method in [
+        ".get",
+        ".post",
+        ".put",
+        ".patch",
+        ".delete",
+        ".request",
+        ".ws_connect",
+    ] {
+        for call in find_call_args(text, method) {
+            let Some(node) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            for url in relative_urls_from_args(call.args, &base_urls) {
+                out.push(ResourceDetection {
+                    url,
+                    node_id: node.aka_id.clone(),
+                    strategy: "python-aiohttp".into(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn aiohttp_base_urls(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for callee in ["aiohttp.ClientSession", "ClientSession"] {
+        for call in find_call_args(text, callee) {
+            out.extend(keyword_url_literals(call.args, "base_url"));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.truncate(4);
     out
 }
 
