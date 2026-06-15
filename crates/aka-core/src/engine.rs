@@ -13,6 +13,9 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use chrono::Utc;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, Row};
@@ -21,6 +24,8 @@ use serde_json::{json, Map, Value};
 use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION};
 
 const DEFAULT_CBM_MODE: &str = "fast";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const PROCESS_MAX_STARTS: usize = 200;
 const PROCESS_MIN_COUNT: usize = 20;
 const PROCESS_MAX_COUNT: usize = 300;
@@ -30,6 +35,14 @@ const PROCESS_MIN_STEPS: usize = 3;
 const MIN_SYNTH_COMMUNITY_SIZE: usize = 2;
 const MIN_TRACE_CONFIDENCE: f64 = 0.5;
 const COMMUNITY_LABEL_PROPAGATION_PASSES: usize = 4;
+
+#[cfg(windows)]
+fn hide_child_console(cmd: &mut Command) {
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_child_console(_cmd: &mut Command) {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -163,6 +176,7 @@ impl EngineRunner {
             .env("CBM_CACHE_DIR", &cache_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        hide_child_console(&mut cmd);
         let cmd_display = format!(
             "{} cli --progress --json index_repository <args>",
             self.cbm_bin.display()
@@ -3181,13 +3195,10 @@ fn aka_node_id(cbm_id: i64, qn: &str) -> String {
 }
 
 fn git_head(repo: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .arg("rev-parse")
-        .arg("HEAD")
-        .output()
-        .ok()?;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo).arg("rev-parse").arg("HEAD");
+    hide_child_console(&mut cmd);
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }

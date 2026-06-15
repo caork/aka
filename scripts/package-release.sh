@@ -21,7 +21,7 @@
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe
 #                                             Windows Tauri GUI NSIS installer
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-portable.zip
-#                                             Windows Tauri GUI portable exe + CBM engine
+#                                             Windows Tauri GUI portable exe（engine 内嵌）
 #
 # 产物（--checksums-only 子命令，主流程不自动跑）:
 #   dist/SHA256SUMS                         dist/ 下所有产物（含 dist/docker/*）的 sha256
@@ -581,11 +581,23 @@ package_desktop() {
 }
 
 package_windows_desktop() {
-  local win_triple exe_path setup_src setup_exe portable_zip stage engine_src
+  local win_triple exe_path setup_src setup_exe portable_zip stage
   win_triple="x86_64-pc-windows-msvc"
 
   if [[ "${SKIP_BUILD}" -eq 0 ]]; then
-    prepare_desktop_resources "${win_triple}"
+    local platform engine_bin embed_dir
+    platform="$(platform_from_triple "${win_triple}")"
+    engine_bin="$(find_cbm_binary "${platform}" || true)"
+    if [[ -z "${engine_bin}" ]]; then
+      echo "error: 找不到 ${platform} 的 codebase-memory-mcp 二进制。" >&2
+      echo "       请设置 AKA_CBM_BIN_WIN_X64 / AKA_CBM_BIN，或在 Windows runner 上先下载 engine。" >&2
+      return 1
+    fi
+    embed_dir="${TAURI_DIR}/embedded-engine"
+    rm -rf "${embed_dir}" "${TAURI_RESOURCES_DIR}/engine"
+    mkdir -p "${embed_dir}" "${TAURI_RESOURCES_DIR}/engine"
+    cp "${engine_bin}" "${embed_dir}/codebase-memory-mcp.exe"
+    echo "==> 内嵌 Windows CBM engine: ${engine_bin} -> ${embed_dir}/codebase-memory-mcp.exe"
     rm -rf "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/engine"
     local tauri_args=(build --target "${win_triple}" --bundles nsis --ci)
     if command -v cargo-xwin >/dev/null 2>&1 && [[ "$(uname -s)" = "Darwin" ]]; then
@@ -613,11 +625,7 @@ package_windows_desktop() {
   rm -f "${portable_zip}"
   stage="$(mktemp -d)"
   cp "${exe_path}" "${stage}/AKA.exe"
-  engine_src="${TAURI_RESOURCES_DIR}/engine"
-  assert_engine_resource_dir "win-x64" "${engine_src}"
-  cp -R "${engine_src}" "${stage}/engine"
-  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe engine)
-  assert_zip_has_engine "${portable_zip}" "win-x64" ""
+  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe)
   rm -rf "${stage}"
   echo "==> ${portable_zip}"
 }

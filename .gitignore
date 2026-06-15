@@ -11,4 +11,5 @@ engine/vendor/**/build/
 /engine/codebase-memory-mcp-src/
 /engine/codebase-memory-mcp.exe
 /apps/desktop/src-tauri/resources/
+/apps/desktop/src-tauri/embedded-engine/
 .playwright-mcp/

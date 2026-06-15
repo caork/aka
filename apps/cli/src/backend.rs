@@ -12,6 +12,8 @@
 //! - zip 解压防 zip-slip：entry 路径必须能 `enclosed_name()`（拒绝绝对路径与 `..`）。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
@@ -58,6 +60,17 @@ const DEFINITION_LABELS: &[&str] = &[
 const JOB_LOG_LIMIT: usize = 80;
 const AUTO_INDEX_SCAN_INTERVAL: Duration = Duration::from_secs(4);
 const AUTO_INDEX_DEBOUNCE: Duration = Duration::from_secs(3);
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+fn hide_child_console(cmd: &mut Command) {
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_child_console(_cmd: &mut Command) {}
 
 pub struct RepoHandle {
     pub entry: RepoEntry,
@@ -1183,6 +1196,7 @@ fn find_code_line_matches(
 fn run_git_diff(repo: &Path, scope: &str, base_ref: Option<&str>) -> Result<String> {
     let mut cmd = Command::new("git");
     cmd.current_dir(repo).arg("diff").arg("--unified=0");
+    hide_child_console(&mut cmd);
     match scope {
         "unstaged" => {}
         "staged" | "cached" => {

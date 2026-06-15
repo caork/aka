@@ -17,6 +17,10 @@ type BackendState = Arc<AkaBackend>;
 const AKA_HOME_DIR_NAME: &str = "aka-home";
 const APP_DATA_DIR_NAME: &str = "com.aka.desktop";
 
+#[cfg(target_os = "windows")]
+const EMBEDDED_CBM_ENGINE: &[u8] =
+    include_bytes!("../embedded-engine/codebase-memory-mcp.exe");
+
 fn fallback_app_data_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
         if let Some(home) = std::env::var_os("HOME") {
@@ -43,6 +47,7 @@ fn fallback_app_data_dir() -> PathBuf {
     std::env::temp_dir().join(APP_DATA_DIR_NAME)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn fallback_resource_dir() -> PathBuf {
     let Ok(exe) = std::env::current_exe() else {
         return std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
@@ -63,14 +68,12 @@ fn fallback_resource_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
+#[cfg(not(target_os = "windows"))]
 fn bundled_engine_bin_name() -> &'static str {
-    if cfg!(windows) {
-        "codebase-memory-mcp.exe"
-    } else {
-        "codebase-memory-mcp"
-    }
+    "codebase-memory-mcp"
 }
 
+#[cfg(not(target_os = "windows"))]
 fn has_native_engine(dir: &std::path::Path) -> bool {
     let bin = bundled_engine_bin_name();
     dir.join(bin).is_file()
@@ -78,6 +81,7 @@ fn has_native_engine(dir: &std::path::Path) -> bool {
         || dir.join("build/c").join(bin).is_file()
 }
 
+#[cfg(not(target_os = "windows"))]
 fn bundled_engine_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
     [
         resource_dir.join("engine"),
@@ -85,6 +89,22 @@ fn bundled_engine_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|dir| has_native_engine(dir))
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_embedded_engine_dir(app_data_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+    let engine_dir = app_data_dir.join("engine");
+    let engine_bin = engine_dir.join("codebase-memory-mcp.exe");
+    std::fs::create_dir_all(&engine_dir)?;
+
+    let needs_write = std::fs::read(&engine_bin)
+        .map(|existing| existing != EMBEDDED_CBM_ENGINE)
+        .unwrap_or(true);
+    if needs_write {
+        std::fs::write(&engine_bin, EMBEDDED_CBM_ENGINE)?;
+    }
+
+    Ok(engine_dir)
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,17 +171,27 @@ fn configure_desktop_runtime(app: &tauri::App) -> anyhow::Result<AkaBackend> {
     std::fs::create_dir_all(&aka_home)?;
     std::env::set_var("AKA_HOME", &aka_home);
 
+    configure_backend(app, &app_data_dir)
+}
+
+#[cfg(target_os = "windows")]
+fn configure_backend(_app: &tauri::App, app_data_dir: &std::path::Path) -> anyhow::Result<AkaBackend> {
+    Ok(AkaBackend::with_engine_dir(ensure_embedded_engine_dir(
+        app_data_dir,
+    )?))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_backend(app: &tauri::App, _app_data_dir: &std::path::Path) -> anyhow::Result<AkaBackend> {
     let resource_dir = app
         .path()
         .resource_dir()
         .unwrap_or_else(|_| fallback_resource_dir());
-    Ok(
-        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
-            AkaBackend::with_engine_dir(engine_dir)
-        } else {
-            AkaBackend::new()
-        },
-    )
+    Ok(if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+        AkaBackend::with_engine_dir(engine_dir)
+    } else {
+        AkaBackend::new()
+    })
 }
 
 #[tauri::command]
