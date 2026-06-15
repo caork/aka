@@ -2089,6 +2089,76 @@ async def get_order(order_id: str):
 }
 
 #[test]
+fn synthesizes_python_direct_call_edges_for_fallback_source_symbols() {
+    let repo = temp_repo("python-source-symbol-call-fallback");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("orders")).unwrap();
+    let file = "orders/workflow.py";
+    std::fs::write(repo.join("pyproject.toml"), "[project]\nname='orders'\n").unwrap();
+    std::fs::write(
+        repo.join(file),
+        r#"def create_order(payload):
+    return validate_order(payload)
+
+def validate_order(payload):
+    return persist_order(payload)
+
+def persist_order(payload):
+    return payload["id"]
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pyproject.toml", file]);
+
+    let conn = test_conn();
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+
+    let create = synth
+        .source_symbols
+        .iter()
+        .find(|symbol| symbol.node().qn == "orders.workflow.create_order")
+        .expect("create_order fallback symbol")
+        .node()
+        .aka_id
+        .clone();
+    let validate = synth
+        .source_symbols
+        .iter()
+        .find(|symbol| symbol.node().qn == "orders.workflow.validate_order")
+        .expect("validate_order fallback symbol")
+        .node()
+        .aka_id
+        .clone();
+    let persist = synth
+        .source_symbols
+        .iter()
+        .find(|symbol| symbol.node().qn == "orders.workflow.persist_order")
+        .expect("persist_order fallback symbol")
+        .node()
+        .aka_id
+        .clone();
+
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "CALLS" && edge.source_id == create && edge.target_id == validate
+    }));
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "CALLS" && edge.source_id == validate && edge.target_id == persist
+    }));
+    assert!(
+        synth
+            .processes
+            .iter()
+            .any(|process| { process.name.as_str() == "create_order → persist_order" }),
+        "processes: {:?}",
+        synth
+            .processes
+            .iter()
+            .map(|process| process.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn exports_python_source_symbol_nodes_for_search_indexing() {
     let repo = temp_repo("python-source-symbol-export");
     run_git(&repo, &["init"]);

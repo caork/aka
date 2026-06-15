@@ -19,6 +19,11 @@ pub(super) fn detect_python_dependency_edges(
         return Vec::new();
     }
     let mut out = Vec::new();
+    out.extend(detect_python_direct_call_edges(
+        text,
+        nodes,
+        existing_call_pairs,
+    ));
     for call in find_python_dependency_calls(text) {
         let Some(source) = node_at_offset(text, nodes, call.start)
             .or_else(|| next_python_function_node(text, nodes, call.start))
@@ -64,6 +69,95 @@ pub(super) fn detect_python_dependency_edges(
         }
     }
     out
+}
+
+fn detect_python_direct_call_edges(
+    text: &str,
+    nodes: &[&SynthNode],
+    existing_call_pairs: &HashSet<(String, String)>,
+) -> Vec<EdgeRec> {
+    let callables = python_file_callables(nodes);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for target in callables {
+        for call in find_call_args(text, target.name) {
+            if !python_direct_call_boundary_ok(text, call.start, target.name) {
+                continue;
+            }
+            let Some(source) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            if source.aka_id == target.node.aka_id
+                || existing_call_pairs
+                    .contains(&(source.aka_id.clone(), target.node.aka_id.clone()))
+            {
+                continue;
+            }
+            let key = (source.aka_id.clone(), target.node.aka_id.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            out.push(EdgeRec {
+                id: format!(
+                    "python-direct-call:{:016x}",
+                    stable_hash(&format!(
+                        "{}|{}|{}",
+                        source.aka_id, target.node.aka_id, target.name
+                    ))
+                ),
+                source_id: source.aka_id.clone(),
+                target_id: target.node.aka_id.clone(),
+                edge_type: "CALLS".into(),
+                confidence: 0.68,
+                reason: "aka Python direct call synthesis".into(),
+                step: None,
+                evidence: Some(json!({
+                    "source": "aka-cbm-synth",
+                    "kind": "python-direct-call",
+                    "strategy": "python-same-file-direct-call",
+                    "callable": target.name,
+                })),
+            });
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PythonCallableNode<'a> {
+    name: &'a str,
+    node: &'a SynthNode,
+}
+
+fn python_file_callables<'a>(nodes: &[&'a SynthNode]) -> Vec<PythonCallableNode<'a>> {
+    let mut out: Vec<_> = nodes
+        .iter()
+        .copied()
+        .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+        .filter(|node| !node.name.is_empty() && is_python_identifier(&node.name))
+        .map(|node| PythonCallableNode {
+            name: node.name.as_str(),
+            node,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.name
+            .cmp(b.name)
+            .then_with(|| a.node.aka_id.cmp(&b.node.aka_id))
+    });
+    out.dedup_by(|a, b| a.name == b.name && a.node.aka_id == b.node.aka_id);
+    out
+}
+
+fn python_direct_call_boundary_ok(text: &str, start: usize, name: &str) -> bool {
+    let before = text[..start].chars().rev().find(|ch| !ch.is_whitespace());
+    if matches!(before, Some('.')) {
+        return false;
+    }
+    let after = text[start + name.len()..]
+        .chars()
+        .find(|ch| !ch.is_whitespace());
+    after == Some('(')
 }
 
 fn next_python_function_node<'a>(
