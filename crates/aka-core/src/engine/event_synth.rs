@@ -4,8 +4,9 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use super::{
-    find_call_args, find_matching_paren, node_at_offset, nodes_by_file, pick_handler_node,
-    read_repo_text, split_top_level_commas, stable_hash, EdgeRec, NodeRec, SynthNode,
+    find_call_args, find_matching_paren, node_at_offset, pick_handler_node,
+    project_code_nodes_by_file, read_repo_text, split_top_level_commas, stable_hash, EdgeRec,
+    NodeRec, ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -82,7 +83,8 @@ pub(super) fn synthesize_events_from_sources(
     repo: &Path,
     nodes: &BTreeMap<String, SynthNode>,
 ) -> Vec<SynthEvent> {
-    let by_file = event_nodes_by_file(nodes);
+    let project_sources = ProjectSourceSet::discover(repo);
+    let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
     let mut events: BTreeMap<(String, String), SynthEvent> = BTreeMap::new();
     let mut seen_edges: HashSet<(String, String, String, String)> = HashSet::new();
     for (file_path, file_nodes) in by_file {
@@ -155,30 +157,6 @@ struct EventDetection {
     kind: EventEndpointKind,
     node_id: String,
     strategy: String,
-}
-
-fn event_nodes_by_file(nodes: &BTreeMap<String, SynthNode>) -> BTreeMap<String, Vec<&SynthNode>> {
-    nodes_by_file(nodes)
-        .into_iter()
-        .filter(|(file_path, file_nodes)| {
-            is_event_source_path(file_path)
-                || file_nodes.iter().any(|node| {
-                    matches!(
-                        node.language.to_ascii_lowercase().as_str(),
-                        "java" | "kotlin" | "scala" | "groovy" | "python"
-                    )
-                })
-        })
-        .collect()
-}
-
-fn is_event_source_path(file_path: &str) -> bool {
-    matches!(
-        Path::new(&file_path.to_ascii_lowercase())
-            .extension()
-            .and_then(|ext| ext.to_str()),
-        Some("java" | "kt" | "kts" | "scala" | "groovy" | "py")
-    )
 }
 
 fn extract_event_detections(

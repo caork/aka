@@ -2806,6 +2806,134 @@ class OrderRepository:
 }
 
 #[test]
+fn semantic_synthesis_excludes_git_tracked_test_sources() {
+    let repo = temp_repo("git-project-semantic-test-sources");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    std::fs::create_dir_all(repo.join("src/test/java/com/example/orders")).unwrap();
+    std::fs::create_dir_all(repo.join("src/main/resources/db/migration")).unwrap();
+    std::fs::create_dir_all(repo.join("src/test/resources/db/migration")).unwrap();
+    let service_file = "src/main/java/com/example/orders/OrderService.java";
+    let test_file = "src/test/java/com/example/orders/OrderServiceTest.java";
+    let migration_file = "src/main/resources/db/migration/V1__create_orders.sql";
+    let test_migration_file = "src/test/resources/db/migration/V999__test_fixture.sql";
+    std::fs::write(
+        repo.join(service_file),
+        r#"package com.example.orders;
+
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.transaction.annotation.Transactional;
+
+class OrderService {
+    @Cacheable(cacheNames = "orders")
+    @Transactional(readOnly = true)
+    public Order loadOrder(String id) {
+        return null;
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(test_file),
+        r#"package com.example.orders;
+
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.transaction.annotation.Transactional;
+
+class OrderServiceTest {
+    @Cacheable(cacheNames = "fixture-orders")
+    @Transactional(readOnly = false)
+    public Order fixtureOrder(String id) {
+        return null;
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join(migration_file), "CREATE TABLE orders (id bigint);\n").unwrap();
+    std::fs::write(
+        repo.join(test_migration_file),
+        "CREATE TABLE fixture_orders (id bigint);\n",
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        &[
+            "add",
+            service_file,
+            test_file,
+            migration_file,
+            test_migration_file,
+        ],
+    );
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "loadOrder",
+        "com.example.orders.OrderService.loadOrder",
+        service_file,
+        (8, 10),
+        json!({
+            "decorators": [
+                "@Cacheable(cacheNames = \"orders\")",
+                "@Transactional(readOnly = true)"
+            ],
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "fixtureOrder",
+        "com.example.orders.OrderServiceTest.fixtureOrder",
+        test_file,
+        (8, 10),
+        json!({
+            "decorators": [
+                "@Cacheable(cacheNames = \"fixture-orders\")",
+                "@Transactional(readOnly = false)"
+            ],
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let cache_names: BTreeSet<_> = synth
+        .caches
+        .iter()
+        .map(|cache| cache.name.as_str())
+        .collect();
+    assert!(cache_names.contains("orders"));
+    assert!(!cache_names.contains("fixture-orders"));
+
+    let transaction_handlers: BTreeSet<_> = synth
+        .transactions
+        .iter()
+        .flat_map(|tx| tx.endpoints.iter().map(|endpoint| endpoint.node_id.as_str()))
+        .collect();
+    assert!(transaction_handlers.contains("cbm:1:com.example.orders.OrderService.loadOrder"));
+    assert!(!transaction_handlers.contains("cbm:2:com.example.orders.OrderServiceTest.fixtureOrder"));
+
+    let table_names: BTreeSet<_> = synth
+        .persistence
+        .node_recs()
+        .into_iter()
+        .filter(|node| node.label == "Table")
+        .filter_map(|node| {
+            node.properties
+                .get("tableName")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(table_names.contains("orders"));
+    assert!(!table_names.contains("fixture_orders"));
+}
+
+#[test]
 fn synthesizes_java_transaction_boundaries() {
     let repo = temp_repo("java-transactions");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();

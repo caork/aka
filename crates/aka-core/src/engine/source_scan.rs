@@ -234,6 +234,37 @@ pub(super) fn nodes_by_file(
     by_file
 }
 
+pub(super) fn project_code_nodes_by_file<'a>(
+    repo: &Path,
+    nodes: &'a BTreeMap<String, SynthNode>,
+    project_sources: &ProjectSourceSet,
+) -> BTreeMap<String, Vec<&'a SynthNode>> {
+    nodes_by_file(nodes)
+        .into_iter()
+        .filter(|(file_path, file_nodes)| {
+            project_sources.contains_project_file(repo, file_path)
+                && (is_project_code_source_path(file_path)
+                    || file_nodes.iter().any(|node| is_business_language(&node.language)))
+        })
+        .collect()
+}
+
+pub(super) fn is_project_code_source_path(file_path: &str) -> bool {
+    matches!(
+        Path::new(&file_path.to_ascii_lowercase())
+            .extension()
+            .and_then(|ext| ext.to_str()),
+        Some("java" | "kt" | "kts" | "scala" | "groovy" | "py")
+    )
+}
+
+pub(super) fn is_business_language(language: &str) -> bool {
+    matches!(
+        language.to_ascii_lowercase().as_str(),
+        "java" | "kotlin" | "scala" | "groovy" | "python"
+    )
+}
+
 pub(super) fn read_repo_text(repo: &Path, file_path: &str) -> Option<String> {
     std::fs::read_to_string(repo.join(file_path)).ok()
 }

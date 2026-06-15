@@ -59,7 +59,7 @@ use route_shape::{
 use source_scan::{
     find_call_args, find_matching_paren, is_ident_continue, is_noisy_source_path,
     is_project_test_source_path, node_at_offset, nodes_by_file, pick_handler_node, read_repo_text,
-    skip_ws, split_top_level_commas, stable_hash, ProjectSourceSet,
+    project_code_nodes_by_file, skip_ws, split_top_level_commas, stable_hash, ProjectSourceSet,
 };
 use tool_synth::{synthesize_tools_from_sources, SynthTool};
 use topic_synth::{synthesize_topics_from_sources, SynthTopic};

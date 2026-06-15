@@ -4,7 +4,8 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use super::{
-    find_call_args, read_string_literal, split_top_level_commas, stable_hash, EdgeRec, NodeRec,
+    find_call_args, is_noisy_source_path, read_repo_text, read_string_literal,
+    split_top_level_commas, stable_hash, EdgeRec, NodeRec, ProjectSourceSet,
 };
 
 #[derive(Debug, Clone)]
@@ -108,11 +109,32 @@ pub(super) struct ExistingTable {
 
 pub(super) fn detect_migrations(
     repo: &Path,
+    project_sources: &ProjectSourceSet,
     existing_tables: impl IntoIterator<Item = ExistingTable>,
 ) -> Vec<SynthMigration> {
     let mut out = Vec::new();
-    let mut stack = vec![repo.to_path_buf()];
     let table_lookup = table_lookup(existing_tables);
+    if project_sources.has_git_listing() {
+        for file_path in project_sources
+            .iter()
+            .filter(|path| is_migration_path(path) && project_sources.contains_project_file(repo, path))
+        {
+            let Some(text) = read_repo_text(repo, file_path) else {
+                continue;
+            };
+            if let Some(migration) = migration_from_file(file_path, &text, &table_lookup) {
+                out.push(migration);
+            }
+        }
+        out.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        return out;
+    }
+
+    let mut stack = vec![repo.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -123,7 +145,12 @@ pub(super) fn detect_migrations(
                 continue;
             };
             if file_type.is_dir() {
-                if !is_noisy_migration_dir(&path) {
+                let rel = path
+                    .strip_prefix(repo)
+                    .ok()
+                    .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                if !is_noisy_migration_dir(&rel) {
                     stack.push(path);
                 }
                 continue;
@@ -132,7 +159,9 @@ pub(super) fn detect_migrations(
                 continue;
             };
             let file_path = rel.to_string_lossy().replace('\\', "/");
-            if !is_migration_path(&file_path) {
+            if !is_migration_path(&file_path)
+                || !project_sources.contains_project_file(repo, &file_path)
+            {
                 continue;
             }
             let Some(text) = std::fs::read_to_string(&path).ok() else {
@@ -158,25 +187,14 @@ fn table_lookup(tables: impl IntoIterator<Item = ExistingTable>) -> BTreeMap<Str
         .collect()
 }
 
-fn is_noisy_migration_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| {
-            matches!(
-                name,
-                ".git"
-                    | ".hg"
-                    | ".svn"
-                    | "node_modules"
-                    | "target"
-                    | "build"
-                    | "dist"
-                    | "__pycache__"
-                    | ".venv"
-                    | "venv"
-            )
-        })
-        .unwrap_or(false)
+fn is_noisy_migration_dir(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    path.split('/').any(|segment| {
+        matches!(
+            segment,
+            ".git" | ".hg" | ".svn" | "node_modules" | "target" | "build" | "dist"
+        )
+    }) || is_noisy_source_path(&path)
 }
 
 fn is_migration_path(file_path: &str) -> bool {

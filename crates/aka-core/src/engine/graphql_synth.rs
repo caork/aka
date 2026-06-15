@@ -5,7 +5,8 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_matching_paren, merge_strings, nodes_by_file, process_ids_for_entry, read_repo_text,
-    read_string_literal, skip_ws, stable_hash, EdgeRec, NodeRec, SynthNode, SynthProcess,
+    read_string_literal, skip_ws, stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
+    SynthProcess,
 };
 
 #[derive(Debug, Clone)]
@@ -85,10 +86,13 @@ pub(super) fn synthesize_graphql_from_sources(
     nodes: &BTreeMap<String, SynthNode>,
     processes: &[SynthProcess],
 ) -> Vec<SynthGraphqlOperation> {
+    let project_sources = ProjectSourceSet::discover(repo);
     let by_file = nodes_by_file(nodes);
     let mut operations: BTreeMap<(String, String, String), SynthGraphqlOperation> = BTreeMap::new();
     for (file_path, file_nodes) in by_file {
-        if !is_graphql_candidate_file(&file_path, &file_nodes) {
+        if !project_sources.contains_project_file(repo, &file_path)
+            || !is_graphql_candidate_file(&file_path, &file_nodes)
+        {
             continue;
         }
         let text = read_repo_text(repo, &file_path).unwrap_or_default();

@@ -4,8 +4,8 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use super::{
-    find_call_args, node_at_offset, nodes_by_file, read_repo_text, stable_hash, EdgeRec, NodeRec,
-    SynthNode,
+    find_call_args, node_at_offset, project_code_nodes_by_file, read_repo_text, stable_hash,
+    EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -74,7 +74,8 @@ pub(super) fn synthesize_resources_from_sources(
     repo: &Path,
     nodes: &BTreeMap<String, SynthNode>,
 ) -> Vec<SynthResource> {
-    let by_file = resource_nodes_by_file(nodes);
+    let project_sources = ProjectSourceSet::discover(repo);
+    let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
     let mut resources: BTreeMap<String, SynthResource> = BTreeMap::new();
     let mut seen_edges: HashSet<(String, String)> = HashSet::new();
     for (file_path, file_nodes) in by_file {
@@ -118,32 +119,6 @@ struct ResourceDetection {
     url: String,
     node_id: String,
     strategy: String,
-}
-
-fn resource_nodes_by_file(
-    nodes: &BTreeMap<String, SynthNode>,
-) -> BTreeMap<String, Vec<&SynthNode>> {
-    nodes_by_file(nodes)
-        .into_iter()
-        .filter(|(file_path, file_nodes)| {
-            is_resource_source_path(file_path)
-                || file_nodes.iter().any(|node| {
-                    matches!(
-                        node.language.to_ascii_lowercase().as_str(),
-                        "java" | "kotlin" | "scala" | "groovy" | "python"
-                    )
-                })
-        })
-        .collect()
-}
-
-fn is_resource_source_path(file_path: &str) -> bool {
-    matches!(
-        Path::new(&file_path.to_ascii_lowercase())
-            .extension()
-            .and_then(|ext| ext.to_str()),
-        Some("java" | "kt" | "kts" | "scala" | "groovy" | "py")
-    )
 }
 
 fn extract_resource_detections(

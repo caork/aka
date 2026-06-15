@@ -5,8 +5,8 @@ use serde_json::{json, Map, Value};
 
 use super::migration_synth::{detect_migrations, ExistingTable, MigrationTableRef, SynthMigration};
 use super::{
-    find_matching_paren, nodes_by_file, read_repo_text, split_top_level_commas, stable_hash,
-    EdgeRec, NodeRec, SynthNode,
+    find_matching_paren, project_code_nodes_by_file, read_repo_text, split_top_level_commas,
+    stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -214,7 +214,8 @@ pub(super) fn synthesize_persistence_from_sources(
     repo: &Path,
     nodes: &BTreeMap<String, SynthNode>,
 ) -> SynthPersistenceGraph {
-    let by_file = persistence_nodes_by_file(nodes);
+    let project_sources = ProjectSourceSet::discover(repo);
+    let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
     let mut tables: BTreeMap<String, SynthTable> = BTreeMap::new();
     let mut entity_by_name: BTreeMap<String, EntityInfo> = BTreeMap::new();
     let mut repositories: BTreeMap<String, SynthRepository> = BTreeMap::new();
@@ -265,7 +266,7 @@ pub(super) fn synthesize_persistence_from_sources(
         id: table.id.clone(),
         name: table.name.clone(),
     });
-    for migration in detect_migrations(repo, existing_tables) {
+    for migration in detect_migrations(repo, &project_sources, existing_tables) {
         for table_ref in &migration.tables {
             tables
                 .entry(table_ref.table_id.clone())
@@ -292,32 +293,6 @@ pub(super) fn synthesize_persistence_from_sources(
         migrations: migrations.into_values().collect(),
         edges: edges.into_values().collect(),
     }
-}
-
-fn persistence_nodes_by_file(
-    nodes: &BTreeMap<String, SynthNode>,
-) -> BTreeMap<String, Vec<&SynthNode>> {
-    nodes_by_file(nodes)
-        .into_iter()
-        .filter(|(file_path, file_nodes)| {
-            is_persistence_source_path(file_path)
-                || file_nodes.iter().any(|node| {
-                    matches!(
-                        node.language.to_ascii_lowercase().as_str(),
-                        "java" | "kotlin" | "scala" | "groovy" | "python"
-                    )
-                })
-        })
-        .collect()
-}
-
-fn is_persistence_source_path(file_path: &str) -> bool {
-    matches!(
-        Path::new(&file_path.to_ascii_lowercase())
-            .extension()
-            .and_then(|ext| ext.to_str()),
-        Some("java" | "kt" | "kts" | "scala" | "groovy" | "py")
-    )
 }
 
 fn detect_entity_table(text: &str, node: &SynthNode) -> Option<SynthTable> {
