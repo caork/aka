@@ -39,6 +39,7 @@ mod property_synth;
 mod resource_synth;
 mod route_consumer_synth;
 mod route_django_synth;
+mod route_realtime_synth;
 mod route_shape;
 mod route_spring_functional_synth;
 mod source_scan;
@@ -60,6 +61,7 @@ use property_synth::{synthesize_python_properties, SynthProperty};
 use resource_synth::{synthesize_resources_from_sources, SynthResource};
 use route_consumer_synth::attach_route_consumers;
 use route_django_synth::django_urlconf_routes_from_repo;
+use route_realtime_synth::realtime_routes_by_file;
 use route_shape::{
     extract_error_keys, extract_middleware, extract_response_keys, literal_occurrences,
 };
@@ -2467,6 +2469,7 @@ fn synthesize_routes_from_sources(
     let django_routes_by_file = django_urlconf_routes_from_repo(repo, &project_sources, &by_file);
     let spring_functional_routes_by_file =
         spring_functional_routes_from_repo(repo, &project_sources, nodes);
+    let realtime_routes_by_file = realtime_routes_by_file(&by_file);
     let mut routes: BTreeMap<(String, String), SynthRoute> = BTreeMap::new();
     for native in native_routes {
         let route = route_from_path(&native.file_path)
@@ -2557,6 +2560,24 @@ fn synthesize_routes_from_sources(
     }
 
     for (file_path, route_candidates) in spring_functional_routes_by_file {
+        let text = read_repo_text(repo, &file_path).unwrap_or_default();
+        let response_keys = extract_response_keys(&text);
+        let error_keys = extract_error_keys(&response_keys, &text);
+        let middleware = extract_middleware(&text);
+        for candidate in route_candidates {
+            merge_route_candidate(
+                &mut routes,
+                processes,
+                &file_path,
+                candidate,
+                &middleware,
+                &response_keys,
+                &error_keys,
+            );
+        }
+    }
+
+    for (file_path, route_candidates) in realtime_routes_by_file {
         let text = read_repo_text(repo, &file_path).unwrap_or_default();
         let response_keys = extract_response_keys(&text);
         let error_keys = extract_error_keys(&response_keys, &text);

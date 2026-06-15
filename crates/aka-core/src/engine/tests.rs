@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 
 mod semantic_messaging;
 mod semantic_events;
+mod semantic_routes;
 
 fn test_conn() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
