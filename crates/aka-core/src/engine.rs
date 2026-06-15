@@ -45,6 +45,7 @@ mod route_shape;
 mod route_shape_drf;
 mod route_shape_java;
 mod route_shape_python;
+mod route_shape_python_calls;
 mod route_spring_functional_synth;
 mod source_scan;
 mod tool_synth;
