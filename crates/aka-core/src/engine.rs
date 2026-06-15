@@ -2477,7 +2477,7 @@ fn synthesize_routes_from_sources(
         );
         route_candidates.extend(extract_annotated_routes(
             file_nodes,
-            python_prefixes.get(file_path).map(Vec::as_slice),
+            python_prefixes.get(file_path),
         ));
         dedup_route_candidates(&mut route_candidates);
         if route_candidates.is_empty() {
@@ -2832,7 +2832,7 @@ fn route_from_segments(segments: &[&str], api_prefix: bool) -> Option<String> {
 
 fn extract_annotated_routes(
     nodes: &[&SynthNode],
-    python_prefixes: Option<&[String]>,
+    python_prefixes: Option<&PythonRoutePrefixes>,
 ) -> Vec<RouteCandidate> {
     let mut class_prefixes: BTreeMap<String, String> = BTreeMap::new();
     for node in nodes
@@ -2866,22 +2866,20 @@ fn extract_annotated_routes(
             }
             continue;
         }
-        let prefixes: Vec<&str> = if is_python_route_node(node) {
-            python_prefixes
-                .filter(|prefixes| !prefixes.is_empty())
-                .map(|prefixes| prefixes.iter().map(String::as_str).collect())
-                .unwrap_or_else(|| vec![""])
+        let prefixes: Vec<String> = if is_python_route_node(node) {
+            python_route_prefixes_for_node(python_prefixes, node)
         } else {
             vec![node
                 .parent_class
                 .as_ref()
                 .and_then(|parent| class_prefixes.get(parent))
                 .map(String::as_str)
-                .unwrap_or("")]
+                .unwrap_or("")
+                .to_string()]
         };
         for prefix in prefixes {
             routes.push(RouteCandidate {
-                route: join_route_paths(prefix, &method_path),
+                route: join_route_paths(&prefix, &method_path),
                 method: node.route_method.clone(),
                 handler_id: Some(node.aka_id.clone()),
                 handler_name: Some(node.display_name().to_string()),
@@ -2889,6 +2887,40 @@ fn extract_annotated_routes(
         }
     }
     routes
+}
+
+fn python_route_prefixes_for_node(
+    python_prefixes: Option<&PythonRoutePrefixes>,
+    node: &SynthNode,
+) -> Vec<String> {
+    let Some(prefixes) = python_prefixes else {
+        return vec![String::new()];
+    };
+    let include_prefixes: Vec<String> = if prefixes.include.is_empty() {
+        vec![String::new()]
+    } else {
+        prefixes.include.clone()
+    };
+    let local_prefix = python_route_local_prefix(prefixes, node);
+    include_prefixes
+        .into_iter()
+        .map(|prefix| {
+            if let Some(local) = local_prefix {
+                join_route_paths(&prefix, local)
+            } else {
+                prefix
+            }
+        })
+        .collect()
+}
+
+fn python_route_local_prefix<'a>(
+    prefixes: &'a PythonRoutePrefixes,
+    node: &SynthNode,
+) -> Option<&'a str> {
+    router_name_from_python_decorators(&node.decorators)
+        .and_then(|router| prefixes.local_by_router.get(router))
+        .map(String::as_str)
 }
 
 fn is_python_route_node(node: &SynthNode) -> bool {
@@ -2899,7 +2931,7 @@ fn is_python_route_node(node: &SynthNode) -> bool {
 fn python_router_prefixes_by_file<'a>(
     repo: &Path,
     file_paths: impl Iterator<Item = &'a str>,
-) -> BTreeMap<String, Vec<String>> {
+) -> BTreeMap<String, PythonRoutePrefixes> {
     let mut python_files: Vec<String> = file_paths
         .filter(|path| path.to_ascii_lowercase().ends_with(".py"))
         .map(str::to_string)
@@ -2926,11 +2958,15 @@ fn python_router_prefixes_by_file<'a>(
         }
     }
 
-    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut out: BTreeMap<String, PythonRoutePrefixes> = BTreeMap::new();
     for file_path in &python_files {
         let Some(text) = read_repo_text(repo, file_path) else {
             continue;
         };
+        let local_by_router = extract_python_apirouter_prefixes(&text);
+        if !local_by_router.is_empty() {
+            out.entry(file_path.clone()).or_default().local_by_router = local_by_router;
+        }
         if !text.contains("include_router") {
             continue;
         }
@@ -2965,15 +3001,22 @@ fn python_router_prefixes_by_file<'a>(
             for target in targets {
                 out.entry(target)
                     .or_default()
+                    .include
                     .push(normalize_route_literal(&include.prefix));
             }
         }
     }
     for prefixes in out.values_mut() {
-        prefixes.sort();
-        prefixes.dedup();
+        prefixes.include.sort();
+        prefixes.include.dedup();
     }
     out
+}
+
+#[derive(Debug, Default)]
+struct PythonRoutePrefixes {
+    include: Vec<String>,
+    local_by_router: HashMap<String, String>,
 }
 
 fn repo_python_source_files(repo: &Path) -> Vec<String> {
@@ -3070,6 +3113,72 @@ fn python_router_imports(text: &str) -> PythonRouterImports {
         }
     }
     imports
+}
+
+fn extract_python_apirouter_prefixes(text: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut offset = 0usize;
+    while let Some(pos) = text[offset..].find("APIRouter") {
+        let name_start = offset + pos;
+        let name_end = name_start + "APIRouter".len();
+        let Some(open_rel) = text[name_start..].find('(') else {
+            break;
+        };
+        let open = name_start + open_rel;
+        if !text[name_end..open].trim().is_empty() {
+            offset = name_end;
+            continue;
+        }
+        let Some(close) = find_matching_paren(text, open) else {
+            offset = open + 1;
+            continue;
+        };
+        if let Some(router_name) = assigned_name_before_call(text, name_start) {
+            let args = &text[open + 1..close];
+            if let Some(prefix) = keyword_string_arg(args, "prefix") {
+                out.insert(router_name, normalize_route_literal(&prefix));
+            }
+        }
+        offset = close + 1;
+    }
+    out
+}
+
+fn assigned_name_before_call(text: &str, call_start: usize) -> Option<String> {
+    let line_start = text[..call_start].rfind('\n').map_or(0, |idx| idx + 1);
+    let before = text[line_start..call_start].trim();
+    let lhs = before.split_once('=')?.0.trim();
+    if lhs.contains(' ') || lhs.contains('.') || lhs.is_empty() {
+        return None;
+    }
+    Some(lhs.to_string()).filter(|name| name.chars().all(|ch| ch == '_' || ch.is_alphanumeric()))
+}
+
+fn router_name_from_python_decorators(decorators: &[String]) -> Option<&str> {
+    decorators.iter().find_map(|decorator| {
+        let text = decorator.trim().trim_start_matches('@');
+        let (receiver, method) = text.split_once('.')?;
+        let method = method
+            .split_once('(')
+            .map(|(name, _)| name)
+            .unwrap_or(method);
+        if matches!(
+            method,
+            "get"
+                | "post"
+                | "put"
+                | "patch"
+                | "delete"
+                | "head"
+                | "options"
+                | "api_route"
+                | "route"
+        ) {
+            Some(receiver)
+        } else {
+            None
+        }
+    })
 }
 
 fn split_python_import_alias(item: &str) -> (&str, Option<&str>) {
@@ -5150,7 +5259,7 @@ public class OrderController {
 from api import orders
 
 app = FastAPI()
-app.include_router(orders.router, prefix="/api/orders")
+app.include_router(orders.router, prefix="/api")
 "#,
         )
         .unwrap();
@@ -5158,7 +5267,7 @@ app.include_router(orders.router, prefix="/api/orders")
             repo.join("api/orders.py"),
             r#"from fastapi import APIRouter
 
-router = APIRouter()
+router = APIRouter(prefix="/orders")
 
 @router.get("/{id}")
 def get_order(id: str):
@@ -5197,6 +5306,73 @@ def get_order(id: str):
 
         let edge_types: Vec<_> = route.edge_recs().into_iter().map(|e| e.edge_type).collect();
         assert!(edge_types.contains(&"HANDLES_ROUTE".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_fastapi_local_apirouter_prefixes() {
+        let repo = temp_repo("fastapi-local-router");
+        std::fs::create_dir_all(repo.join("api")).unwrap();
+        std::fs::write(
+            repo.join("api/orders.py"),
+            r#"from fastapi import APIRouter
+
+router = APIRouter(prefix="/api/orders")
+
+@router.get("/{id}")
+def get_order(id: str):
+    return {"id": id}
+"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_node_props(
+            &conn,
+            1,
+            "Function",
+            "get_order",
+            "api.orders.get_order",
+            "api/orders.py",
+            json!({
+                "decorators": ["@router.get(\"/{id}\")"],
+                "language": "python",
+                "route_method": "GET",
+                "route_path": "/{id}",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let route = synth
+            .routes
+            .iter()
+            .find(|route| route.route == "/api/orders/{id}")
+            .expect("fastapi route with local APIRouter prefix");
+        assert_eq!(route.method.as_deref(), Some("GET"));
+        assert_eq!(
+            route.handler_id.as_deref(),
+            Some("cbm:1:api.orders.get_order")
+        );
+    }
+
+    #[test]
+    fn scans_fastapi_local_apirouter_prefixes() {
+        let repo = temp_repo("fastapi-prefix-scan");
+        std::fs::create_dir_all(repo.join("api")).unwrap();
+        std::fs::write(
+            repo.join("api/orders.py"),
+            r#"from fastapi import APIRouter
+
+router = APIRouter(prefix="/api/orders")
+"#,
+        )
+        .unwrap();
+
+        let prefixes = python_router_prefixes_by_file(&repo, ["api/orders.py"].into_iter());
+        let file = prefixes.get("api/orders.py").expect("file prefixes");
+        assert_eq!(
+            file.local_by_router.get("router").map(String::as_str),
+            Some("/api/orders")
+        );
     }
 
     #[test]
