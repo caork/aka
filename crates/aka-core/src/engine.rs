@@ -3514,13 +3514,16 @@ pub(super) fn spring_mapping_path(decorators: &[String]) -> Option<String> {
     None
 }
 
-pub(super) fn feign_client_path(decorators: &[String]) -> Option<String> {
+pub(super) fn declarative_http_client_path(decorators: &[String]) -> Option<String> {
     for decorator in decorators {
         let Some(name_end) = decorator.find('(') else {
             continue;
         };
         let name = decorator[..name_end].trim_start_matches('@');
-        if name.rsplit('.').next().unwrap_or(name) != "FeignClient" {
+        if !matches!(
+            name.rsplit('.').next().unwrap_or(name),
+            "FeignClient" | "HttpExchange"
+        ) {
             continue;
         }
         let args_start = name_end + 1;
@@ -3531,6 +3534,40 @@ pub(super) fn feign_client_path(decorators: &[String]) -> Option<String> {
         let args = &decorator[args_start..args_end];
         let path = keyword_string_arg(args, "path")
             .or_else(|| keyword_string_arg(args, "url"))
+            .or_else(|| first_route_literal(args));
+        if let Some(path) = path {
+            return Some(normalize_route_literal(&path));
+        }
+        return Some("/".into());
+    }
+    None
+}
+
+pub(super) fn declarative_http_method_path(decorators: &[String]) -> Option<String> {
+    for decorator in decorators {
+        let Some(name_end) = decorator.find('(') else {
+            continue;
+        };
+        let name = decorator[..name_end].trim_start_matches('@');
+        if !matches!(
+            name.rsplit('.').next().unwrap_or(name),
+            "HttpExchange"
+                | "GetExchange"
+                | "PostExchange"
+                | "PutExchange"
+                | "DeleteExchange"
+                | "PatchExchange"
+        ) {
+            continue;
+        }
+        let args_start = name_end + 1;
+        let args_end = decorator.rfind(')').unwrap_or(decorator.len());
+        if args_start >= args_end {
+            return Some("/".into());
+        }
+        let args = &decorator[args_start..args_end];
+        let path = keyword_string_arg(args, "url")
+            .or_else(|| keyword_string_arg(args, "path"))
             .or_else(|| first_route_literal(args));
         if let Some(path) = path {
             return Some(normalize_route_literal(&path));

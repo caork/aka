@@ -1323,6 +1323,114 @@ public interface OrderClient {
 }
 
 #[test]
+fn links_spring_http_interface_consumers_to_routes() {
+    let repo = temp_repo("spring-http-interface-consumers");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    std::fs::write(
+        repo.join("src/main/java/com/example/orders/OrderController.java"),
+        r#"package com.example.orders;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+    @GetMapping("/{id}")
+    public OrderDto getOrder(String id) {
+        return new OrderDto(id, "ok");
+    }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/main/java/com/example/orders/OrderHttpClient.java"),
+        r#"package com.example.orders;
+
+import org.springframework.web.service.annotation.GetExchange;
+import org.springframework.web.service.annotation.HttpExchange;
+
+@HttpExchange(url = "/api/orders")
+public interface OrderHttpClient {
+    @GetExchange("/{id}")
+    OrderDto getOrder(String id);
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Class",
+        "OrderController",
+        "com.example.orders.OrderController",
+        "src/main/java/com/example/orders/OrderController.java",
+        json!({
+            "decorators": ["@RestController", "@RequestMapping(\"/api/orders\")"],
+            "language": "java",
+        }),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Method",
+        "getOrder",
+        "com.example.orders.OrderController.getOrder",
+        "src/main/java/com/example/orders/OrderController.java",
+        json!({
+            "decorators": ["@GetMapping(\"/{id}\")"],
+            "language": "java",
+            "parent_class": "cbm:1:com.example.orders.OrderController",
+            "route_method": "GET",
+            "route_path": "/{id}",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "DEFINES_METHOD");
+    insert_node_props(
+        &conn,
+        3,
+        "Interface",
+        "OrderHttpClient",
+        "com.example.orders.OrderHttpClient",
+        "src/main/java/com/example/orders/OrderHttpClient.java",
+        json!({
+            "decorators": ["@HttpExchange(url = \"/api/orders\")"],
+            "language": "java",
+        }),
+    );
+    insert_node_props(
+        &conn,
+        4,
+        "Method",
+        "getOrder",
+        "com.example.orders.OrderHttpClient.getOrder",
+        "src/main/java/com/example/orders/OrderHttpClient.java",
+        json!({
+            "decorators": ["@GetExchange(\"/{id}\")"],
+            "language": "java",
+            "parent_class": "cbm:3:com.example.orders.OrderHttpClient",
+        }),
+    );
+    insert_edge(&conn, 2, 3, 4, "DEFINES_METHOD");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| {
+            route.route == "/api/orders/{id}"
+                && route.handler_id.as_deref()
+                    == Some("cbm:2:com.example.orders.OrderController.getOrder")
+        })
+        .expect("spring provider route");
+    assert!(route.consumers.iter().any(|consumer| {
+        consumer.node_id == "cbm:4:com.example.orders.OrderHttpClient.getOrder"
+    }));
+}
+
+#[test]
 fn inherits_spring_routes_from_controller_interfaces() {
     let repo = temp_repo("java-interface-routes");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
