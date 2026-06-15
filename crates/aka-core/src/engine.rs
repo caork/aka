@@ -2599,10 +2599,17 @@ fn synthesize_routes_from_sources(
 
     for (file_path, route_candidates) in django_routes_by_file {
         let text = read_repo_text(repo, &file_path).unwrap_or_default();
-        let response_keys = extract_response_keys_for_file(repo, &file_path, &text);
-        let error_keys = extract_error_keys(&response_keys, &text);
+        let fallback_response_keys = extract_response_keys_for_file(repo, &file_path, &text);
+        let fallback_error_keys = extract_error_keys(&fallback_response_keys, &text);
         let middleware = extract_middleware(&text);
         for candidate in route_candidates {
+            let (response_keys, error_keys) = response_keys_for_route_candidate(
+                repo,
+                nodes,
+                &candidate,
+                &fallback_response_keys,
+                &fallback_error_keys,
+            );
             merge_route_candidate(
                 &mut routes,
                 processes,
@@ -2660,6 +2667,48 @@ fn synthesize_routes_from_sources(
             .then_with(|| a.file_path.cmp(&b.file_path))
     });
     out
+}
+
+fn response_keys_for_route_candidate(
+    repo: &Path,
+    nodes: &BTreeMap<String, SynthNode>,
+    candidate: &RouteCandidate,
+    fallback_response_keys: &[String],
+    fallback_error_keys: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let Some(handler_id) = candidate.handler_id.as_deref() else {
+        return (
+            fallback_response_keys.to_vec(),
+            fallback_error_keys.to_vec(),
+        );
+    };
+    let Some(handler) = nodes.get(handler_id) else {
+        return (
+            fallback_response_keys.to_vec(),
+            fallback_error_keys.to_vec(),
+        );
+    };
+    if handler.file_path.is_empty() {
+        return (
+            fallback_response_keys.to_vec(),
+            fallback_error_keys.to_vec(),
+        );
+    }
+    let Some(text) = read_repo_text(repo, &handler.file_path) else {
+        return (
+            fallback_response_keys.to_vec(),
+            fallback_error_keys.to_vec(),
+        );
+    };
+    let response_keys = extract_response_keys_for_file(repo, &handler.file_path, &text);
+    if response_keys.is_empty() {
+        return (
+            fallback_response_keys.to_vec(),
+            fallback_error_keys.to_vec(),
+        );
+    }
+    let error_keys = extract_error_keys(&response_keys, &text);
+    (response_keys, error_keys)
 }
 
 fn merge_route_candidate(

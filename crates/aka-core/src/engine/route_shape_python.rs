@@ -27,7 +27,12 @@ pub(super) fn extract_python_response_model_keys_for_file(
                 .or_insert_with(|| fields.clone());
         }
     }
-    extract_python_response_model_keys_from_models(text, models)
+    let mut keys: BTreeSet<String> =
+        extract_python_response_model_keys_from_models(text, models.clone())
+            .into_iter()
+            .collect();
+    keys.extend(extract_drf_serializer_keys_from_models(text, &models));
+    keys.into_iter().collect()
 }
 
 fn extract_python_response_model_keys_from_models(
@@ -52,6 +57,37 @@ fn extract_python_response_model_keys_from_models(
         }
     }
     keys.into_iter().collect()
+}
+
+fn extract_drf_serializer_keys_from_models(
+    text: &str,
+    models: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    for serializer in drf_serializer_class_names(text) {
+        if let Some(fields) = models.get(&serializer) {
+            keys.extend(fields.iter().cloned());
+        }
+    }
+    keys.into_iter().collect()
+}
+
+fn drf_serializer_class_names(text: &str) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some((left, right)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if left.trim() != "serializer_class" {
+            continue;
+        }
+        let name = right.trim().split('#').next().unwrap_or("").trim();
+        if let Some(simple) = python_model_name(name) {
+            out.insert(simple);
+        }
+    }
+    out.into_iter().collect()
 }
 
 #[derive(Debug)]
@@ -259,7 +295,8 @@ fn python_field_name(line: &str) -> Option<String> {
         .or_else(|| {
             let (name, rhs) = code.split_once('=')?;
             let rhs = rhs.trim_start();
-            (rhs.starts_with("Field(")).then_some(name)
+            (rhs.starts_with("Field(") || rhs.starts_with("serializers.") || rhs.contains("Field("))
+                .then_some(name)
         })?
         .trim();
     (is_python_ident(name) && !name.starts_with("__")).then(|| name.to_string())
