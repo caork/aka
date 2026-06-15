@@ -711,6 +711,7 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Migration"
             | "Cache"
             | "Event"
+            | "Topic"
             | "Policy"
             | "Transaction"
             | "GraphQL"
@@ -738,6 +739,7 @@ fn node_search_text(node: &NodeRec) -> String {
             | "Migration"
             | "Cache"
             | "Event"
+            | "Topic"
             | "Policy"
             | "Community"
             | "Resource"
@@ -777,6 +779,8 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "cacheSource");
     push_prop_str(&mut parts, &node.properties, "bus");
     push_prop_str(&mut parts, &node.properties, "eventSource");
+    push_prop_str(&mut parts, &node.properties, "broker");
+    push_prop_str(&mut parts, &node.properties, "topicSource");
     push_prop_str(&mut parts, &node.properties, "policyType");
     push_prop_str(&mut parts, &node.properties, "policySource");
     push_prop_str(&mut parts, &node.properties, "url");
@@ -793,6 +797,7 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_array(&mut parts, &node.properties, "responseKeys");
     push_prop_array(&mut parts, &node.properties, "errorKeys");
     push_prop_array(&mut parts, &node.properties, "middleware");
+    push_prop_array(&mut parts, &node.properties, "consumerGroups");
     parts.join(" ")
 }
 
@@ -1035,6 +1040,15 @@ mod tests {
         );
         event_props.insert("eventSource".into(), Value::String("source-scan".into()));
 
+        let mut topic_props = Map::new();
+        topic_props.insert("name".into(), Value::String("orders.created".into()));
+        topic_props.insert("broker".into(), Value::String("kafka".into()));
+        topic_props.insert("topicSource".into(), Value::String("source-scan".into()));
+        topic_props.insert(
+            "consumerGroups".into(),
+            Value::Array(vec![Value::String("orders-service".into())]),
+        );
+
         let mut policy_props = Map::new();
         policy_props.insert("name".into(), Value::String("orders.view_order".into()));
         policy_props.insert("policyType".into(), Value::String("permission".into()));
@@ -1131,6 +1145,11 @@ mod tests {
                         properties: event_props,
                     },
                     NodeRec {
+                        id: "topic:orders-created".into(),
+                        label: "Topic".into(),
+                        properties: topic_props,
+                    },
+                    NodeRec {
                         id: "policy:orders-view".into(),
                         label: "Policy".into(),
                         properties: policy_props,
@@ -1208,6 +1227,11 @@ mod tests {
         let event_hit = event_hits.first().expect("event search hit");
         assert_eq!(event_hit.node_id, "event:order-created");
         assert_eq!(event_hit.label, "Event");
+
+        let topic_hits = index.search("orders service kafka group", 5).unwrap();
+        let topic_hit = topic_hits.first().expect("topic search hit");
+        assert_eq!(topic_hit.node_id, "topic:orders-created");
+        assert_eq!(topic_hit.label, "Topic");
 
         let policy_hits = index.search("orders view permission", 5).unwrap();
         let policy_hit = policy_hits.first().expect("policy search hit");
