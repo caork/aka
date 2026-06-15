@@ -141,7 +141,8 @@ Updater 公钥/签名私钥只允许通过 CI secret / 本地环境变量传给 
 `scripts/package-release.sh` 会在检测到公钥和私钥时临时传入 updater 配置与
 `bundle.createUpdaterArtifacts=true`，从 Tauri 产物目录复制 `.app.tar.gz`/`.sig` 或 `setup.exe.sig` 到
 `dist/`；没有这些环境变量时仍正常发布手动下载包，只是 `latest.json.platforms` 为空并给出 warning。tag
-release 使用 `AKA_TAURI_UPDATER=required` 和 `--require-updater true`，缺 secret 或缺签名平台会直接失败。
+release 使用 `AKA_TAURI_UPDATER=auto`；存在 updater 签名 secret 时生成自动更新工件，缺 secret 时仍发布
+手动下载安装包。`latest.json.platforms` 只包含已签名 updater 平台，未签名平台仍可从 `downloads` 手动下载。
 默认 updater 端点为 `https://github.com/caork/aka/releases/latest/download/latest.json`；如需切到 CDN 或
 hawkingrad mirror，可在 CI/本地打包时设置 `AKA_UPDATER_ENDPOINT` 覆盖。
 
