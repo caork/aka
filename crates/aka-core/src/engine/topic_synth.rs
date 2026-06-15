@@ -359,6 +359,42 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
         "java-sqs-template-convert-and-send",
         0,
     ));
+    out.extend(extract_call_destination_literals(
+        text,
+        nodes,
+        "messagingTemplate.convertAndSend",
+        "stomp",
+        TopicEndpointKind::Producer,
+        "java-spring-stomp-template-send",
+        0,
+    ));
+    out.extend(extract_call_destination_literals(
+        text,
+        nodes,
+        "simpMessagingTemplate.convertAndSend",
+        "stomp",
+        TopicEndpointKind::Producer,
+        "java-spring-stomp-template-send",
+        0,
+    ));
+    out.extend(extract_call_destination_literals(
+        text,
+        nodes,
+        "messagingTemplate.convertAndSendToUser",
+        "stomp",
+        TopicEndpointKind::Producer,
+        "java-spring-stomp-template-send-to-user",
+        1,
+    ));
+    out.extend(extract_call_destination_literals(
+        text,
+        nodes,
+        "simpMessagingTemplate.convertAndSendToUser",
+        "stomp",
+        TopicEndpointKind::Producer,
+        "java-spring-stomp-template-send-to-user",
+        1,
+    ));
     out
 }
 
@@ -592,6 +628,39 @@ fn extract_call_topic_literals(
             continue;
         };
         for topic in string_literals(arg) {
+            out.push(topic_detection(
+                topic,
+                broker,
+                kind,
+                node.aka_id.clone(),
+                strategy,
+            ));
+        }
+    }
+    out
+}
+
+fn extract_call_destination_literals(
+    text: &str,
+    nodes: &[&SynthNode],
+    callee: &str,
+    broker: &str,
+    kind: TopicEndpointKind,
+    strategy: &str,
+    arg_index: usize,
+) -> Vec<TopicDetection> {
+    let mut out = Vec::new();
+    for call in find_call_args(text, callee) {
+        let Some(node) =
+            node_at_offset(text, nodes, call.start).or_else(|| pick_handler_node(nodes))
+        else {
+            continue;
+        };
+        let args = split_top_level_commas(call.args);
+        let Some(arg) = args.get(arg_index) else {
+            continue;
+        };
+        for topic in destination_literals(arg) {
             out.push(topic_detection(
                 topic,
                 broker,

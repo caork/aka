@@ -342,6 +342,14 @@ class OrderSocket {
     public OrderAck handlePrivate(OrderMessage message) {
         return new OrderAck();
     }
+
+    public void broadcast(OrderAck ack) {
+        messagingTemplate.convertAndSend("/topic/orders", ack);
+    }
+
+    public void sendUser(String user, OrderAck ack) {
+        messagingTemplate.convertAndSendToUser(user, "/queue/orders", ack);
+    }
 }
 "#,
     )
@@ -378,6 +386,28 @@ class OrderSocket {
             "language": "java",
         }),
     );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "broadcast",
+        "com.example.realtime.OrderSocket.broadcast",
+        file,
+        (19, 21),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "sendUser",
+        "com.example.realtime.OrderSocket.sendUser",
+        file,
+        (23, 25),
+        json!({
+            "language": "java",
+        }),
+    );
 
     let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
     let public_topic = synth
@@ -386,11 +416,14 @@ class OrderSocket {
         .find(|topic| topic.name == "/topic/orders")
         .expect("stomp public topic");
     assert_eq!(public_topic.broker, "stomp");
-    assert_eq!(public_topic.producers.len(), 1);
-    assert_eq!(
-        public_topic.producers[0].node_id,
-        "cbm:1:com.example.realtime.OrderSocket.handleOrder"
-    );
+    assert_eq!(public_topic.producers.len(), 2);
+    let public_producers: Vec<_> = public_topic
+        .producers
+        .iter()
+        .map(|endpoint| endpoint.node_id.as_str())
+        .collect();
+    assert!(public_producers.contains(&"cbm:1:com.example.realtime.OrderSocket.handleOrder"));
+    assert!(public_producers.contains(&"cbm:3:com.example.realtime.OrderSocket.broadcast"));
 
     let user_topic = synth
         .topics
@@ -398,11 +431,14 @@ class OrderSocket {
         .find(|topic| topic.name == "/queue/orders")
         .expect("stomp user queue topic");
     assert_eq!(user_topic.broker, "stomp");
-    assert_eq!(user_topic.producers.len(), 1);
-    assert_eq!(
-        user_topic.producers[0].strategy,
-        "java-spring-stomp-send-to-user"
-    );
+    assert_eq!(user_topic.producers.len(), 2);
+    let user_strategies: Vec<_> = user_topic
+        .producers
+        .iter()
+        .map(|endpoint| endpoint.strategy.as_str())
+        .collect();
+    assert!(user_strategies.contains(&"java-spring-stomp-send-to-user"));
+    assert!(user_strategies.contains(&"java-spring-stomp-template-send-to-user"));
 }
 
 #[test]
