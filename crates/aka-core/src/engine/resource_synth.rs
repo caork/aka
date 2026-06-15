@@ -165,6 +165,7 @@ fn extract_resource_detections(
         text.contains("httpx") || text.contains("AsyncClient") || text.contains("Client("),
     ));
     out.extend(extract_python_httpx_client_relative_calls(text, nodes));
+    out.extend(extract_python_requests_base_url_session_calls(text, nodes));
     out.extend(extract_contextual_http_client_calls(
         text,
         nodes,
@@ -225,6 +226,7 @@ fn aiohttp_base_urls(text: &str) -> Vec<String> {
     for callee in ["aiohttp.ClientSession", "ClientSession"] {
         for call in find_call_args(text, callee) {
             out.extend(keyword_url_literals(call.args, "base_url"));
+            out.extend(first_arg_url_literals(call.args));
         }
     }
     out.sort();
@@ -269,6 +271,53 @@ fn httpx_base_urls(text: &str) -> Vec<String> {
     for callee in ["httpx.Client", "httpx.AsyncClient", "Client", "AsyncClient"] {
         for call in find_call_args(text, callee) {
             out.extend(keyword_url_literals(call.args, "base_url"));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.truncate(4);
+    out
+}
+
+fn extract_python_requests_base_url_session_calls(
+    text: &str,
+    nodes: &[&SynthNode],
+) -> Vec<ResourceDetection> {
+    if !(text.contains("BaseUrlSession") || text.contains("base_url")) {
+        return Vec::new();
+    }
+    let base_urls = requests_base_url_session_urls(text);
+    if base_urls.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for method in [".get", ".post", ".put", ".patch", ".delete", ".request"] {
+        for call in find_call_args(text, method) {
+            let Some(node) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            for url in relative_urls_from_args(call.args, &base_urls) {
+                out.push(ResourceDetection {
+                    url,
+                    node_id: node.aka_id.clone(),
+                    strategy: "python-requests-base-url-session".into(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn requests_base_url_session_urls(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for callee in [
+        "BaseUrlSession",
+        "sessions.BaseUrlSession",
+        "requests_toolbelt.sessions.BaseUrlSession",
+    ] {
+        for call in find_call_args(text, callee) {
+            out.extend(keyword_url_literals(call.args, "base_url"));
+            out.extend(first_arg_url_literals(call.args));
         }
     }
     out.sort();
@@ -350,6 +399,16 @@ fn keyword_url_literals(args: &str, key: &str) -> Vec<String> {
         out.extend(url_literals(&trimmed[needle.len()..]));
     }
     out
+}
+
+fn first_arg_url_literals(args: &str) -> Vec<String> {
+    let Some(first) = split_top_level_commas(args).first().copied() else {
+        return Vec::new();
+    };
+    if first.contains('=') {
+        return Vec::new();
+    }
+    url_literals(first)
 }
 
 fn first_relative_path_literal(args: &str) -> Option<String> {
