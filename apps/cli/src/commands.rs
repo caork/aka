@@ -120,7 +120,18 @@ where
             out,
         } => run_lod(repo, max_nodes, out),
         Cmd::Mcp => tokio_rt()?.block_on(async {
-            aka_mcp::serve_stdio(Arc::new(AkaBackend::new()) as Arc<dyn Backend>).await
+            let backend = AkaBackend::new();
+            match backend.auto_index_current_workspace() {
+                Ok(Some(name)) => {
+                    eprintln!("aka ▸ MCP detected current workspace; indexing queued as {name}");
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!("aka ▸ MCP workspace auto-index skipped: {err:#}");
+                }
+            }
+            backend.start_auto_indexer();
+            aka_mcp::serve_stdio(Arc::new(backend) as Arc<dyn Backend>).await
         }),
         Cmd::Serve { addr } => tokio_rt()?.block_on(async {
             eprintln!("aka -> http://{addr}");

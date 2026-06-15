@@ -25,8 +25,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context, Result};
 
 use aka_core::{
-    aka_home, clamp_render_nodes, load_index_state, ArtifactStats, EngineEvent, IndexState,
-    Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
+    aka_home, clamp_render_nodes, load_index_state, repo_dir_name, ArtifactStats, EngineEvent,
+    IndexState, Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
 };
 use aka_graph::{Adjacency, GraphStore, NodeRow};
 use aka_mcp::{
@@ -796,6 +796,75 @@ fn derive_git_name(url: &str) -> Result<String> {
     Ok(name)
 }
 
+fn derive_local_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "repo".into())
+}
+
+fn unique_local_name(registry: &Registry, path: &Path) -> String {
+    let base = derive_local_name(path);
+    if registry.find_by_name(&base).is_none() {
+        return base;
+    }
+    let with_hash = repo_dir_name(path);
+    if registry.find_by_name(&with_hash).is_none() {
+        return with_hash;
+    }
+    for i in 2.. {
+        let candidate = format!("{with_hash}-{i}");
+        if registry.find_by_name(&candidate).is_none() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded local repo name search")
+}
+
+fn discover_workspace_root(start: &Path) -> Result<Option<PathBuf>> {
+    let start = start
+        .canonicalize()
+        .with_context(|| format!("resolve workspace path {}", start.display()))?;
+    let mut cmd = Command::new("git");
+    cmd.current_dir(&start)
+        .arg("rev-parse")
+        .arg("--show-toplevel");
+    hide_child_console(&mut cmd);
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !root.is_empty() {
+                return Ok(Some(PathBuf::from(root).canonicalize()?));
+            }
+        }
+    }
+    if start.is_dir()
+        && has_workspace_marker(&start)
+        && RepoQuickState::compute(&start).is_ok_and(|state| !state.files.is_empty())
+    {
+        return Ok(Some(start));
+    }
+    Ok(None)
+}
+
+fn has_workspace_marker(path: &Path) -> bool {
+    const MARKERS: &[&str] = &[
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "requirements.txt",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "go.mod",
+        "composer.json",
+        "Gemfile",
+    ];
+    MARKERS.iter().any(|marker| path.join(marker).is_file())
+}
+
 fn git_callbacks<'a>() -> RemoteCallbacks<'a> {
     let mut callbacks = RemoteCallbacks::new();
     callbacks.credentials(|_, username_from_url, allowed| {
@@ -1451,6 +1520,54 @@ impl AkaBackend {
         std::thread::spawn(move || {
             run_auto_indexer(auto, jobs, handles, engine_dir);
         });
+    }
+
+    pub fn auto_index_current_workspace(&self) -> Result<Option<String>> {
+        let cwd = std::env::current_dir().context("read current directory")?;
+        let Some(repo) = discover_workspace_root(&cwd)? else {
+            return Ok(None);
+        };
+        self.auto_index_workspace(repo)
+    }
+
+    fn auto_index_workspace(&self, repo: PathBuf) -> Result<Option<String>> {
+        let repo = repo
+            .canonicalize()
+            .with_context(|| format!("resolve workspace repo {}", repo.display()))?;
+        let registry = Registry::load()?;
+        if registry.find(&repo).is_some() {
+            return Ok(None);
+        }
+        if self
+            .jobs
+            .lock()
+            .expect("jobs lock")
+            .values()
+            .any(|job| job.path == repo)
+        {
+            return Ok(None);
+        }
+        let name = unique_local_name(&registry, &repo);
+        validate_name(&name)?;
+        let job_name = name.clone();
+        let job_path = repo.clone();
+        let engine_dir = self.engine_dir();
+        self.spawn_job(name.clone(), "local", None, repo, move |jobs, name| {
+            update_job(&jobs, &name, |job| {
+                job.set_stage(
+                    "queued",
+                    "Current workspace detected by MCP; indexing automatically",
+                    2.0,
+                );
+            });
+            run_analyze_job(&jobs, &name, job_path.clone(), engine_dir)?;
+            update_job(&jobs, &name, |job| {
+                job.set_stage("register", "Saving repository metadata", 98.0);
+            });
+            finalize_entry(&job_path, &job_name, "local", None)?;
+            Ok(job_path)
+        });
+        Ok(Some(name))
     }
 
     /// 名字可用性守卫：已注册或有进行中任务 → 拒绝。
@@ -2751,6 +2868,71 @@ mod tests {
         assert!(!state.files.contains_key("node_modules/pkg/index.js"));
         assert!(!state.files.contains_key("target/debug/app"));
         assert!(!state.files.contains_key(".git/HEAD"));
+    }
+
+    #[test]
+    fn discover_workspace_root_uses_git_toplevel() {
+        let repo = temp_repo("workspace-git");
+        std::fs::create_dir_all(repo.join("src/nested")).unwrap();
+        std::fs::write(repo.join("src/nested/lib.rs"), "pub fn keep() {}\n").unwrap();
+        let status = Command::new("git")
+            .arg("init")
+            .arg(&repo)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+
+        let root = discover_workspace_root(&repo.join("src/nested"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(root, repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discover_workspace_root_ignores_empty_non_git_dirs() {
+        let repo = temp_repo("workspace-empty");
+
+        assert!(discover_workspace_root(&repo).unwrap().is_none());
+    }
+
+    #[test]
+    fn discover_workspace_root_accepts_marked_non_git_dirs() {
+        let repo = temp_repo("workspace-marked");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
+        std::fs::write(repo.join("src/app.py"), "def main(): pass\n").unwrap();
+
+        let root = discover_workspace_root(&repo).unwrap().unwrap();
+
+        assert_eq!(root, repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn unique_local_name_uses_path_hash_on_name_collision() {
+        let repo = temp_repo("workspace-name");
+        let other = temp_repo("other").join("workspace-name");
+        std::fs::create_dir_all(&other).unwrap();
+        let existing_name = derive_local_name(&repo);
+        let mut registry = Registry::default();
+        registry.upsert(RepoEntry {
+            name: existing_name.clone(),
+            repo_path: other,
+            data_dir: "/tmp/data".into(),
+            indexed_at: None,
+            engine_sha: None,
+            stats: ArtifactStats::default(),
+            embeddings_enabled: false,
+            source_kind: "local".into(),
+            source_url: None,
+            render_max_nodes: None,
+        });
+
+        let repo = repo.canonicalize().unwrap();
+        let name = unique_local_name(&registry, &repo);
+
+        assert_ne!(name, existing_name);
+        assert_eq!(name, repo_dir_name(&repo));
     }
 
     #[test]

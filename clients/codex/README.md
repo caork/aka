@@ -25,6 +25,7 @@ codex mcp add aka -- /absolute/path/to/AKA mcp
 - **路径**：Codex 启动 stdio server 时继承的 PATH 可能与你的交互 shell 不同；`command` 用桌面 AKA 可执行文件的绝对路径最稳。
 - **超时**：`analyze` 大仓库耗时较长，必要时在该表里加 `tool_timeout_sec = 120`。
 - **环境变量**：aka 默认读 `~/.aka/` 注册表，无需额外 env；如需自定义可加 `[mcp_servers.aka.env]` 表。
+- **自动索引**：`AKA mcp` 启动后会自动发现当前 Codex 工作区；如果还没有索引，会在后台排队分析。会话里先调用 `list_repos`，看到 `status: "indexing"` 时稍后重试查询即可。
 
 ## 验证
 

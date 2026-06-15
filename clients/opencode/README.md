@@ -19,6 +19,8 @@ http://127.0.0.1:4112/mcp
 
 OpenCode 通过这个本地 endpoint 调用 aka 工具；不需要用户单独安装或启动 CLI 版 `aka.exe`。如果 OpenCode 提示 MCP 连接失败，先确认 AKA 桌面端正在运行。
 
+如果你把 OpenCode 配成 stdio 方式直接运行 `AKA mcp`，aka 会像 Claude Code / Codex 一样自动发现当前工作区，并在缺索引时后台排队分析。默认 remote 方式复用桌面端的全局仓库列表。
+
 ## ② MCP 配置
 
 OpenCode 的 MCP 配置写在 `opencode.json` 的 `mcp` 键下：全局 `~/.config/opencode/opencode.json`，或项目根的 `opencode.json`（可入 git，schema 相同；OpenCode 从当前目录向上找到最近的 git 根）。
