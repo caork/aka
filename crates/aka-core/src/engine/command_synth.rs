@@ -4,9 +4,9 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use super::{
-    find_call_args, is_project_test_source_path, nodes_by_file, process_ids_for_entry,
-    read_repo_text, read_string_literal, split_top_level_commas, stable_hash, EdgeRec, NodeRec,
-    ProjectSourceSet, SynthNode, SynthProcess,
+    find_call_args, process_ids_for_entry, project_code_nodes_by_file, read_repo_text,
+    read_string_literal, split_top_level_commas, stable_hash, EdgeRec, NodeRec, ProjectSourceSet,
+    SynthNode, SynthProcess,
 };
 
 #[derive(Debug, Clone)]
@@ -89,34 +89,37 @@ pub(super) fn synthesize_commands_from_sources(
     processes: &[SynthProcess],
 ) -> Vec<SynthCommand> {
     let project_sources = ProjectSourceSet::discover(repo);
-    let by_file = command_nodes_by_file(repo, nodes, &project_sources);
+    let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for (file_path, file_nodes) in by_file {
         let text = read_repo_text(repo, &file_path);
+        if let Some(text) = text.as_deref() {
+            for (node, detection) in detect_spring_runner_commands(text, &file_nodes) {
+                push_command(
+                    &mut out,
+                    &mut seen,
+                    file_path.as_str(),
+                    processes,
+                    node,
+                    detection,
+                );
+            }
+        }
         for node in file_nodes
             .iter()
             .copied()
             .filter(|node| matches!(node.label.as_str(), "Class" | "Function" | "Method"))
         {
             for detection in detect_node_commands(text.as_deref(), node) {
-                let key = format!(
-                    "{}|{}|{}|{}",
-                    node.aka_id, detection.command_type, detection.name, detection.strategy
+                push_command(
+                    &mut out,
+                    &mut seen,
+                    file_path.as_str(),
+                    processes,
+                    node,
+                    detection,
                 );
-                if !seen.insert(key.clone()) {
-                    continue;
-                }
-                out.push(SynthCommand {
-                    id: format!("command:heuristic:{:016x}", stable_hash(&key)),
-                    name: detection.name,
-                    command_type: detection.command_type,
-                    file_path: file_path.clone(),
-                    handler_id: node.aka_id.clone(),
-                    handler_name: node.display_name().to_string(),
-                    strategy: detection.strategy,
-                    process_ids: process_ids_for_entry(processes, &file_path, Some(&node.aka_id)),
-                });
             }
         }
     }
@@ -129,55 +132,38 @@ pub(super) fn synthesize_commands_from_sources(
     out
 }
 
+fn push_command(
+    out: &mut Vec<SynthCommand>,
+    seen: &mut HashSet<String>,
+    file_path: &str,
+    processes: &[SynthProcess],
+    node: &SynthNode,
+    detection: CommandDetection,
+) {
+    let key = format!(
+        "{}|{}|{}|{}",
+        node.aka_id, detection.command_type, detection.name, detection.strategy
+    );
+    if !seen.insert(key.clone()) {
+        return;
+    }
+    out.push(SynthCommand {
+        id: format!("command:heuristic:{:016x}", stable_hash(&key)),
+        name: detection.name,
+        command_type: detection.command_type,
+        file_path: file_path.to_string(),
+        handler_id: node.aka_id.clone(),
+        handler_name: node.display_name().to_string(),
+        strategy: detection.strategy,
+        process_ids: process_ids_for_entry(processes, file_path, Some(&node.aka_id)),
+    });
+}
+
 #[derive(Debug, Clone)]
 struct CommandDetection {
     name: String,
     command_type: String,
     strategy: String,
-}
-
-fn command_nodes_by_file<'a>(
-    repo: &Path,
-    nodes: &'a BTreeMap<String, SynthNode>,
-    project_sources: &ProjectSourceSet,
-) -> BTreeMap<String, Vec<&'a SynthNode>> {
-    nodes_by_file(nodes)
-        .into_iter()
-        .filter(|(file_path, file_nodes)| {
-            is_project_command_source(repo, file_path, file_nodes, project_sources)
-        })
-        .collect()
-}
-
-fn is_project_command_source(
-    repo: &Path,
-    file_path: &str,
-    file_nodes: &[&SynthNode],
-    project_sources: &ProjectSourceSet,
-) -> bool {
-    if is_project_test_source_path(file_path) {
-        return false;
-    }
-    let source_like = is_command_source_path(file_path)
-        || file_nodes.iter().any(|node| {
-            matches!(
-                node.language.to_ascii_lowercase().as_str(),
-                "java" | "kotlin" | "scala" | "groovy" | "python"
-            )
-        });
-    if !source_like {
-        return false;
-    }
-    project_sources.contains_project_file(repo, file_path)
-}
-
-fn is_command_source_path(file_path: &str) -> bool {
-    matches!(
-        Path::new(&file_path.to_ascii_lowercase())
-            .extension()
-            .and_then(|ext| ext.to_str()),
-        Some("java" | "kt" | "kts" | "scala" | "groovy" | "py")
-    )
 }
 
 fn detect_node_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDetection> {
@@ -203,15 +189,8 @@ fn detect_node_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDete
     out
 }
 
-fn detect_jvm_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDetection> {
+fn detect_jvm_commands(_text: Option<&str>, node: &SynthNode) -> Vec<CommandDetection> {
     let mut out = Vec::new();
-    if text.is_some_and(|text| declares_spring_runner_entrypoint(text, node)) {
-        out.push(CommandDetection {
-            name: format!("{} runner", node.display_name()),
-            command_type: "spring-runner".into(),
-            strategy: "java-spring-runner-source-declaration".into(),
-        });
-    }
     for decorator in &node.decorators {
         if decorator_name(decorator) != Some("Command") {
             continue;
@@ -228,57 +207,143 @@ fn detect_jvm_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDetec
     out
 }
 
-fn declares_spring_runner_entrypoint(text: &str, node: &SynthNode) -> bool {
-    if node.label == "Class" {
-        return class_declaration_mentions_runner(text, node);
-    }
-    if node.label == "Method" {
-        return bean_method_returns_runner(text, node)
-            || (node.name == "run" && parent_class_declaration_mentions_runner(text, node));
-    }
-    false
+fn detect_spring_runner_commands<'a>(
+    text: &str,
+    nodes: &[&'a SynthNode],
+) -> Vec<(&'a SynthNode, CommandDetection)> {
+    spring_runner_candidates(text)
+        .into_iter()
+        .filter_map(|candidate| {
+            let node = candidate.pick_handler(nodes)?;
+            Some((
+                node,
+                CommandDetection {
+                    name: format!("{} runner", node.display_name()),
+                    command_type: "spring-runner".into(),
+                    strategy: candidate.strategy().into(),
+                },
+            ))
+        })
+        .collect()
 }
 
-fn class_declaration_mentions_runner(text: &str, node: &SynthNode) -> bool {
-    let Some(class_pos) = find_class_declaration(text, node) else {
-        return false;
-    };
-    let Some(open_brace_rel) = text[class_pos..].find('{') else {
-        return false;
-    };
-    declaration_mentions_runner(&text[class_pos..class_pos + open_brace_rel])
+#[derive(Debug, Clone)]
+enum SpringRunnerCandidate {
+    Class { class_name: String, line: i64 },
+    BeanMethod { method_name: String, line: i64 },
 }
 
-fn parent_class_declaration_mentions_runner(text: &str, node: &SynthNode) -> bool {
-    let Some(parent) = node.parent_class.as_deref() else {
-        return false;
-    };
-    let class_name = parent.rsplit(['.', '$']).next().unwrap_or(parent);
-    if class_name.is_empty() {
-        return false;
+impl SpringRunnerCandidate {
+    fn strategy(&self) -> &'static str {
+        match self {
+            SpringRunnerCandidate::Class { .. } => "java-spring-runner-source-declaration",
+            SpringRunnerCandidate::BeanMethod { .. } => {
+                "java-spring-runner-bean-source-declaration"
+            }
+        }
     }
-    let needle = format!("class {class_name}");
-    let Some(class_pos) = text.find(&needle) else {
-        return false;
-    };
-    let Some(open_brace_rel) = text[class_pos..].find('{') else {
-        return false;
-    };
-    declaration_mentions_runner(&text[class_pos..class_pos + open_brace_rel])
+
+    fn pick_handler<'a>(&self, nodes: &[&'a SynthNode]) -> Option<&'a SynthNode> {
+        match self {
+            SpringRunnerCandidate::Class { class_name, line } => nodes
+                .iter()
+                .copied()
+                .filter(|node| node.label == "Class" && node_simple_name_matches(node, class_name))
+                .min_by_key(|node| line_distance(*line, node.start_line_key()))
+                .or_else(|| {
+                    nodes
+                        .iter()
+                        .copied()
+                        .filter(|node| node.label == "Method" && node.name == "run")
+                        .filter(|node| {
+                            node.parent_class
+                                .as_deref()
+                                .is_some_and(|parent| simple_name_matches(parent, class_name))
+                        })
+                        .min_by_key(|node| line_distance(*line, node.start_line_key()))
+                }),
+            SpringRunnerCandidate::BeanMethod { method_name, line } => nodes
+                .iter()
+                .copied()
+                .filter(|node| node.label == "Method" && node.name == *method_name)
+                .min_by_key(|node| line_distance(*line, node.start_line_key())),
+        }
+    }
 }
 
-fn bean_method_returns_runner(text: &str, node: &SynthNode) -> bool {
-    let Some((start, _end)) = node_body_byte_range(text, node) else {
-        return false;
-    };
-    let window_start = start.saturating_sub(500);
-    let Some(open_brace_rel) = text[start.min(text.len())..].find('{') else {
-        return false;
-    };
-    let window_end = (start + open_brace_rel).min(text.len());
-    let declaration = &text[window_start..window_end];
-    declaration.contains("@Bean")
-        && (declaration.contains("CommandLineRunner") || declaration.contains("ApplicationRunner"))
+fn spring_runner_candidates(text: &str) -> Vec<SpringRunnerCandidate> {
+    let mut out = Vec::new();
+    out.extend(spring_runner_class_candidates(text));
+    out.extend(spring_runner_bean_method_candidates(text));
+    out.sort_by(|a, b| candidate_key(a).cmp(&candidate_key(b)));
+    out.dedup_by(|a, b| candidate_key(a) == candidate_key(b));
+    out
+}
+
+fn candidate_key(candidate: &SpringRunnerCandidate) -> (u8, &str) {
+    match candidate {
+        SpringRunnerCandidate::Class { class_name, .. } => (0, class_name.as_str()),
+        SpringRunnerCandidate::BeanMethod { method_name, .. } => (1, method_name.as_str()),
+    }
+}
+
+fn spring_runner_class_candidates(text: &str) -> Vec<SpringRunnerCandidate> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(rel) = text[offset..].find("class") {
+        let class_pos = offset + rel;
+        if !keyword_boundary_ok(text, class_pos, "class") {
+            offset = class_pos + "class".len();
+            continue;
+        }
+        let name_start = skip_java_ws_and_modifiers(text, class_pos + "class".len());
+        let Some((class_name, _name_end)) = read_java_identifier(text, name_start) else {
+            offset = class_pos + "class".len();
+            continue;
+        };
+        let Some(open_brace_rel) = text[class_pos..].find('{') else {
+            break;
+        };
+        let declaration = &text[class_pos..class_pos + open_brace_rel];
+        if declaration_mentions_runner(declaration) {
+            out.push(SpringRunnerCandidate::Class {
+                class_name: class_name.to_string(),
+                line: line_number_at_offset(text, class_pos),
+            });
+        }
+        offset = class_pos + open_brace_rel + 1;
+    }
+    out
+}
+
+fn spring_runner_bean_method_candidates(text: &str) -> Vec<SpringRunnerCandidate> {
+    let mut out = Vec::new();
+    for runner_type in ["CommandLineRunner", "ApplicationRunner"] {
+        let mut offset = 0usize;
+        while let Some(rel) = text[offset..].find(runner_type) {
+            let type_pos = offset + rel;
+            let search_end = text[type_pos..]
+                .find(['{', ';', '\n'])
+                .map(|rel| type_pos + rel)
+                .unwrap_or(text.len());
+            if let Some((method_name, name_end)) =
+                read_java_identifier(text, skip_java_ws(text, type_pos + runner_type.len()))
+            {
+                let after_name = skip_java_ws(text, name_end);
+                if after_name < search_end
+                    && text.as_bytes().get(after_name) == Some(&b'(')
+                    && bean_annotation_before(text, type_pos)
+                {
+                    out.push(SpringRunnerCandidate::BeanMethod {
+                        method_name: method_name.to_string(),
+                        line: line_number_at_offset(text, type_pos),
+                    });
+                }
+            }
+            offset = type_pos + runner_type.len();
+        }
+    }
+    out
 }
 
 fn declaration_mentions_runner(declaration: &str) -> bool {
@@ -286,20 +351,99 @@ fn declaration_mentions_runner(declaration: &str) -> bool {
         && (declaration.contains("CommandLineRunner") || declaration.contains("ApplicationRunner"))
 }
 
-fn find_class_declaration(text: &str, node: &SynthNode) -> Option<usize> {
-    [
-        node.name.as_str(),
-        node.qn
-            .rsplit(['.', '$'])
-            .next()
-            .unwrap_or(node.qn.as_str()),
-    ]
-    .into_iter()
-    .find_map(|name| {
-        (!name.is_empty())
-            .then(|| format!("class {name}"))
-            .and_then(|needle| text.find(&needle))
-    })
+fn bean_annotation_before(text: &str, pos: usize) -> bool {
+    let window_start = pos.saturating_sub(500);
+    text[window_start..pos].contains("@Bean")
+}
+
+fn keyword_boundary_ok(text: &str, start: usize, keyword: &str) -> bool {
+    let before = start
+        .checked_sub(1)
+        .and_then(|idx| text.as_bytes().get(idx))
+        .copied()
+        .map(char::from);
+    let after = text
+        .as_bytes()
+        .get(start + keyword.len())
+        .copied()
+        .map(char::from);
+    before.is_none_or(|ch| !is_java_ident_continue(ch))
+        && after.is_none_or(|ch| !is_java_ident_continue(ch))
+}
+
+fn skip_java_ws_and_modifiers(text: &str, mut idx: usize) -> usize {
+    loop {
+        idx = skip_java_ws(text, idx);
+        let Some((word, end)) = read_java_identifier(text, idx) else {
+            return idx;
+        };
+        if matches!(
+            word,
+            "public" | "protected" | "private" | "abstract" | "final" | "sealed" | "static"
+        ) {
+            idx = end;
+            continue;
+        }
+        return idx;
+    }
+}
+
+fn skip_java_ws(text: &str, mut idx: usize) -> usize {
+    let bytes = text.as_bytes();
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    idx
+}
+
+fn read_java_identifier(text: &str, start: usize) -> Option<(&str, usize)> {
+    let mut chars = text[start..].char_indices();
+    let (_, first) = chars.next()?;
+    if !is_java_ident_start(first) {
+        return None;
+    }
+    let mut end = start + first.len_utf8();
+    for (rel, ch) in chars {
+        if !is_java_ident_continue(ch) {
+            break;
+        }
+        end = start + rel + ch.len_utf8();
+    }
+    Some((&text[start..end], end))
+}
+
+fn is_java_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || matches!(ch, '_' | '$')
+}
+
+fn is_java_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')
+}
+
+fn node_simple_name_matches(node: &SynthNode, simple_name: &str) -> bool {
+    node.name == simple_name || simple_name_matches(&node.qn, simple_name)
+}
+
+fn simple_name_matches(qn: &str, simple_name: &str) -> bool {
+    qn.rsplit(['.', '$']).next() == Some(simple_name)
+}
+
+fn line_distance(a: i64, b: i64) -> i64 {
+    a.saturating_sub(b).abs()
+}
+
+fn line_number_at_offset(text: &str, offset: usize) -> i64 {
+    let bounded = offset.min(text.len());
+    let mut line = 1i64;
+    for (idx, ch) in text.char_indices() {
+        if idx >= bounded {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    line
 }
 
 fn detect_python_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDetection> {

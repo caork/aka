@@ -2135,6 +2135,76 @@ class ReindexCli implements Runnable {
 }
 
 #[test]
+fn spring_runner_detection_uses_source_facts_not_class_names() {
+    let repo = temp_repo("spring-runner-source-facts");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    let file = "src/main/java/com/example/ops/StartupMaintenance.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.annotation.Bean;
+
+class StartupMaintenance implements ApplicationRunner {
+    public void run(ApplicationArguments args) {
+        warmCache();
+    }
+}
+
+class MaintenanceConfiguration {
+    @Bean
+    public org.springframework.boot.CommandLineRunner repairOrders() {
+        return args -> {};
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "StartupMaintenance",
+            "com.example.ops.StartupMaintenance",
+            file,
+        ),
+        (7, 11),
+        json!({"language": "java"}),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "repairOrders",
+            "com.example.ops.MaintenanceConfiguration.repairOrders",
+            file,
+        ),
+        (15, 17),
+        json!({
+            "language": "java",
+            "decorators": ["@Bean"],
+            "parent_class": "com.example.ops.MaintenanceConfiguration",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let handlers: BTreeSet<_> = synth
+        .commands
+        .iter()
+        .filter(|command| command.command_type == "spring-runner")
+        .map(|command| command.handler_id.as_str())
+        .collect();
+    assert!(handlers.contains("cbm:1:com.example.ops.StartupMaintenance"));
+    assert!(handlers.contains("cbm:2:com.example.ops.MaintenanceConfiguration.repairOrders"));
+}
+
+#[test]
 fn synthesizes_spring_dependency_injection_edges() {
     let repo = temp_repo("spring-dependencies");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
