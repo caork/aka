@@ -276,10 +276,28 @@ fn extract_python_cache_detections(text: &str, nodes: &[&SynthNode]) -> Vec<Cach
     out.extend(extract_call_cache_literals(
         text,
         nodes,
+        "cache.get_many",
+        "django-cache",
+        CacheAccessKind::Read,
+        "python-cache-get-many",
+        0,
+    ));
+    out.extend(extract_call_cache_literals(
+        text,
+        nodes,
         "cache.set",
         "django-cache",
         CacheAccessKind::Write,
         "python-cache-set",
+        0,
+    ));
+    out.extend(extract_call_cache_literals(
+        text,
+        nodes,
+        "cache.set_many",
+        "django-cache",
+        CacheAccessKind::Write,
+        "python-cache-set-many",
         0,
     ));
     out.extend(extract_call_cache_literals(
@@ -303,10 +321,28 @@ fn extract_python_cache_detections(text: &str, nodes: &[&SynthNode]) -> Vec<Cach
     out.extend(extract_call_cache_literals(
         text,
         nodes,
+        "redis.mget",
+        "redis",
+        CacheAccessKind::Read,
+        "python-redis-mget",
+        0,
+    ));
+    out.extend(extract_call_cache_literals(
+        text,
+        nodes,
         "redis.set",
         "redis",
         CacheAccessKind::Write,
         "python-redis-set",
+        0,
+    ));
+    out.extend(extract_call_cache_literals(
+        text,
+        nodes,
+        "redis.mset",
+        "redis",
+        CacheAccessKind::Write,
+        "python-redis-mset",
         0,
     ));
     out.extend(extract_call_cache_literals(
@@ -330,10 +366,28 @@ fn extract_python_cache_detections(text: &str, nodes: &[&SynthNode]) -> Vec<Cach
     out.extend(extract_call_cache_literals(
         text,
         nodes,
+        "r.mget",
+        "redis",
+        CacheAccessKind::Read,
+        "python-redis-mget",
+        0,
+    ));
+    out.extend(extract_call_cache_literals(
+        text,
+        nodes,
         "r.set",
         "redis",
         CacheAccessKind::Write,
         "python-redis-set",
+        0,
+    ));
+    out.extend(extract_call_cache_literals(
+        text,
+        nodes,
+        "r.mset",
+        "redis",
+        CacheAccessKind::Write,
+        "python-redis-mset",
         0,
     ));
     out

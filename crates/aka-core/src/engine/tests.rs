@@ -3833,8 +3833,14 @@ fn synthesizes_python_cache_nodes() {
 
 def load_order(order_id, redis):
     value = cache.get("orders:list")
+    cached = cache.get_many(["orders:summary", "orders:stats"])
+    redis.mget("orders:count", "orders:latest")
     redis.set("orders:last", order_id)
     return redis.get("orders:last")
+
+def warm_order_cache(redis):
+    cache.set_many({"orders:summary": "ok", "orders:stats": "ok"})
+    redis.mset({"orders:count": "1", "orders:latest": "42"})
 
 def evict_order():
     cache.delete("orders:list")
@@ -3857,10 +3863,21 @@ def evict_order():
     insert_function_node_props_at(
         &conn,
         2,
+        "warm_order_cache",
+        "cache_ops.warm_order_cache",
+        "cache_ops.py",
+        (8, 10),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
         "evict_order",
         "cache_ops.evict_order",
         "cache_ops.py",
-        (8, 9),
+        (12, 13),
         json!({
             "language": "python",
         }),
@@ -3881,6 +3898,18 @@ def evict_order():
         .expect("redis cache key");
     assert_eq!(redis.readers.len(), 1);
     assert_eq!(redis.writers.len(), 1);
+    assert!(synth.caches.iter().any(|cache| {
+        cache.name == "orders:summary"
+            && cache.backend == "django-cache"
+            && cache.readers.len() == 1
+            && cache.writers.len() == 1
+    }));
+    assert!(synth.caches.iter().any(|cache| {
+        cache.name == "orders:count"
+            && cache.backend == "redis"
+            && cache.readers.len() == 1
+            && cache.writers.len() == 1
+    }));
     let edge_types: Vec<_> = synth
         .caches
         .iter()
