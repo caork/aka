@@ -245,7 +245,7 @@ jobs:
 
       - name: Smoke Windows desktop portable
         shell: pwsh
-        run: scripts/smoke-windows-desktop.ps1 -PortableZip "dist/${{ steps.pkg.outputs.portable_name }}" -Seconds 10
+        run: scripts/smoke-windows-desktop.ps1 -PortableZip "dist/${{ steps.pkg.outputs.portable_name }}" -SetupExe "dist/${{ steps.pkg.outputs.setup_name }}" -Seconds 10
 
       - name: Upload to release
         if: github.ref_type == 'tag'
