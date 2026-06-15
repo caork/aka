@@ -67,6 +67,19 @@ impl ProjectSourceSet {
             .filter(move |path| self.contains_project_file(repo, path))
     }
 
+    pub(super) fn project_files_with_extensions<'a>(
+        &'a self,
+        repo: &'a Path,
+        extensions: &'a [&'a str],
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.project_files(repo).filter(move |path| {
+            Path::new(&path.to_ascii_lowercase())
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| extensions.contains(&ext))
+        })
+    }
+
     pub(super) fn has_git_listing(&self) -> bool {
         self.has_git_listing
     }

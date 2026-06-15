@@ -1505,12 +1505,81 @@ router = APIRouter(prefix="/api/orders")
     )
     .unwrap();
 
-    let prefixes = python_router_prefixes_by_file(&repo, ["api/orders.py"].into_iter());
+    let prefixes = python_router_prefixes_by_file(
+        &repo,
+        ["api/orders.py", "tests/app_test.py", "scratch/app.py"].into_iter(),
+    );
     let file = prefixes.get("api/orders.py").expect("file prefixes");
     assert_eq!(
         file.local_by_router.get("router").map(String::as_str),
         Some("/api/orders")
     );
+}
+
+#[test]
+fn python_router_prefix_scan_uses_project_sources_and_excludes_tests() {
+    let repo = temp_repo("fastapi-prefix-project-sources");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("api")).unwrap();
+    std::fs::create_dir_all(repo.join("tests")).unwrap();
+    std::fs::create_dir_all(repo.join("scratch")).unwrap();
+    std::fs::write(repo.join(".gitignore"), "scratch/\n").unwrap();
+    std::fs::write(
+        repo.join("pyproject.toml"),
+        "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("app.py"),
+        r#"from api import orders
+
+app.include_router(orders.router, prefix="/api")
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("tests/app_test.py"),
+        r#"from api import orders
+
+app.include_router(orders.router, prefix="/fixture")
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("scratch/app.py"),
+        r#"from api import orders
+
+app.include_router(orders.router, prefix="/scratch")
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("api/orders.py"),
+        r#"from fastapi import APIRouter
+
+router = APIRouter(prefix="/orders")
+"#,
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        &[
+            "add",
+            ".gitignore",
+            "pyproject.toml",
+            "app.py",
+            "tests/app_test.py",
+            "api/orders.py",
+        ],
+    );
+
+    let prefixes = python_router_prefixes_by_file(&repo, ["api/orders.py"].into_iter());
+    let file = prefixes.get("api/orders.py").expect("file prefixes");
+    assert_eq!(
+        file.local_by_router.get("router").map(String::as_str),
+        Some("/orders")
+    );
+    assert_eq!(file.include, ["/api"]);
 }
 
 #[test]

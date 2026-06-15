@@ -346,6 +346,7 @@ fn command_synthesis_uses_project_sources_not_runner_names() {
     std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
     std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
     let tracked_file = "src/main/java/com/example/ops/StartupMaintenance.java";
+    let source_fact_file = "src/main/java/com/example/ops/BootMaintenance.java";
     let untracked_file = "src/main/java/com/example/ops/UntrackedMaintenance.java";
     let test_file = "src/test/java/com/example/ops/TestMaintenance.java";
     std::fs::write(
@@ -358,6 +359,21 @@ import org.springframework.boot.ApplicationRunner;
 class StartupMaintenance implements ApplicationRunner {
     public void run(ApplicationArguments args) {
         warmCache();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(source_fact_file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+
+class BootMaintenance implements ApplicationRunner {
+    public void run(ApplicationArguments args) {
+        hydrateIndexes();
     }
 }
 "#,
@@ -392,7 +408,10 @@ class TestMaintenance implements ApplicationRunner {
 "#,
     )
     .unwrap();
-    run_git(&repo, &["add", "pom.xml", tracked_file, test_file]);
+    run_git(
+        &repo,
+        &["add", "pom.xml", tracked_file, source_fact_file, test_file],
+    );
 
     let conn = test_conn();
     insert_node_props_at(
@@ -414,6 +433,20 @@ class TestMaintenance implements ApplicationRunner {
         2,
         (
             "Class",
+            "BootMaintenance",
+            "com.example.ops.BootMaintenance",
+            source_fact_file,
+        ),
+        (6, 10),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Class",
             "UntrackedMaintenance",
             "com.example.ops.UntrackedMaintenance",
             untracked_file,
@@ -425,7 +458,7 @@ class TestMaintenance implements ApplicationRunner {
     );
     insert_node_props_at(
         &conn,
-        3,
+        4,
         (
             "Class",
             "TestMaintenance",
@@ -445,6 +478,10 @@ class TestMaintenance implements ApplicationRunner {
         .map(|command| command.handler_name.as_str())
         .collect();
     assert!(handlers.contains(&"StartupMaintenance"));
+    assert!(
+        handlers.contains(&"BootMaintenance"),
+        "Spring runner detection should use implements source facts, not class-name suffixes"
+    );
     assert!(handlers.contains(&"UntrackedMaintenance"));
     assert!(!handlers.contains(&"TestMaintenance"));
 }

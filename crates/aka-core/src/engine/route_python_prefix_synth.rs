@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::{
     find_matching_paren, join_route_paths, normalize_route_literal, read_repo_text,
-    read_string_literal, source_scan::is_noisy_source_path, SynthNode,
+    read_string_literal, ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Default)]
@@ -50,11 +50,19 @@ pub(super) fn python_router_prefixes_by_file<'a>(
     repo: &Path,
     file_paths: impl Iterator<Item = &'a str>,
 ) -> BTreeMap<String, PythonRoutePrefixes> {
+    let project_sources = ProjectSourceSet::discover(repo);
     let mut python_files: Vec<String> = file_paths
-        .filter(|path| path.to_ascii_lowercase().ends_with(".py"))
+        .filter(|path| {
+            path.to_ascii_lowercase().ends_with(".py")
+                && project_sources.contains_project_file(repo, path)
+        })
         .map(str::to_string)
         .collect();
-    python_files.extend(repo_python_source_files(repo));
+    python_files.extend(
+        project_sources
+            .project_files_with_extensions(repo, &["py"])
+            .map(str::to_string),
+    );
     python_files.sort();
     python_files.dedup();
     if python_files.is_empty() {
@@ -159,48 +167,6 @@ fn python_include_targets(
             .unwrap_or_default();
     }
     Vec::new()
-}
-
-fn repo_python_source_files(repo: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    collect_repo_python_source_files(repo, repo, &mut out);
-    out
-}
-
-fn collect_repo_python_source_files(repo: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
-            continue;
-        };
-        if file_type.is_dir() {
-            let rel = path
-                .strip_prefix(repo)
-                .ok()
-                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|| name.to_string());
-            if is_noisy_source_path(&rel) {
-                continue;
-            }
-            collect_repo_python_source_files(repo, &path, out);
-        } else if file_type.is_file()
-            && path
-                .extension()
-                .and_then(|v| v.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
-        {
-            let Ok(rel) = path.strip_prefix(repo) else {
-                continue;
-            };
-            out.push(rel.to_string_lossy().replace('\\', "/"));
-        }
-    }
 }
 
 #[derive(Debug)]
