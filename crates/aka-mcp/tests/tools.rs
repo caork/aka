@@ -97,7 +97,7 @@ async fn query_shape() {
     assert_eq!(processes[0]["step_count"], 4);
 
     let process_symbols = v["process_symbols"].as_array().unwrap();
-    assert_eq!(process_symbols.len(), 1);
+    assert_eq!(process_symbols.len(), 2);
     assert_eq!(process_symbols[0]["name"], "handle_request");
     assert_eq!(
         process_symbols[0]["process_id"],
@@ -108,6 +108,9 @@ async fn query_shape() {
     assert_eq!(process_symbols[0]["filePath"], "src/handler.rs");
     assert_eq!(process_symbols[0]["startLine"], 12);
     assert_eq!(process_symbols[0]["module"], "IO Pipeline");
+    assert_eq!(process_symbols[1]["name"], "handle_request");
+    assert_eq!(process_symbols[1]["process_id"], "fixture:proc:output-flow");
+    assert_eq!(process_symbols[1]["step_index"], 2);
     assert!(v["definitions"].as_array().unwrap().is_empty());
 }
 

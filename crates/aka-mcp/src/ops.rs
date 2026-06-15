@@ -818,8 +818,8 @@ pub fn query(b: &dyn Backend, opts: QueryOptions<'_>) -> anyhow::Result<QueryOut
         *n += 1;
         true
     });
-    let mut seen_symbols = HashSet::new();
-    process_symbols.retain(|s| seen_symbols.insert(s.id.clone()));
+    let mut seen_process_symbols = HashSet::new();
+    process_symbols.retain(|s| seen_process_symbols.insert((s.process_id.clone(), s.id.clone())));
     definitions.truncate(20);
 
     Ok(QueryOut {

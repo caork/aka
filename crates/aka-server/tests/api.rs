@@ -89,12 +89,19 @@ async fn query_returns_hits() {
     assert_eq!(processes[0]["id"], "fixture:proc:request-flow");
     assert_eq!(processes[0]["summary"], "main → read_file");
     let process_symbols = v["process_symbols"].as_array().unwrap();
+    assert_eq!(process_symbols.len(), 2);
     assert_eq!(process_symbols[0]["name"], "handle_request");
+    assert_eq!(
+        process_symbols[0]["process_id"],
+        "fixture:proc:request-flow"
+    );
     assert_eq!(process_symbols[0]["step_index"], 2);
     assert_eq!(process_symbols[0]["type"], "Function");
     assert_eq!(process_symbols[0]["filePath"], "src/handler.rs");
     assert_eq!(process_symbols[0]["startLine"], 12);
     assert_eq!(process_symbols[0]["module"], "IO Pipeline");
+    assert_eq!(process_symbols[1]["name"], "handle_request");
+    assert_eq!(process_symbols[1]["process_id"], "fixture:proc:output-flow");
     assert!(v["definitions"].as_array().unwrap().is_empty());
 }
 
