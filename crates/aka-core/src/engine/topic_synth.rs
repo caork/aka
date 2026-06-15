@@ -304,6 +304,22 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                     ));
                 }
             }
+            if decorator.contains("SendTo") {
+                let strategy = if decorator.contains("SendToUser") {
+                    "java-spring-stomp-send-to-user"
+                } else {
+                    "java-spring-stomp-send-to"
+                };
+                for topic in annotation_destination_values(decorator, &["destinations", "value"]) {
+                    out.push(topic_detection(
+                        topic,
+                        "stomp",
+                        TopicEndpointKind::Producer,
+                        node.aka_id.clone(),
+                        strategy,
+                    ));
+                }
+            }
         }
     }
     out.extend(extract_call_topic_literals(
@@ -415,6 +431,18 @@ fn extract_python_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<Topi
 }
 
 fn annotation_string_values(annotation: &str, keys: &[&str]) -> Vec<String> {
+    annotation_values(annotation, keys, string_literals)
+}
+
+fn annotation_destination_values(annotation: &str, keys: &[&str]) -> Vec<String> {
+    annotation_values(annotation, keys, destination_literals)
+}
+
+fn annotation_values(
+    annotation: &str,
+    keys: &[&str],
+    literal_reader: fn(&str) -> Vec<String>,
+) -> Vec<String> {
     let Some(open) = annotation.find('(') else {
         return Vec::new();
     };
@@ -433,11 +461,43 @@ fn annotation_string_values(annotation: &str, keys: &[&str]) -> Vec<String> {
         } else {
             continue;
         };
-        values.extend(string_literals(value));
+        values.extend(literal_reader(value));
     }
     values.sort();
     values.dedup();
     values
+}
+
+fn destination_literals(text: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut idx = 0usize;
+    while idx < text.len() {
+        let Some(byte) = text.as_bytes().get(idx).copied() else {
+            break;
+        };
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            if let Some((literal, end)) = super::read_string_literal(text, idx) {
+                if is_destination_literal(&literal) {
+                    values.push(literal);
+                }
+                idx = end;
+                continue;
+            }
+        }
+        idx += 1;
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn is_destination_literal(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && !value.contains("://")
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | ':' | '/'))
 }
 
 fn rabbit_listener_topics(annotation: &str) -> Vec<String> {

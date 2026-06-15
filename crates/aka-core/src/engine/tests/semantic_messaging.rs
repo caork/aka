@@ -318,6 +318,94 @@ class SqsEvents {
 }
 
 #[test]
+fn synthesizes_spring_stomp_send_to_topics() {
+    let repo = temp_repo("spring-stomp-topics");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/realtime")).unwrap();
+    let file = "src/main/java/com/example/realtime/OrderSocket.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.realtime;
+
+import org.springframework.messaging.handler.annotation.MessageMapping;
+import org.springframework.messaging.handler.annotation.SendTo;
+import org.springframework.messaging.simp.annotation.SendToUser;
+
+class OrderSocket {
+    @MessageMapping("/orders")
+    @SendTo("/topic/orders")
+    public OrderAck handleOrder(OrderMessage message) {
+        return new OrderAck();
+    }
+
+    @MessageMapping("/orders/private")
+    @SendToUser("/queue/orders")
+    public OrderAck handlePrivate(OrderMessage message) {
+        return new OrderAck();
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Method",
+            "handleOrder",
+            "com.example.realtime.OrderSocket.handleOrder",
+            file,
+        ),
+        (8, 11),
+        json!({
+            "decorators": ["@MessageMapping(\"/orders\")", "@SendTo(\"/topic/orders\")"],
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "handlePrivate",
+            "com.example.realtime.OrderSocket.handlePrivate",
+            file,
+        ),
+        (14, 17),
+        json!({
+            "decorators": ["@MessageMapping(\"/orders/private\")", "@SendToUser(\"/queue/orders\")"],
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let public_topic = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "/topic/orders")
+        .expect("stomp public topic");
+    assert_eq!(public_topic.broker, "stomp");
+    assert_eq!(public_topic.producers.len(), 1);
+    assert_eq!(
+        public_topic.producers[0].node_id,
+        "cbm:1:com.example.realtime.OrderSocket.handleOrder"
+    );
+
+    let user_topic = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "/queue/orders")
+        .expect("stomp user queue topic");
+    assert_eq!(user_topic.broker, "stomp");
+    assert_eq!(user_topic.producers.len(), 1);
+    assert_eq!(
+        user_topic.producers[0].strategy,
+        "java-spring-stomp-send-to-user"
+    );
+}
+
+#[test]
 fn synthesizes_python_message_topics() {
     let repo = temp_repo("python-message-topics");
     std::fs::write(
