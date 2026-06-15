@@ -830,6 +830,7 @@ fn export_edges(
         .chain(synth.processes.iter().flat_map(SynthProcess::edge_recs))
         .chain(synth.routes.iter().flat_map(SynthRoute::edge_recs))
         .chain(synth.tools.iter().flat_map(SynthTool::edge_recs))
+        .chain(synth.edges.iter().cloned())
     {
         serde_json::to_writer(&mut out, &edge)?;
         out.write_all(b"\n")?;
@@ -1065,6 +1066,8 @@ struct SynthNode {
     label: String,
     name: String,
     file_path: String,
+    start_line: i64,
+    end_line: i64,
     language: String,
     route_path: Option<String>,
     route_method: Option<String>,
@@ -1082,6 +1085,7 @@ struct SynthGraph {
     routes: Vec<SynthRoute>,
     tools: Vec<SynthTool>,
     properties: Vec<SynthProperty>,
+    edges: Vec<EdgeRec>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -1549,7 +1553,9 @@ fn synthesize_graph_with_progress(
         0,
         0,
     );
-    let calls = load_call_graph(conn, project, &nodes)?;
+    let existing_call_pairs = load_existing_call_pairs(conn, project)?;
+    let synthetic_edges = synthesize_dependency_call_edges(repo, &nodes, &existing_call_pairs);
+    let calls = load_call_graph(conn, project, &nodes, &synthetic_edges)?;
 
     emit_phase(
         on_event,
@@ -1612,6 +1618,7 @@ fn synthesize_graph_with_progress(
         routes,
         tools,
         properties,
+        edges: synthetic_edges,
     })
 }
 
@@ -1678,7 +1685,7 @@ fn load_synth_nodes(
 ) -> Result<BTreeMap<String, SynthNode>, EngineError> {
     let mut nodes = BTreeMap::new();
     let mut stmt = conn.prepare(
-        "SELECT id, label, name, qualified_name, file_path, properties \
+        "SELECT id, label, name, qualified_name, file_path, start_line, end_line, properties \
          FROM nodes WHERE project = ?1 ORDER BY id",
     )?;
     let mut rows = stmt.query([project])?;
@@ -1688,7 +1695,9 @@ fn load_synth_nodes(
         let name = text_col(row, 2)?;
         let qn = text_col(row, 3)?;
         let file_path = text_col(row, 4)?;
-        let props = parse_props(&text_col(row, 5)?);
+        let start_line: i64 = row.get(5)?;
+        let end_line: i64 = row.get(6)?;
+        let props = parse_props(&text_col(row, 7)?);
         if !is_process_step_label(&label) || is_noisy_source_path(&file_path) {
             continue;
         }
@@ -1749,6 +1758,8 @@ fn load_synth_nodes(
                 label,
                 name,
                 file_path,
+                start_line,
+                end_line,
                 language,
                 route_path,
                 route_method,
@@ -1946,6 +1957,7 @@ fn load_call_graph(
     conn: &Connection,
     project: &str,
     nodes: &BTreeMap<String, SynthNode>,
+    synthetic_edges: &[EdgeRec],
 ) -> Result<CallGraph, EngineError> {
     let mut graph = CallGraph::default();
     let mut stmt = conn.prepare(
@@ -1990,7 +2002,304 @@ fn load_call_graph(
             graph.edges.push((source, target));
         }
     }
+    for edge in synthetic_edges
+        .iter()
+        .filter(|edge| edge.edge_type == "CALLS")
+    {
+        if !nodes.contains_key(&edge.source_id)
+            || !nodes.contains_key(&edge.target_id)
+            || edge.source_id == edge.target_id
+        {
+            continue;
+        }
+        let inserted = graph
+            .adjacency
+            .entry(edge.source_id.clone())
+            .or_default()
+            .insert(edge.target_id.clone());
+        if inserted {
+            *graph.indegree.entry(edge.target_id.clone()).or_default() += 1;
+            graph
+                .edges
+                .push((edge.source_id.clone(), edge.target_id.clone()));
+        }
+    }
     Ok(graph)
+}
+
+fn load_existing_call_pairs(
+    conn: &Connection,
+    project: &str,
+) -> Result<HashSet<(String, String)>, EngineError> {
+    let mut pairs = HashSet::new();
+    let mut stmt = conn.prepare(
+        "SELECT e.source_id, e.target_id, s.qualified_name, t.qualified_name \
+         FROM edges e \
+         JOIN nodes s ON s.id = e.source_id AND s.project = e.project \
+         JOIN nodes t ON t.id = e.target_id AND t.project = e.project \
+         WHERE e.project = ?1 AND e.type = 'CALLS'",
+    )?;
+    let mut rows = stmt.query([project])?;
+    while let Some(row) = rows.next()? {
+        let source_id: i64 = row.get(0)?;
+        let target_id: i64 = row.get(1)?;
+        let source_qn = text_col(row, 2)?;
+        let target_qn = text_col(row, 3)?;
+        pairs.insert((
+            aka_node_id(source_id, &source_qn),
+            aka_node_id(target_id, &target_qn),
+        ));
+    }
+    Ok(pairs)
+}
+
+fn synthesize_dependency_call_edges(
+    repo: &Path,
+    nodes: &BTreeMap<String, SynthNode>,
+    existing_call_pairs: &HashSet<(String, String)>,
+) -> Vec<EdgeRec> {
+    let python_functions: Vec<&SynthNode> = nodes
+        .values()
+        .filter(|node| {
+            matches!(node.label.as_str(), "Function" | "Method")
+                && (node.language.eq_ignore_ascii_case("python") || node.file_path.ends_with(".py"))
+                && !node.file_path.is_empty()
+        })
+        .collect();
+    if python_functions.is_empty() {
+        return Vec::new();
+    }
+
+    let mut by_name: HashMap<String, Vec<&SynthNode>> = HashMap::new();
+    let mut by_file_name: HashMap<(String, String), Vec<&SynthNode>> = HashMap::new();
+    for node in &python_functions {
+        by_name.entry(node.name.clone()).or_default().push(*node);
+        by_file_name
+            .entry((node.file_path.clone(), node.name.clone()))
+            .or_default()
+            .push(*node);
+    }
+
+    let mut by_file: BTreeMap<String, Vec<&SynthNode>> = BTreeMap::new();
+    for node in python_functions {
+        by_file
+            .entry(node.file_path.clone())
+            .or_default()
+            .push(node);
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for (file_path, mut file_nodes) in by_file {
+        file_nodes.sort_by_key(|node| node.start_line_key());
+        let Some(text) = read_repo_text(repo, &file_path) else {
+            continue;
+        };
+        for node in file_nodes {
+            if !is_python_route_node(node) {
+                continue;
+            }
+            let Some(source) = node_source_slice(&text, node) else {
+                continue;
+            };
+            for dep in extract_fastapi_depends_targets(source) {
+                let Some(target) =
+                    resolve_python_dependency_target(&file_path, &dep, &by_file_name, &by_name)
+                else {
+                    continue;
+                };
+                if target.aka_id == node.aka_id {
+                    continue;
+                }
+                if existing_call_pairs.contains(&(node.aka_id.clone(), target.aka_id.clone())) {
+                    continue;
+                }
+                let key = (node.aka_id.clone(), target.aka_id.clone(), dep.clone());
+                if !seen.insert(key) {
+                    continue;
+                }
+                out.push(EdgeRec {
+                    id: format!(
+                        "python-depends-call:{:016x}",
+                        stable_hash(&format!("{}|{}|{dep}", node.aka_id, target.aka_id))
+                    ),
+                    source_id: node.aka_id.clone(),
+                    target_id: target.aka_id.clone(),
+                    edge_type: "CALLS".into(),
+                    confidence: 0.74,
+                    reason: "aka FastAPI Depends dependency call".into(),
+                    step: None,
+                    evidence: Some(json!({
+                        "source": "aka-cbm-synth",
+                        "kind": "fastapi-depends",
+                        "dependency": dep,
+                    })),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn node_source_slice<'a>(text: &'a str, node: &SynthNode) -> Option<&'a str> {
+    let start_line = node.start_line_key().max(1) as usize;
+    let end_line = node.end_line_key().max(start_line as i64) as usize;
+    let mut start_idx = 0usize;
+    let mut line = 1usize;
+    for (idx, ch) in text.char_indices() {
+        if line == start_line {
+            start_idx = idx;
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    if line < start_line {
+        return None;
+    }
+    let mut end_idx = text.len();
+    for (idx, ch) in text[start_idx..].char_indices() {
+        if line > end_line {
+            end_idx = start_idx + idx;
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    Some(&text[start_idx..end_idx])
+}
+
+fn extract_fastapi_depends_targets(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(pos) = text[offset..].find("Depends") {
+        let start = offset + pos;
+        if !is_word_boundary(text, start, "Depends".len()) {
+            offset = start + "Depends".len();
+            continue;
+        }
+        let open = skip_ws(text, start + "Depends".len());
+        if text.as_bytes().get(open) != Some(&b'(') {
+            offset = start + "Depends".len();
+            continue;
+        }
+        let Some(close) = find_matching_paren(text, open) else {
+            offset = open + 1;
+            continue;
+        };
+        let args = &text[open + 1..close];
+        if let Some(dep) = first_depends_callable(args) {
+            out.push(dep);
+        }
+        offset = close + 1;
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn first_depends_callable(args: &str) -> Option<String> {
+    for arg in split_top_level_commas(args) {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            continue;
+        }
+        let value = if let Some((key, value)) = arg.split_once('=') {
+            if !matches!(key.trim(), "dependency" | "call" | "callable") {
+                continue;
+            }
+            value.trim()
+        } else {
+            arg
+        };
+        let value = value.trim_start_matches("lambda ").trim();
+        if value.starts_with('"') || value.starts_with('\'') || value.starts_with("None") {
+            continue;
+        }
+        let name = value
+            .split_once('(')
+            .map(|(name, _)| name)
+            .unwrap_or(value)
+            .trim();
+        if is_python_callable_expr(name) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn split_top_level_commas(args: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut escape = false;
+    let mut start = 0usize;
+    for (idx, byte) in args.bytes().enumerate() {
+        if let Some(q) = quote {
+            if escape {
+                escape = false;
+            } else if byte == b'\\' {
+                escape = true;
+            } else if byte == q {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(&args[start..idx]);
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&args[start..]);
+    out
+}
+
+fn is_python_callable_expr(expr: &str) -> bool {
+    let mut parts = expr.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    is_python_identifier(first) && parts.all(is_python_identifier)
+}
+
+fn is_python_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn resolve_python_dependency_target<'a>(
+    file_path: &str,
+    dep: &str,
+    by_file_name: &HashMap<(String, String), Vec<&'a SynthNode>>,
+    by_name: &HashMap<String, Vec<&'a SynthNode>>,
+) -> Option<&'a SynthNode> {
+    let dep_name = dep.rsplit('.').next().unwrap_or(dep);
+    by_file_name
+        .get(&(file_path.to_string(), dep_name.to_string()))
+        .and_then(|nodes| nodes.first().copied())
+        .or_else(|| {
+            by_name
+                .get(dep_name)
+                .and_then(|nodes| (nodes.len() == 1).then(|| nodes[0]))
+        })
+}
+
+fn is_word_boundary(text: &str, start: usize, len: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let after = text[start + len..].chars().next();
+    before.is_none_or(|ch| !is_ident_continue(ch)) && after.is_none_or(|ch| !is_ident_continue(ch))
 }
 
 fn load_native_community_memberships(
@@ -4711,6 +5020,14 @@ impl SynthNode {
             &self.name
         }
     }
+
+    fn start_line_key(&self) -> i64 {
+        self.start_line
+    }
+
+    fn end_line_key(&self) -> i64 {
+        self.end_line
+    }
 }
 
 fn dynamic_process_cap(symbol_count: usize) -> usize {
@@ -5365,6 +5682,23 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_function_node_props_at(
+        conn: &Connection,
+        id: i64,
+        name: &str,
+        qn: &str,
+        file: &str,
+        lines: (i64, i64),
+        props: Value,
+    ) {
+        conn.execute(
+            "INSERT INTO nodes (id, project, label, name, qualified_name, file_path, start_line, end_line, properties)
+             VALUES (?1, 'demo', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![id, "Function", name, qn, file, lines.0, lines.1, props.to_string()],
+        )
+        .unwrap();
+    }
+
     fn insert_edge(conn: &Connection, id: i64, src: i64, dst: i64, ty: &str) {
         conn.execute(
             "INSERT INTO edges (id, project, source_id, target_id, type, properties)
@@ -5798,6 +6132,112 @@ mod tests {
                 .iter()
                 .all(|step| !step.file_path.contains(".test.")),
             "test-file entry points should not produce processes"
+        );
+    }
+
+    #[test]
+    fn synthesizes_fastapi_depends_calls_for_processes() {
+        let repo = temp_repo("fastapi-depends");
+        std::fs::create_dir_all(repo.join("api")).unwrap();
+        std::fs::write(
+            repo.join("api/orders.py"),
+            r#"from fastapi import Depends, APIRouter
+
+router = APIRouter()
+
+def get_current_user():
+    return verify_token()
+
+def verify_token():
+    return "maya"
+
+def load_order(id: str):
+    return {"id": id}
+
+@router.get("/orders/{id}")
+def get_order(id: str, user = Depends(get_current_user)):
+    order = load_order(id)
+    return {"id": order["id"], "user": user}
+"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "get_current_user",
+            "api.orders.get_current_user",
+            "api/orders.py",
+            (5, 6),
+            json!({
+                "language": "python",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            2,
+            "verify_token",
+            "api.orders.verify_token",
+            "api/orders.py",
+            (8, 9),
+            json!({
+                "language": "python",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            3,
+            "load_order",
+            "api.orders.load_order",
+            "api/orders.py",
+            (11, 12),
+            json!({
+                "language": "python",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            4,
+            "get_order",
+            "api.orders.get_order",
+            "api/orders.py",
+            (15, 17),
+            json!({
+                "decorators": ["@router.get(\"/orders/{id}\")"],
+                "language": "python",
+                "route_method": "GET",
+                "route_path": "/orders/{id}",
+            }),
+        );
+        insert_edge(&conn, 1, 4, 3, "CALLS");
+        insert_edge(&conn, 2, 1, 2, "CALLS");
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        assert!(synth.edges.iter().any(|edge| {
+            edge.edge_type == "CALLS"
+                && edge.source_id == "cbm:4:api.orders.get_order"
+                && edge.target_id == "cbm:1:api.orders.get_current_user"
+                && edge
+                    .evidence
+                    .as_ref()
+                    .and_then(|v| v.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("fastapi-depends")
+        }));
+
+        let process = synth
+            .processes
+            .iter()
+            .find(|process| process.name == "get_order → verify_token")
+            .expect("Depends call should seed route dependency process");
+        assert_eq!(
+            process
+                .steps
+                .iter()
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>(),
+            ["get_order", "get_current_user", "verify_token"]
         );
     }
 
