@@ -5,7 +5,7 @@
 //! previous parser sidecar.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -603,7 +603,7 @@ fn export_edges(
     let mut out = BufWriter::with_capacity(1 << 20, file);
     let mut stmt = conn.prepare(
         "SELECT e.id, e.source_id, e.target_id, e.type, e.properties, \
-                s.qualified_name, t.qualified_name \
+                s.qualified_name, t.qualified_name, s.label, t.label \
          FROM edges e \
          JOIN nodes s ON s.id = e.source_id \
          JOIN nodes t ON t.id = e.target_id \
@@ -611,6 +611,7 @@ fn export_edges(
     )?;
     let mut rows = stmt.query([project])?;
     let mut count = 0;
+    let mut semantic = SemanticEdgeSynthesizer::load(conn, project)?;
     while let Some(row) = rows.next()? {
         let edge_id: i64 = row.get(0)?;
         let source_id: i64 = row.get(1)?;
@@ -620,6 +621,15 @@ fn export_edges(
         let source_qn = text_col(row, 5)?;
         let target_qn = text_col(row, 6)?;
         let props = props_value(&props_text);
+        semantic.record(
+            source_id,
+            &source_qn,
+            &text_col(row, 7)?,
+            target_id,
+            &target_qn,
+            &text_col(row, 8)?,
+            &edge_type,
+        );
         let edge = EdgeRec {
             id: format!("cbm-edge:{edge_id}"),
             source_id: aka_node_id(source_id, &source_qn),
@@ -641,6 +651,11 @@ fn export_edges(
         out.write_all(b"\n")?;
         count += 1;
         emit_export_progress(on_event, "edges", count, total);
+    }
+    for edge in semantic.edge_recs() {
+        serde_json::to_writer(&mut out, &edge)?;
+        out.write_all(b"\n")?;
+        count += 1;
     }
     for edge in synth
         .communities
@@ -672,6 +687,197 @@ fn emit_export_progress(
             total,
         );
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SemanticEdgeSynthesizer {
+    seen: HashSet<(String, String, String)>,
+    out: Vec<EdgeRec>,
+    nodes_by_qn: BTreeMap<String, SemanticNode>,
+    methods_by_owner_name: BTreeMap<(String, String), Vec<SemanticNode>>,
+    type_by_qn: BTreeMap<String, SemanticNode>,
+    implements: Vec<(String, String)>,
+}
+
+impl SemanticEdgeSynthesizer {
+    fn load(conn: &Connection, project: &str) -> Result<Self, rusqlite::Error> {
+        let mut this = Self::default();
+        let mut stmt = conn.prepare(
+            "SELECT id, label, name, qualified_name \
+             FROM nodes \
+             WHERE project = ?1 AND label IN ('Class','Interface','Method','Field','Variable','Property') \
+             ORDER BY id",
+        )?;
+        let mut rows = stmt.query([project])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let label = text_col(row, 1)?;
+            let name = text_col(row, 2)?;
+            let qn = text_col(row, 3)?;
+            let node = SemanticNode {
+                id: aka_node_id(id, &qn),
+                label,
+                name,
+                qn: qn.clone(),
+            };
+            if matches!(node.label.as_str(), "Class" | "Interface") {
+                this.type_by_qn.insert(qn.clone(), node.clone());
+            }
+            if node.label == "Method" {
+                if let Some(owner) = semantic_owner_qn(&qn, &node.name) {
+                    this.methods_by_owner_name
+                        .entry((owner.to_string(), node.name.clone()))
+                        .or_default()
+                        .push(node.clone());
+                }
+            }
+            this.nodes_by_qn.insert(qn, node);
+        }
+        this.add_member_properties();
+        Ok(this)
+    }
+
+    fn record(
+        &mut self,
+        source_id: i64,
+        source_qn: &str,
+        source_label: &str,
+        target_id: i64,
+        target_qn: &str,
+        target_label: &str,
+        edge_type: &str,
+    ) {
+        match edge_type {
+            "DEFINES_METHOD" => {
+                self.add(
+                    aka_node_id(source_id, source_qn),
+                    aka_node_id(target_id, target_qn),
+                    "HAS_METHOD",
+                    "aka semantic edge from DEFINES_METHOD",
+                );
+            }
+            "USAGE" if matches!(target_label, "Field" | "Variable" | "Property") => {
+                self.add(
+                    aka_node_id(source_id, source_qn),
+                    aka_node_id(target_id, target_qn),
+                    "ACCESSES",
+                    "aka semantic edge from symbol usage",
+                );
+            }
+            "INHERITS" | "IMPLEMENTS"
+                if matches!(source_label, "Class") && matches!(target_label, "Interface") =>
+            {
+                self.add(
+                    aka_node_id(source_id, source_qn),
+                    aka_node_id(target_id, target_qn),
+                    "IMPLEMENTS",
+                    "aka semantic edge from inheritance reference",
+                );
+                self.implements
+                    .push((source_qn.to_string(), target_qn.to_string()));
+            }
+            _ => {}
+        }
+    }
+
+    fn edge_recs(mut self) -> Vec<EdgeRec> {
+        for (class_qn, iface_qn) in self.implements.clone() {
+            self.add_method_implements(&class_qn, &iface_qn);
+        }
+        self.out
+    }
+
+    fn add_member_properties(&mut self) {
+        let nodes: Vec<_> = self.nodes_by_qn.values().cloned().collect();
+        for member in nodes
+            .iter()
+            .filter(|n| matches!(n.label.as_str(), "Field" | "Property"))
+        {
+            let Some(owner_qn) = semantic_owner_qn(&member.qn, &member.name) else {
+                continue;
+            };
+            let Some(owner) = self.type_by_qn.get(owner_qn) else {
+                continue;
+            };
+            self.add(
+                owner.id.clone(),
+                member.id.clone(),
+                "HAS_PROPERTY",
+                "aka semantic edge from owned property",
+            );
+        }
+    }
+
+    fn add_method_implements(&mut self, class_qn: &str, iface_qn: &str) {
+        let iface_methods: Vec<_> = self
+            .methods_by_owner_name
+            .iter()
+            .filter_map(|((owner, name), methods)| {
+                (owner == iface_qn).then(|| (name.clone(), methods.clone()))
+            })
+            .collect();
+        for (method_name, interface_methods) in iface_methods {
+            let Some(class_methods) = self
+                .methods_by_owner_name
+                .get(&(class_qn.to_string(), method_name))
+                .cloned()
+            else {
+                continue;
+            };
+            for class_method in &class_methods {
+                for interface_method in &interface_methods {
+                    self.add(
+                        class_method.id.clone(),
+                        interface_method.id.clone(),
+                        "METHOD_IMPLEMENTS",
+                        "aka semantic edge from class/interface method match",
+                    );
+                }
+            }
+        }
+    }
+
+    fn add(&mut self, source: String, target: String, edge_type: &str, reason: &str) {
+        let key = (source.clone(), edge_type.to_string(), target.clone());
+        if !self.seen.insert(key) {
+            return;
+        }
+        let evidence = json!({
+            "source": "aka-cbm-synth",
+            "kind": "semantic-compat",
+            "from": "codebase-memory"
+        });
+        self.out.push(EdgeRec {
+            id: format!(
+                "semantic:{}:{:016x}",
+                edge_type.to_ascii_lowercase(),
+                stable_hash(&format!("{source}|{edge_type}|{target}"))
+            ),
+            source_id: source,
+            target_id: target,
+            edge_type: edge_type.into(),
+            confidence: 0.86,
+            reason: reason.into(),
+            step: None,
+            evidence: Some(evidence),
+        });
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SemanticNode {
+    id: String,
+    label: String,
+    name: String,
+    qn: String,
+}
+
+fn semantic_owner_qn<'a>(member_qn: &'a str, name: &str) -> Option<&'a str> {
+    let tail = member_qn.rsplit('.').next()?;
+    if tail != name {
+        return None;
+    }
+    member_qn.rsplit_once('.').map(|(owner, _)| owner)
 }
 
 #[derive(Debug, Clone)]
@@ -3283,6 +3489,18 @@ mod tests {
         .unwrap();
     }
 
+    fn exported_edge_types(conn: &Connection) -> Vec<String> {
+        let dir = temp_repo("edges");
+        let path = dir.join("edges.ndjson");
+        let synth = SynthGraph::default();
+        export_edges(conn, "demo", &path, &synth, 0, &mut |_| {}).unwrap();
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<EdgeRec>(line).unwrap().edge_type)
+            .collect()
+    }
+
     fn temp_repo(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("aka-core-engine-{name}-{}", std::process::id()));
@@ -3794,5 +4012,60 @@ const tool = {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "sync_orders");
         assert_eq!(tools[0].description, "Đồng bộ đơn hàng");
+    }
+
+    #[test]
+    fn exports_gitnexus_compatible_semantic_edges() {
+        let conn = test_conn();
+        insert_node(
+            &conn,
+            1,
+            "Class",
+            "OrderService",
+            "pkg.OrderService",
+            "src/OrderService.java",
+        );
+        insert_node(
+            &conn,
+            2,
+            "Method",
+            "save",
+            "pkg.OrderService.save",
+            "src/OrderService.java",
+        );
+        insert_node(
+            &conn,
+            3,
+            "Field",
+            "repo",
+            "pkg.OrderService.repo",
+            "src/OrderService.java",
+        );
+        insert_node(
+            &conn,
+            4,
+            "Interface",
+            "CrudService",
+            "pkg.CrudService",
+            "src/CrudService.java",
+        );
+        insert_node(
+            &conn,
+            5,
+            "Method",
+            "save",
+            "pkg.CrudService.save",
+            "src/CrudService.java",
+        );
+        insert_edge(&conn, 1, 1, 2, "DEFINES_METHOD");
+        insert_edge(&conn, 2, 1, 4, "INHERITS");
+        insert_edge(&conn, 3, 2, 3, "USAGE");
+
+        let edge_types = exported_edge_types(&conn);
+        assert!(edge_types.contains(&"HAS_METHOD".to_string()));
+        assert!(edge_types.contains(&"HAS_PROPERTY".to_string()));
+        assert!(edge_types.contains(&"IMPLEMENTS".to_string()));
+        assert!(edge_types.contains(&"METHOD_IMPLEMENTS".to_string()));
+        assert!(edge_types.contains(&"ACCESSES".to_string()));
     }
 }
