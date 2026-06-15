@@ -40,6 +40,7 @@ mod resource_synth;
 mod route_consumer_synth;
 mod route_django_synth;
 mod route_shape;
+mod route_spring_functional_synth;
 mod source_scan;
 mod tool_synth;
 mod topic_synth;
@@ -62,6 +63,7 @@ use route_django_synth::django_urlconf_routes_from_repo;
 use route_shape::{
     extract_error_keys, extract_middleware, extract_response_keys, literal_occurrences,
 };
+use route_spring_functional_synth::spring_functional_routes_from_repo;
 use source_scan::{
     find_call_args, find_matching_paren, is_ident_continue, is_noisy_source_path, node_at_offset,
     nodes_by_file, pick_handler_node, project_code_nodes_by_file, read_repo_text, skip_ws,
@@ -2456,6 +2458,8 @@ fn synthesize_routes_from_sources(
     let python_prefixes = python_router_prefixes_by_file(repo, by_file.keys().map(String::as_str));
     let java_interface_routes = java_interface_routes_by_method(repo, nodes);
     let django_routes_by_file = django_urlconf_routes_from_repo(repo, &project_sources, &by_file);
+    let spring_functional_routes_by_file =
+        spring_functional_routes_from_repo(repo, &project_sources, nodes);
     let mut routes: BTreeMap<(String, String), SynthRoute> = BTreeMap::new();
     for native in native_routes {
         let route = route_from_path(&native.file_path)
@@ -2528,6 +2532,24 @@ fn synthesize_routes_from_sources(
     }
 
     for (file_path, route_candidates) in django_routes_by_file {
+        let text = read_repo_text(repo, &file_path).unwrap_or_default();
+        let response_keys = extract_response_keys(&text);
+        let error_keys = extract_error_keys(&response_keys, &text);
+        let middleware = extract_middleware(&text);
+        for candidate in route_candidates {
+            merge_route_candidate(
+                &mut routes,
+                processes,
+                &file_path,
+                candidate,
+                &middleware,
+                &response_keys,
+                &error_keys,
+            );
+        }
+    }
+
+    for (file_path, route_candidates) in spring_functional_routes_by_file {
         let text = read_repo_text(repo, &file_path).unwrap_or_default();
         let response_keys = extract_response_keys(&text);
         let error_keys = extract_error_keys(&response_keys, &text);

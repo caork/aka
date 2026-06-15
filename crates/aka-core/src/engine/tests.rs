@@ -978,6 +978,92 @@ public class OrderController {
 }
 
 #[test]
+fn synthesizes_spring_functional_router_routes() {
+    let repo = temp_repo("spring-functional-routes");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    std::fs::write(
+        repo.join("src/main/java/com/example/orders/OrderRoutes.java"),
+        r#"package com.example.orders;
+
+import static org.springframework.web.reactive.function.server.RequestPredicates.GET;
+import static org.springframework.web.reactive.function.server.RequestPredicates.POST;
+import static org.springframework.web.reactive.function.server.RouterFunctions.route;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.reactive.function.server.RouterFunction;
+import org.springframework.web.reactive.function.server.ServerResponse;
+
+class OrderRoutes {
+    @Bean
+    RouterFunction<ServerResponse> routes(OrderHandler handler) {
+        return route(GET("/api/orders/{id}"), handler::getOrder)
+            .andRoute(POST("/api/orders"), handler::createOrder);
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/main/java/com/example/orders/OrderHandler.java"),
+        r#"package com.example.orders;
+
+class OrderHandler {
+    ServerResponse getOrder(ServerRequest request) {
+        return ServerResponse.ok().build();
+    }
+
+    ServerResponse createOrder(ServerRequest request) {
+        return ServerResponse.ok().build();
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Method",
+        "getOrder",
+        "com.example.orders.OrderHandler.getOrder",
+        "src/main/java/com/example/orders/OrderHandler.java",
+        json!({"language": "java"}),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Method",
+        "createOrder",
+        "com.example.orders.OrderHandler.createOrder",
+        "src/main/java/com/example/orders/OrderHandler.java",
+        json!({"language": "java"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let get = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}")
+        .expect("spring functional GET route");
+    assert_eq!(get.method.as_deref(), Some("GET"));
+    assert_eq!(
+        get.handler_id.as_deref(),
+        Some("cbm:1:com.example.orders.OrderHandler.getOrder")
+    );
+    let post = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders")
+        .expect("spring functional POST route");
+    assert_eq!(post.method.as_deref(), Some("POST"));
+    assert_eq!(
+        post.handler_id.as_deref(),
+        Some("cbm:2:com.example.orders.OrderHandler.createOrder")
+    );
+}
+
+#[test]
 fn links_java_http_consumers_to_spring_routes() {
     let repo = temp_repo("java-route-consumers");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
