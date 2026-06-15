@@ -195,6 +195,71 @@ def submit_receipt(order_id: str, background_tasks: BackgroundTasks):
 }
 
 #[test]
+fn synthesizes_python_rq_jobs() {
+    let repo = temp_repo("python-rq-jobs");
+    std::fs::write(
+        repo.join("jobs.py"),
+        r#"from redis import Redis
+from rq import Queue
+from rq.decorators import job
+
+redis = Redis()
+queue = Queue("orders", connection=redis)
+
+@job("orders")
+def rebuild_orders(order_id):
+    return order_id
+
+def enqueue_orders(order_id):
+    queue.enqueue(rebuild_orders, order_id)
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "rebuild_orders",
+        "jobs.rebuild_orders",
+        "jobs.py",
+        (9, 10),
+        json!({
+            "decorators": ["@job(\"orders\")"],
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "enqueue_orders",
+        "jobs.enqueue_orders",
+        "jobs.py",
+        (12, 13),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let job = synth
+        .jobs
+        .iter()
+        .find(|job| job.name == "orders")
+        .expect("rq queue job");
+    assert_eq!(job.job_type, "rq-job");
+    assert_eq!(job.strategy, "python-rq-job");
+    assert_eq!(job.handler_id, "cbm:1:jobs.rebuild_orders");
+    let edges = job.edge_recs();
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "HANDLES_JOB" && edge.source_id == "cbm:1:jobs.rebuild_orders"
+    }));
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "ENQUEUES_JOB" && edge.source_id == "cbm:2:jobs.enqueue_orders"
+    }));
+}
+
+#[test]
 fn synthesizes_python_dramatiq_jobs() {
     let repo = temp_repo("python-dramatiq-jobs");
     std::fs::write(

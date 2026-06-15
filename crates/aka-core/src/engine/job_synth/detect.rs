@@ -192,6 +192,7 @@ fn detect_python_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobDetection>
             out.push(JobDetection {
                 name: python_named_arg(normalized, "id")
                     .or_else(|| python_named_arg(normalized, "queue"))
+                    .or_else(|| python_first_string_arg(normalized))
                     .unwrap_or_else(|| node.display_name().to_string()),
                 job_type: "rq-job".into(),
                 schedule: None,
@@ -297,6 +298,12 @@ fn python_named_arg(call_text: &str, key: &str) -> Option<String> {
     let open = call_text.find('(')?;
     let close = find_matching_paren(call_text, open).unwrap_or(call_text.len());
     keyword_string_literal(&call_text[open + 1..close], key)
+}
+
+fn python_first_string_arg(call_text: &str) -> Option<String> {
+    let open = call_text.find('(')?;
+    let close = find_matching_paren(call_text, open).unwrap_or(call_text.len());
+    first_string_literal(&call_text[open + 1..close])
 }
 
 fn python_schedule_summary(call_text: &str) -> Option<String> {
