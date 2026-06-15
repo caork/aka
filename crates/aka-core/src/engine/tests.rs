@@ -2020,6 +2020,96 @@ class OrderService {
 }
 
 #[test]
+fn synthesizes_python_source_symbols_when_cbm_misses_python_nodes() {
+    let repo = temp_repo("python-source-symbol-fallback");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("app/api")).unwrap();
+    let file = "app/api/orders.py";
+    std::fs::write(
+        repo.join("pyproject.toml"),
+        r#"[project]
+name = "orders"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(file),
+        r#"from fastapi import APIRouter
+
+router = APIRouter(prefix="/api")
+
+class OrderService:
+    def load_order(self, order_id: str):
+        return {"id": order_id}
+
+@router.get("/orders/{order_id}")
+async def get_order(order_id: str):
+    return OrderService().load_order(order_id)
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pyproject.toml", file]);
+
+    let conn = test_conn();
+    insert_file_hash(&conn, "pyproject.toml");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth.source_symbols.iter().any(|symbol| {
+        symbol.node().label == "Class" && symbol.node().qn == "app.api.orders.OrderService"
+    }));
+    assert!(synth.source_symbols.iter().any(|symbol| {
+        symbol.node().label == "Method"
+            && symbol.node().name == "load_order"
+            && symbol.node().parent_class.as_deref() == Some("app.api.orders.OrderService")
+    }));
+    assert!(synth.source_symbols.iter().any(|symbol| {
+        symbol.node().label == "Function"
+            && symbol.node().qn == "app.api.orders.get_order"
+            && symbol
+                .node()
+                .decorators
+                .iter()
+                .any(|decorator| decorator == "@router.get(\"/orders/{order_id}\")")
+    }));
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{order_id}")
+        .expect("FastAPI route should be synthesized from Python fallback symbols");
+    assert_eq!(route.method.as_deref(), Some("GET"));
+    assert_eq!(route.handler_name.as_deref(), Some("get_order"));
+}
+
+#[test]
+fn exports_python_source_symbol_nodes_for_search_indexing() {
+    let repo = temp_repo("python-source-symbol-export");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("orders")).unwrap();
+    let file = "orders/service.py";
+    std::fs::write(repo.join("pyproject.toml"), "[project]\nname='orders'\n").unwrap();
+    std::fs::write(
+        repo.join(file),
+        r#"class OrderService:
+    def hydrate_orders(self):
+        return []
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pyproject.toml", file]);
+
+    let conn = test_conn();
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let out = repo.join("nodes.ndjson");
+    let exported = export_nodes(&conn, "demo", &out, &synth, 0, &mut |_| {}).unwrap();
+    let text = std::fs::read_to_string(out).unwrap();
+
+    assert!(exported >= 2);
+    assert!(text.contains("\"strategy\":\"python-source-symbol-fallback\""));
+    assert!(text.contains("orders.service.OrderService"));
+    assert!(text.contains("hydrate_orders"));
+}
+
+#[test]
 fn reads_cbm_file_hashes_rel_path_column() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(

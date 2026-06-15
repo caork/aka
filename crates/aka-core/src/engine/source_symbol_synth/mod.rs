@@ -4,14 +4,17 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 mod java;
+mod python;
 
 use java::java_source_symbols;
+use python::python_source_symbols;
 
 use super::{read_repo_text, stable_hash, NodeRec, ProjectSourceSet, SynthNode};
 
 #[derive(Debug, Clone)]
 pub(super) struct SynthSourceSymbol {
     node: SynthNode,
+    strategy: &'static str,
 }
 
 impl SynthSourceSymbol {
@@ -58,10 +61,7 @@ impl SynthSourceSymbol {
             properties.insert("routeMethod".into(), Value::String(route_method.clone()));
         }
         properties.insert("source".into(), Value::String("aka-source-scan".into()));
-        properties.insert(
-            "strategy".into(),
-            Value::String("java-source-symbol-fallback".into()),
-        );
+        properties.insert("strategy".into(), Value::String(self.strategy.into()));
         if let Some(parent_class) = &self.node.parent_class {
             properties.insert("parent_class".into(), Value::String(parent_class.clone()));
             properties.insert("parentClass".into(), Value::String(parent_class.clone()));
@@ -81,16 +81,27 @@ pub(super) fn synthesize_source_symbols_from_sources(
     let project_sources = ProjectSourceSet::discover(repo);
     let mut existing_keys = existing_symbol_keys(existing);
     let mut out = Vec::new();
-    for file_path in project_sources.project_files_with_extensions(repo, &["java"]) {
-        let Some(text) = read_repo_text(repo, file_path) else {
-            continue;
-        };
-        for node in java_source_symbols(file_path, &text) {
-            let key = symbol_key(&node);
-            if existing_keys.insert(key) {
-                out.push(SynthSourceSymbol { node });
-            }
-        }
+    for (extensions, strategy, synthesize) in [
+        (
+            &["java"][..],
+            "java-source-symbol-fallback",
+            java_source_symbols as fn(&str, &str) -> Vec<SynthNode>,
+        ),
+        (
+            &["py"][..],
+            "python-source-symbol-fallback",
+            python_source_symbols as fn(&str, &str) -> Vec<SynthNode>,
+        ),
+    ] {
+        synthesize_source_symbols_for_language(
+            repo,
+            &project_sources,
+            extensions,
+            strategy,
+            synthesize,
+            &mut existing_keys,
+            &mut out,
+        );
     }
     out.sort_by(|a, b| {
         a.node
@@ -102,12 +113,34 @@ pub(super) fn synthesize_source_symbols_from_sources(
     out
 }
 
+fn synthesize_source_symbols_for_language(
+    repo: &Path,
+    project_sources: &ProjectSourceSet,
+    extensions: &[&str],
+    strategy: &'static str,
+    synthesize: fn(&str, &str) -> Vec<SynthNode>,
+    existing_keys: &mut BTreeSet<String>,
+    out: &mut Vec<SynthSourceSymbol>,
+) {
+    for file_path in project_sources.project_files_with_extensions(repo, extensions) {
+        let Some(text) = read_repo_text(repo, file_path) else {
+            continue;
+        };
+        for node in synthesize(file_path, &text) {
+            let key = symbol_key(&node);
+            if existing_keys.insert(key) {
+                out.push(SynthSourceSymbol { node, strategy });
+            }
+        }
+    }
+}
+
 fn existing_symbol_keys(nodes: &BTreeMap<String, SynthNode>) -> BTreeSet<String> {
     nodes.values().map(symbol_key).collect()
 }
 
 fn symbol_key(node: &SynthNode) -> String {
-    format!("{}|{}|{}", node.label, node.file_path, node.qn)
+    format!("{}|{}", node.file_path, node.qn)
 }
 
 fn line_number_at_offset(text: &str, offset: usize) -> i64 {
