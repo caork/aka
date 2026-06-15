@@ -14,6 +14,7 @@ pub(super) struct SynthTopic {
     pub(super) id: String,
     pub(super) name: String,
     pub(super) broker: String,
+    pub(super) consumer_groups: Vec<String>,
     pub(super) producers: Vec<SynthTopicEndpoint>,
     pub(super) consumers: Vec<SynthTopicEndpoint>,
 }
@@ -32,6 +33,18 @@ impl SynthTopic {
         properties.insert("broker".into(), Value::String(self.broker.clone()));
         properties.insert("source".into(), Value::String("aka-cbm-synth".into()));
         properties.insert("topicSource".into(), Value::String("source-scan".into()));
+        if !self.consumer_groups.is_empty() {
+            properties.insert(
+                "consumerGroups".into(),
+                Value::Array(
+                    self.consumer_groups
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
         NodeRec {
             id: self.id.clone(),
             label: "Topic".into(),
@@ -118,9 +131,11 @@ pub(super) fn synthesize_topics_from_sources(
                 id: topic_id,
                 name: detection.topic.clone(),
                 broker: detection.broker.clone(),
+                consumer_groups: Vec::new(),
                 producers: Vec::new(),
                 consumers: Vec::new(),
             });
+            topic.consumer_groups.extend(detection.consumer_groups);
             let edge_key = (
                 detection.kind.as_str().to_string(),
                 detection.broker,
@@ -142,6 +157,8 @@ pub(super) fn synthesize_topics_from_sources(
         topic.consumers.dedup();
         topic.producers.sort();
         topic.producers.dedup();
+        topic.consumer_groups.sort();
+        topic.consumer_groups.dedup();
     }
     out.sort_by(|a, b| a.broker.cmp(&b.broker).then_with(|| a.name.cmp(&b.name)));
     out
@@ -169,6 +186,24 @@ struct TopicDetection {
     kind: TopicEndpointKind,
     node_id: String,
     strategy: String,
+    consumer_groups: Vec<String>,
+}
+
+fn topic_detection(
+    topic: String,
+    broker: &str,
+    kind: TopicEndpointKind,
+    node_id: String,
+    strategy: &str,
+) -> TopicDetection {
+    TopicDetection {
+        topic,
+        broker: broker.into(),
+        kind,
+        node_id,
+        strategy: strategy.into(),
+        consumer_groups: Vec::new(),
+    }
 }
 
 fn extract_topic_detections(
@@ -217,25 +252,28 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
     {
         for decorator in &node.decorators {
             if decorator.contains("KafkaListener") {
+                let consumer_groups = annotation_string_values(decorator, &["groupId", "group"]);
                 for topic in annotation_string_values(decorator, &["topics", "topic", "value"]) {
-                    out.push(TopicDetection {
+                    let mut detection = topic_detection(
                         topic,
-                        broker: "kafka".into(),
-                        kind: TopicEndpointKind::Consumer,
-                        node_id: node.aka_id.clone(),
-                        strategy: "java-kafka-listener".into(),
-                    });
+                        "kafka",
+                        TopicEndpointKind::Consumer,
+                        node.aka_id.clone(),
+                        "java-kafka-listener",
+                    );
+                    detection.consumer_groups = consumer_groups.clone();
+                    out.push(detection);
                 }
             }
             if decorator.contains("RabbitListener") {
                 for topic in rabbit_listener_topics(decorator) {
-                    out.push(TopicDetection {
+                    out.push(topic_detection(
                         topic,
-                        broker: "rabbitmq".into(),
-                        kind: TopicEndpointKind::Consumer,
-                        node_id: node.aka_id.clone(),
-                        strategy: "java-rabbit-listener".into(),
-                    });
+                        "rabbitmq",
+                        TopicEndpointKind::Consumer,
+                        node.aka_id.clone(),
+                        "java-rabbit-listener",
+                    ));
                 }
             }
             if decorator.contains("JmsListener") {
@@ -243,13 +281,13 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                     decorator,
                     &["destination", "queue", "topic", "value"],
                 ) {
-                    out.push(TopicDetection {
+                    out.push(topic_detection(
                         topic,
-                        broker: "jms".into(),
-                        kind: TopicEndpointKind::Consumer,
-                        node_id: node.aka_id.clone(),
-                        strategy: "java-jms-listener".into(),
-                    });
+                        "jms",
+                        TopicEndpointKind::Consumer,
+                        node.aka_id.clone(),
+                        "java-jms-listener",
+                    ));
                 }
             }
             if decorator.contains("SqsListener") {
@@ -257,13 +295,13 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                     decorator,
                     &["queueNames", "queueName", "value"],
                 ) {
-                    out.push(TopicDetection {
+                    out.push(topic_detection(
                         topic,
-                        broker: "sqs".into(),
-                        kind: TopicEndpointKind::Consumer,
-                        node_id: node.aka_id.clone(),
-                        strategy: "java-sqs-listener".into(),
-                    });
+                        "sqs",
+                        TopicEndpointKind::Consumer,
+                        node.aka_id.clone(),
+                        "java-sqs-listener",
+                    ));
                 }
             }
         }
@@ -461,13 +499,13 @@ fn extract_rabbit_template_topics(text: &str, nodes: &[&SynthNode]) -> Vec<Topic
             continue;
         };
         for topic in string_literals(topic_arg) {
-            out.push(TopicDetection {
+            out.push(topic_detection(
                 topic,
-                broker: "rabbitmq".into(),
-                kind: TopicEndpointKind::Producer,
-                node_id: node.aka_id.clone(),
-                strategy: "java-rabbit-template-routing-key".into(),
-            });
+                "rabbitmq",
+                TopicEndpointKind::Producer,
+                node.aka_id.clone(),
+                "java-rabbit-template-routing-key",
+            ));
         }
     }
     out
@@ -494,13 +532,13 @@ fn extract_call_topic_literals(
             continue;
         };
         for topic in string_literals(arg) {
-            out.push(TopicDetection {
+            out.push(topic_detection(
                 topic,
-                broker: broker.into(),
+                broker,
                 kind,
-                node_id: node.aka_id.clone(),
-                strategy: strategy.into(),
-            });
+                node.aka_id.clone(),
+                strategy,
+            ));
         }
     }
     out
@@ -530,13 +568,13 @@ fn extract_keyword_topic_literals(
                 continue;
             }
             for topic in string_literals(value) {
-                out.push(TopicDetection {
+                out.push(topic_detection(
                     topic,
-                    broker: broker.into(),
+                    broker,
                     kind,
-                    node_id: node.aka_id.clone(),
-                    strategy: strategy.into(),
-                });
+                    node.aka_id.clone(),
+                    strategy,
+                ));
             }
         }
     }

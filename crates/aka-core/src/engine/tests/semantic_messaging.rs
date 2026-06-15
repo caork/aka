@@ -12,7 +12,7 @@ fn synthesizes_java_message_topics() {
 import org.springframework.kafka.annotation.KafkaListener;
 
 class OrderEvents {
-    @KafkaListener(topics = "orders.created")
+    @KafkaListener(topics = "orders.created", groupId = "orders-service")
     public void onCreated(String payload) {}
 
     @KafkaListener("orders.updated")
@@ -35,7 +35,7 @@ class OrderEvents {
         "com.example.orders.OrderEvents.onCreated",
         file,
         json!({
-            "decorators": ["@KafkaListener(topics = \"orders.created\")"],
+            "decorators": ["@KafkaListener(topics = \"orders.created\", groupId = \"orders-service\")"],
             "language": "java",
         }),
     );
@@ -79,6 +79,11 @@ class OrderEvents {
     assert_eq!(
         created.producers[0].node_id,
         "cbm:3:com.example.orders.OrderEvents.publish"
+    );
+    let created_node = created.node_rec();
+    assert_eq!(
+        created_node.properties["consumerGroups"],
+        json!(["orders-service"])
     );
 
     let updated = synth
