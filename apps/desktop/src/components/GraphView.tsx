@@ -603,17 +603,7 @@ export default function GraphView() {
       />
 
       <div
-        className="pointer-events-none absolute inset-x-0 top-0 z-[5] h-[58px]"
-        style={{
-          background:
-            "linear-gradient(180deg, rgba(255,255,255,0.58) 0%, rgba(255,255,255,0.24) 52%, rgba(255,255,255,0) 100%)",
-          backdropFilter: "blur(18px) saturate(160%)",
-          WebkitBackdropFilter: "blur(18px) saturate(160%)",
-          maskImage:
-            "linear-gradient(180deg, black 0%, black 58%, transparent 100%)",
-          WebkitMaskImage:
-            "linear-gradient(180deg, black 0%, black 58%, transparent 100%)",
-        }}
+        className="graph-top-sheen pointer-events-none absolute inset-x-0 top-0 z-[5]"
         aria-hidden
       />
 

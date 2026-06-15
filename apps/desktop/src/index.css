@@ -274,6 +274,25 @@ html[data-platform="macos"] .code-rail-resize-handle {
   mask-image: linear-gradient(to bottom, black 0%, black 48%, transparent 100%);
 }
 
+.graph-top-sheen {
+  height: 58px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.58) 0%,
+    rgba(255, 255, 255, 0.24) 52%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-mask-image: linear-gradient(180deg, black 0%, black 58%, transparent 100%);
+  mask-image: linear-gradient(180deg, black 0%, black 58%, transparent 100%);
+}
+
+html[data-platform="windows"] .graph-top-glass,
+html[data-platform="windows"] .graph-top-sheen {
+  display: none;
+}
+
 .code-symbol-mark {
   padding: 0 2px;
   box-decoration-break: clone;
@@ -421,11 +440,41 @@ html[data-theme="dark"] .app-logo {
 /* search input */
 .cmd-input {
   background: var(--cmd-bg);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
   border-radius: 10px;
   box-shadow:
     inset 0 0 0 0.5px var(--cmd-border),
     0 1px 2px rgba(16, 24, 40, 0.04);
   transition: box-shadow 150ms ease-out;
+}
+
+html[data-platform="windows"] .cmd-input {
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--canvas) 94%, white 6%),
+      color-mix(in srgb, var(--canvas) 88%, white 12%)
+    );
+  -webkit-backdrop-filter: blur(30px) saturate(140%);
+  backdrop-filter: blur(30px) saturate(140%);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--cmd-border) 80%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.44),
+    0 4px 18px rgba(15, 23, 42, 0.1);
+}
+
+html[data-platform="windows"][data-theme="dark"] .cmd-input {
+  background:
+    linear-gradient(
+      180deg,
+      rgba(34, 43, 57, 0.94),
+      rgba(24, 31, 43, 0.92)
+    );
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 5px 20px rgba(0, 0, 0, 0.26);
 }
 .cmd-input:focus-within {
   box-shadow:
