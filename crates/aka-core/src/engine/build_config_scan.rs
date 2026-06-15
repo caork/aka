@@ -30,6 +30,11 @@ pub(super) fn discover_project_test_roots(
                 roots.insert(root);
             }
         }
+        for root in default_test_roots_for_build_config(&file_path) {
+            if let Some(root) = normalize_declared_source_root(base_dir, root) {
+                roots.insert(root);
+            }
+        }
     }
     roots
 }
@@ -114,6 +119,40 @@ fn test_roots_from_build_config(path: &str, text: &str) -> Vec<String> {
         return python_test_roots(text);
     }
     Vec::new()
+}
+
+fn default_test_roots_for_build_config(path: &str) -> &'static [&'static str] {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name {
+        "pom.xml" => &[
+            "src/test/java",
+            "src/test/kotlin",
+            "src/test/groovy",
+            "src/test/scala",
+            "src/test/resources",
+            "src/it/java",
+            "src/it/kotlin",
+            "src/it/groovy",
+            "src/it/scala",
+            "src/integration-test/java",
+            "src/integrationTest/java",
+        ],
+        "build.gradle" | "build.gradle.kts" | "settings.gradle" | "settings.gradle.kts" => &[
+            "src/test/java",
+            "src/test/kotlin",
+            "src/test/groovy",
+            "src/test/scala",
+            "src/test/resources",
+            "src/integrationTest/java",
+            "src/integrationTest/kotlin",
+            "src/functionalTest/java",
+            "src/functionalTest/kotlin",
+            "src/testFixtures/java",
+            "src/testFixtures/kotlin",
+        ],
+        "pyproject.toml" | "setup.cfg" | "tox.ini" | "pytest.ini" => &["tests", "test", "testing"],
+        _ => &[],
+    }
 }
 
 fn maven_test_roots(text: &str) -> Vec<String> {

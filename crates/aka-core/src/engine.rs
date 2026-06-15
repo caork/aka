@@ -61,10 +61,9 @@ use route_shape::{
     extract_error_keys, extract_middleware, extract_response_keys, literal_occurrences,
 };
 use source_scan::{
-    find_call_args, find_matching_paren, is_ident_continue, is_noisy_source_path,
-    is_project_test_source_path, node_at_offset, nodes_by_file, pick_handler_node,
-    project_code_nodes_by_file, read_repo_text, skip_ws, split_top_level_commas, stable_hash,
-    ProjectSourceSet,
+    find_call_args, find_matching_paren, is_ident_continue, is_noisy_source_path, node_at_offset,
+    nodes_by_file, pick_handler_node, project_code_nodes_by_file, read_repo_text, skip_ws,
+    split_top_level_commas, stable_hash, ProjectSourceSet,
 };
 use tool_synth::{synthesize_tools_from_sources, SynthTool};
 use topic_synth::{synthesize_topics_from_sources, SynthTopic};
@@ -2283,7 +2282,7 @@ fn find_entry_points(
 ) -> Vec<String> {
     let mut candidates = Vec::new();
     for (id, node) in nodes {
-        if !matches!(node.label.as_str(), "Function" | "Method") || is_test_file(&node.file_path) {
+        if !matches!(node.label.as_str(), "Function" | "Method") {
             continue;
         }
         let Some(callees) = adjacency.get(id) else {
@@ -4060,10 +4059,6 @@ fn framework_multiplier_from_path(path: &str) -> f64 {
     } else {
         1.0
     }
-}
-
-fn is_test_file(path: &str) -> bool {
-    is_project_test_source_path(path)
 }
 
 fn is_utility_file(path: &str) -> bool {

@@ -27,7 +27,6 @@ impl ProjectSourceSet {
         let normalized = normalize_repo_path(file_path);
         if normalized.is_empty()
             || is_noisy_source_path(&normalized)
-            || is_project_test_source_path(&normalized)
             || self.is_project_test_root_file(&normalized)
         {
             return false;
@@ -360,38 +359,6 @@ pub(super) fn is_noisy_source_path(path: &str) -> bool {
                 | "third-party"
         )
     }) || path.ends_with(".min.js")
-}
-
-pub(super) fn is_project_test_source_path(path: &str) -> bool {
-    let path = path.replace('\\', "/").to_ascii_lowercase();
-    let name = path.rsplit('/').next().unwrap_or(path.as_str());
-    path.contains(".test.")
-        || path.contains(".spec.")
-        || path.contains("/src/test/")
-        || path.contains("/src/it/")
-        || path.contains("/src/integrationtest/")
-        || path.contains("/src/e2e/")
-        || path.contains("/test/")
-        || path.contains("/tests/")
-        || path.contains("/testing/")
-        || path.contains("/__tests__/")
-        || path.contains("/__mocks__/")
-        || path.contains("/spec/")
-        || path.contains(".tests/")
-        || path.contains(".test/")
-        || path.contains("uitests/")
-        || name.starts_with("test_")
-        || name == "conftest.py"
-        || name.ends_with("_test.py")
-        || name.ends_with("_test.go")
-        || name.ends_with("tests.swift")
-        || name.ends_with("test.swift")
-        || name.ends_with("tests.cs")
-        || name.ends_with("test.cs")
-        || name.ends_with("test.php")
-        || name.ends_with("spec.php")
-        || name.ends_with("_spec.rb")
-        || name.ends_with("_test.rb")
 }
 
 pub(super) fn stable_hash(s: &str) -> u64 {

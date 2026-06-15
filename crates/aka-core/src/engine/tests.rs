@@ -2518,6 +2518,7 @@ class OrderHandler {}
 fn ignores_test_source_command_entrypoints() {
     let repo = temp_repo("test-source-commands");
     std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
     let file = "src/test/java/com/example/ops/TestCommand.java";
     std::fs::write(
         repo.join(file),
@@ -2656,7 +2657,7 @@ class TestMaintenance implements ApplicationRunner {
         .collect();
     assert!(handlers.contains(&"StartupMaintenance"));
     assert!(handlers.contains(&"UntrackedMaintenance"));
-    assert!(!handlers.contains(&"TestMaintenance"));
+    assert!(handlers.contains(&"TestMaintenance"));
 }
 
 #[test]
@@ -2849,6 +2850,80 @@ def main():
         .commands
         .iter()
         .any(|command| command.command_type == "argparse-command"));
+}
+
+#[test]
+fn command_synthesis_excludes_python_configured_test_roots() {
+    let repo = temp_repo("python-configured-test-commands");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("ops")).unwrap();
+    std::fs::create_dir_all(repo.join("tests")).unwrap();
+    std::fs::write(
+        repo.join("pyproject.toml"),
+        r#"[tool.pytest.ini_options]
+testpaths = ["tests"]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("ops/cli.py"),
+        r#"import click
+
+@click.command(name="sync-orders")
+def sync_orders():
+    pass
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("tests/test_cli.py"),
+        r#"import click
+
+@click.command(name="fixture-sync")
+def fixture_sync():
+    pass
+"#,
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        &["add", "pyproject.toml", "ops/cli.py", "tests/test_cli.py"],
+    );
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "sync_orders",
+        "ops.cli.sync_orders",
+        "ops/cli.py",
+        (3, 4),
+        json!({
+            "language": "python",
+            "decorators": ["@click.command(name=\"sync-orders\")"],
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "fixture_sync",
+        "tests.test_cli.fixture_sync",
+        "tests/test_cli.py",
+        (3, 4),
+        json!({
+            "language": "python",
+            "decorators": ["@click.command(name=\"fixture-sync\")"],
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let names: BTreeSet<_> = synth
+        .commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    assert!(names.contains("sync-orders"));
+    assert!(!names.contains("fixture-sync"));
 }
 
 #[test]
