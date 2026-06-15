@@ -2279,14 +2279,22 @@ impl Backend for AkaBackend {
     }
 
     fn analyze(&self, repo_path: &str) -> Result<String> {
-        let summary = crate::run_analyze(PathBuf::from(repo_path), self.engine_dir(), false)
-            .map_err(|e| anyhow!("{e:#}"))?;
-        // 旧句柄作废（重新索引后必须重开）。
-        self.handles
-            .lock()
-            .expect("handles lock")
-            .remove(&PathBuf::from(repo_path));
-        Ok(summary)
+        let path = PathBuf::from(repo_path)
+            .canonicalize()
+            .with_context(|| format!("resolve repository path {repo_path}"))?;
+        if !path.is_dir() {
+            bail!("repository path is not a directory: {repo_path}");
+        }
+        if let Some(entry) = Registry::load()?.find(&path).cloned() {
+            self.update_repo(&entry.name)
+        } else {
+            match self.auto_index_workspace(path)? {
+                Some(name) => Ok(format!(
+                    "indexing scheduled: {name} (local import + analyze)"
+                )),
+                None => Ok("indexing already queued for this repository".into()),
+            }
+        }
     }
 
     fn queue_workspaces(&self, roots: &[PathBuf]) -> Result<Vec<String>> {
@@ -3143,6 +3151,27 @@ mod tests {
         assert_eq!(repos[0].name, derive_local_name(&repo));
         assert_eq!(repos[0].status, "indexing");
         assert!(repos[0].progress.is_some());
+    }
+
+    #[test]
+    fn analyze_queues_unregistered_local_repo_for_mcp_visibility() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let repo = temp_repo("workspace-analyze-local");
+        let home = temp_repo("workspace-analyze-home");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
+        std::fs::write(repo.join("src/app.py"), "def main(): pass\n").unwrap();
+        std::env::set_var("AKA_HOME", &home);
+
+        let backend = AkaBackend::new();
+        let summary = backend.analyze(repo.to_str().unwrap()).unwrap();
+
+        assert!(summary.starts_with("indexing scheduled: "));
+        let repos = backend.list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, derive_local_name(&repo));
+        assert_eq!(repos[0].status, "indexing");
     }
 
     #[test]

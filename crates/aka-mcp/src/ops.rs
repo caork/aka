@@ -381,6 +381,9 @@ pub struct AugmentOut {
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct AnalyzeOut {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    pub status: String,
     pub summary: String,
 }
 
@@ -1446,9 +1449,29 @@ pub fn augment(b: &dyn Backend, repo: Option<&str>, query: &str) -> anyhow::Resu
 }
 
 pub fn analyze(b: &dyn Backend, repo_path: &str) -> anyhow::Result<AnalyzeOut> {
+    let summary = b.analyze(repo_path)?;
     Ok(AnalyzeOut {
-        summary: b.analyze(repo_path)?,
+        repo: analyze_repo_name(&summary),
+        status: analyze_status(&summary).to_string(),
+        summary,
     })
+}
+
+fn analyze_repo_name(summary: &str) -> Option<String> {
+    summary
+        .strip_prefix("indexing scheduled: ")
+        .or_else(|| summary.strip_prefix("update scheduled: "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(|name| name.trim_matches(|ch: char| matches!(ch, ':' | ',' | ';')).to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn analyze_status(summary: &str) -> &'static str {
+    if summary.starts_with("indexing scheduled: ") || summary.starts_with("update scheduled: ") {
+        "indexing"
+    } else {
+        "completed"
+    }
 }
 
 pub fn detect_changes(

@@ -32,7 +32,7 @@ clients/install.sh --client codex --stdio --bin /absolute/path/to/AKA
 - **stdio fallback 路径**：Codex 启动 stdio server 时继承的 PATH 可能与你的交互 shell 不同；`command` 用桌面 AKA 可执行文件的绝对路径最稳。
 - **超时**：`analyze` 大仓库耗时较长，必要时在该表里加 `tool_timeout_sec = 120`。
 - **环境变量**：默认不需要额外 env。stdio fallback 使用桌面包里的 `AKA` 时也会和 GUI 共用同一份桌面数据。
-- **自动索引**：会话里先调用 `list_repos`。HTTP MCP 会尝试读取 Codex workspace roots 并自动排队索引；如果客户端未暴露 roots 或目标仓库不在列表里，调用 `analyze` 并传仓库绝对路径。看到 `status: "indexing"` 时稍后重试查询即可。
+- **自动索引**：会话里先调用 `list_repos`。HTTP MCP 会尝试读取 Codex workspace roots 并自动排队索引；如果客户端未暴露 roots 或目标仓库不在列表里，调用 `analyze` 并传仓库绝对路径。`analyze` 会注册本地仓库并后台索引，已注册仓库则排队更新；返回的 `repo` 是后续查询要带的仓库名。看到 `status: "indexing"` 时稍后重试 `list_repos` / 查询即可。
 
 ## 验证
 

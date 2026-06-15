@@ -462,7 +462,9 @@ async fn analyze_shape() {
         .await
         .unwrap();
     let v = text_json(&res);
-    assert_eq!(keys(&v), ["summary"]);
+    assert_eq!(keys(&v), ["repo", "status", "summary"]);
+    assert_eq!(v["repo"], "fixture");
+    assert_eq!(v["status"], "indexing");
     assert!(v["summary"].as_str().unwrap().contains("/tmp/fixture"));
 }
 

@@ -479,7 +479,7 @@ impl AkaMcpServer {
     }
 
     #[tool(
-        description = "Trigger (re)indexing of a repository by absolute path. Returns a short summary of the scheduled/completed analysis."
+        description = "Ensure a local repository is indexed by absolute path. If it is new, aka registers it and schedules background indexing; if it is already registered, aka schedules an update. Use this when list_repos does not show the agent's workspace."
     )]
     pub async fn analyze(
         &self,

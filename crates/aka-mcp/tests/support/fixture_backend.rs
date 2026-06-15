@@ -515,7 +515,7 @@ impl Backend for FixtureBackend {
 
     fn analyze(&self, repo_path: &str) -> anyhow::Result<String> {
         Ok(format!(
-            "fixture analyze: queued indexing for {repo_path} (nodes=5 edges=4, no-op)"
+            "indexing scheduled: fixture (local import + analyze) for {repo_path}"
         ))
     }
 
