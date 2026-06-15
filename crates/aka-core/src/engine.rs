@@ -3487,7 +3487,7 @@ fn attach_route_consumers(
     if routes.is_empty() {
         return;
     }
-    let by_file = web_nodes_by_file(nodes);
+    let by_file = route_nodes_by_file(nodes);
     let route_names: Vec<String> = routes.keys().map(|(route, _)| route.clone()).collect();
     for (file_path, file_nodes) in by_file {
         let Some(text) = read_repo_text(repo, &file_path) else {
@@ -3536,10 +3536,15 @@ fn route_fetch_counts<'a>(text: &str, route_names: &'a [String]) -> Vec<(&'a Str
     }
     let mut out = Vec::new();
     for route in route_names {
-        let mut count = 0u32;
-        for window in &fetch_windows {
-            count = count.saturating_add(window.matches(route.as_str()).count() as u32);
+        let mut matches = BTreeSet::new();
+        for (window_start, window) in &fetch_windows {
+            matches.extend(
+                route_occurrences(window, route)
+                    .into_iter()
+                    .map(|idx| window_start + idx),
+            );
         }
+        let count = matches.len() as u32;
         if count > 0 {
             out.push((route, count));
         }
@@ -3547,14 +3552,53 @@ fn route_fetch_counts<'a>(text: &str, route_names: &'a [String]) -> Vec<(&'a Str
     out
 }
 
-fn fetch_literal_windows(text: &str) -> Vec<&str> {
+fn route_match_variants(route: &str) -> Vec<String> {
+    let segments: Vec<&str> = route
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let Some(param_idx) = segments
+        .iter()
+        .position(|segment| is_route_parameter_segment(segment))
+    else {
+        return Vec::new();
+    };
+    let mut variants = Vec::new();
+    let prefix = format!("/{}", segments[..param_idx].join("/"));
+    if prefix != "/" {
+        variants.push(format!("{prefix}/"));
+    }
+    variants
+}
+
+fn is_route_parameter_segment(segment: &str) -> bool {
+    (segment.starts_with('{') && segment.ends_with('}'))
+        || segment.starts_with(':')
+        || (segment.starts_with('<') && segment.ends_with('>'))
+}
+
+fn fetch_literal_windows(text: &str) -> Vec<(usize, &str)> {
     let mut windows = Vec::new();
-    for marker in ["fetch(", "axios.", ".get(", ".post(", "http.", "client."] {
+    for marker in [
+        "fetch(",
+        "axios.",
+        ".get(",
+        ".post(",
+        ".put(",
+        ".patch(",
+        ".delete(",
+        ".request(",
+        "http.",
+        "client.",
+        "requests.",
+        "httpx.",
+        "AsyncClient",
+    ] {
         let mut offset = 0usize;
         while let Some(pos) = text[offset..].find(marker) {
             let start = offset + pos;
             let end = clamp_char_boundary(text, start + 600);
-            windows.push(&text[start..end]);
+            windows.push((start, &text[start..end]));
             offset = start + marker.len();
         }
     }
@@ -3574,7 +3618,7 @@ fn literal_occurrences(text: &str, needle: &str) -> Vec<usize> {
 
 fn extract_accessed_keys_near_route(text: &str, route: &str) -> Vec<String> {
     let mut keys = BTreeSet::new();
-    for idx in literal_occurrences(text, route) {
+    for idx in route_occurrences(text, route) {
         let end = clamp_char_boundary(text, idx + 2000);
         let window = &text[idx..end];
         for key in dotted_property_names(window) {
@@ -3582,8 +3626,19 @@ fn extract_accessed_keys_near_route(text: &str, route: &str) -> Vec<String> {
                 keys.insert(key);
             }
         }
+        keys.extend(bracket_string_property_names(window));
     }
     keys.into_iter().take(16).collect()
+}
+
+fn route_occurrences(text: &str, route: &str) -> Vec<usize> {
+    let mut out = literal_occurrences(text, route);
+    for variant in route_match_variants(route) {
+        out.extend(literal_occurrences(text, &variant));
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 fn dotted_property_names(text: &str) -> Vec<String> {
@@ -3605,6 +3660,33 @@ fn dotted_property_names(text: &str) -> Vec<String> {
     out
 }
 
+fn bracket_string_property_names(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(pos) = text[offset..].find('[') {
+        let open = offset + pos;
+        let start = skip_ws(text, open + 1);
+        let Some((literal, end)) = read_string_literal(text, start) else {
+            offset = open + 1;
+            continue;
+        };
+        let close = skip_ws(text, end);
+        if text.as_bytes().get(close) == Some(&b']') && is_plain_response_key(&literal) {
+            out.push(literal);
+        }
+        offset = open + 1;
+    }
+    out
+}
+
+fn is_plain_response_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .chars()
+            .all(|ch| ch == '_' || ch == '-' || ch.is_ascii_alphanumeric())
+}
+
 fn is_common_property(key: &str) -> bool {
     matches!(
         key,
@@ -3616,6 +3698,14 @@ fn is_common_property(key: &str) -> bool {
             | "ok"
             | "status"
             | "headers"
+            | "get"
+            | "post"
+            | "put"
+            | "patch"
+            | "delete"
+            | "request"
+            | "internal"
+            | "AsyncClient"
             | "map"
             | "filter"
             | "reduce"
@@ -5253,6 +5343,76 @@ mod tests {
 
         let edge_types: Vec<_> = route.edge_recs().into_iter().map(|e| e.edge_type).collect();
         assert!(edge_types.contains(&"HANDLES_ROUTE".to_string()));
+        assert!(edge_types.contains(&"FETCHES".to_string()));
+    }
+
+    #[test]
+    fn links_python_requests_consumers_to_routes() {
+        let repo = temp_repo("python-route-consumers");
+        std::fs::create_dir_all(repo.join("api")).unwrap();
+        std::fs::create_dir_all(repo.join("workers")).unwrap();
+        std::fs::write(
+            repo.join("api/orders.py"),
+            r#"from fastapi import APIRouter
+
+router = APIRouter(prefix="/api/orders")
+
+@router.get("/{id}")
+def get_order(id: str):
+    return {"id": id, "status": "ok"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("workers/sync.py"),
+            r#"import requests
+
+def sync_order(order_id: str):
+    response = requests.get(f"http://orders.internal/api/orders/{order_id}")
+    data = response.json()
+    return data["status"]
+"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_node_props(
+            &conn,
+            1,
+            "Function",
+            "get_order",
+            "api.orders.get_order",
+            "api/orders.py",
+            json!({
+                "decorators": ["@router.get(\"/{id}\")"],
+                "language": "python",
+                "route_method": "GET",
+                "route_path": "/{id}",
+            }),
+        );
+        insert_node_props(
+            &conn,
+            2,
+            "Function",
+            "sync_order",
+            "workers.sync.sync_order",
+            "workers/sync.py",
+            json!({
+                "language": "python",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let route = synth
+            .routes
+            .iter()
+            .find(|route| route.route == "/api/orders/{id}")
+            .expect("parameterized FastAPI route");
+        assert_eq!(route.consumers.len(), 1);
+        assert_eq!(route.consumers[0].node_id, "cbm:2:workers.sync.sync_order");
+        assert!(route.consumers[0].keys.contains(&"status".to_string()));
+
+        let edge_types: Vec<_> = route.edge_recs().into_iter().map(|e| e.edge_type).collect();
         assert!(edge_types.contains(&"FETCHES".to_string()));
     }
 
