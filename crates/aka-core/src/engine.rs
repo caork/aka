@@ -621,13 +621,11 @@ fn export_edges(
         let source_qn = text_col(row, 5)?;
         let target_qn = text_col(row, 6)?;
         let props = props_value(&props_text);
+        let source_label = text_col(row, 7)?;
+        let target_label = text_col(row, 8)?;
         semantic.record(
-            source_id,
-            &source_qn,
-            &text_col(row, 7)?,
-            target_id,
-            &target_qn,
-            &text_col(row, 8)?,
+            SemanticEndpoint::new(source_id, &source_qn, &source_label),
+            SemanticEndpoint::new(target_id, &target_qn, &target_label),
             &edge_type,
         );
         let edge = EdgeRec {
@@ -739,42 +737,38 @@ impl SemanticEdgeSynthesizer {
 
     fn record(
         &mut self,
-        source_id: i64,
-        source_qn: &str,
-        source_label: &str,
-        target_id: i64,
-        target_qn: &str,
-        target_label: &str,
+        source: SemanticEndpoint<'_>,
+        target: SemanticEndpoint<'_>,
         edge_type: &str,
     ) {
         match edge_type {
             "DEFINES_METHOD" => {
                 self.add(
-                    aka_node_id(source_id, source_qn),
-                    aka_node_id(target_id, target_qn),
+                    source.node_id(),
+                    target.node_id(),
                     "HAS_METHOD",
                     "aka semantic edge from DEFINES_METHOD",
                 );
             }
-            "USAGE" if matches!(target_label, "Field" | "Variable" | "Property") => {
+            "USAGE" if matches!(target.label, "Field" | "Variable" | "Property") => {
                 self.add(
-                    aka_node_id(source_id, source_qn),
-                    aka_node_id(target_id, target_qn),
+                    source.node_id(),
+                    target.node_id(),
                     "ACCESSES",
                     "aka semantic edge from symbol usage",
                 );
             }
             "INHERITS" | "IMPLEMENTS"
-                if matches!(source_label, "Class") && matches!(target_label, "Interface") =>
+                if matches!(source.label, "Class") && matches!(target.label, "Interface") =>
             {
                 self.add(
-                    aka_node_id(source_id, source_qn),
-                    aka_node_id(target_id, target_qn),
+                    source.node_id(),
+                    target.node_id(),
                     "IMPLEMENTS",
                     "aka semantic edge from inheritance reference",
                 );
                 self.implements
-                    .push((source_qn.to_string(), target_qn.to_string()));
+                    .push((source.qn.to_string(), target.qn.to_string()));
             }
             _ => {}
         }
@@ -812,9 +806,8 @@ impl SemanticEdgeSynthesizer {
         let iface_methods: Vec<_> = self
             .methods_by_owner_name
             .iter()
-            .filter_map(|((owner, name), methods)| {
-                (owner == iface_qn).then(|| (name.clone(), methods.clone()))
-            })
+            .filter(|((owner, _), _)| owner == iface_qn)
+            .map(|((_, name), methods)| (name.clone(), methods.clone()))
             .collect();
         for (method_name, interface_methods) in iface_methods {
             let Some(class_methods) = self
@@ -870,6 +863,23 @@ struct SemanticNode {
     label: String,
     name: String,
     qn: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SemanticEndpoint<'a> {
+    id: i64,
+    qn: &'a str,
+    label: &'a str,
+}
+
+impl<'a> SemanticEndpoint<'a> {
+    fn new(id: i64, qn: &'a str, label: &'a str) -> Self {
+        Self { id, qn, label }
+    }
+
+    fn node_id(self) -> String {
+        aka_node_id(self.id, self.qn)
+    }
 }
 
 fn semantic_owner_qn<'a>(member_qn: &'a str, name: &str) -> Option<&'a str> {
