@@ -672,6 +672,7 @@ fn is_symbol_label(label: &str) -> bool {
             | "Repository"
             | "Cache"
             | "Event"
+            | "Policy"
             | "Resource"
     )
 }
@@ -694,6 +695,7 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Repository"
             | "Cache"
             | "Event"
+            | "Policy"
     )
 }
 
@@ -715,6 +717,7 @@ fn node_search_text(node: &NodeRec) -> String {
             | "Repository"
             | "Cache"
             | "Event"
+            | "Policy"
             | "Community"
             | "Resource"
     ) {
@@ -737,6 +740,8 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "cacheSource");
     push_prop_str(&mut parts, &node.properties, "bus");
     push_prop_str(&mut parts, &node.properties, "eventSource");
+    push_prop_str(&mut parts, &node.properties, "policyType");
+    push_prop_str(&mut parts, &node.properties, "policySource");
     push_prop_str(&mut parts, &node.properties, "route");
     push_prop_str(&mut parts, &node.properties, "tool");
     push_prop_array(&mut parts, &node.properties, "trace");
@@ -931,6 +936,11 @@ mod tests {
         );
         event_props.insert("eventSource".into(), Value::String("source-scan".into()));
 
+        let mut policy_props = Map::new();
+        policy_props.insert("name".into(), Value::String("orders.view_order".into()));
+        policy_props.insert("policyType".into(), Value::String("permission".into()));
+        policy_props.insert("policySource".into(), Value::String("source-scan".into()));
+
         let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
         writer
             .add_nodes(
@@ -959,6 +969,11 @@ mod tests {
                         id: "event:order-created".into(),
                         label: "Event".into(),
                         properties: event_props,
+                    },
+                    NodeRec {
+                        id: "policy:orders-view".into(),
+                        label: "Policy".into(),
+                        properties: policy_props,
                     },
                 ]
                 .into_iter(),
@@ -993,5 +1008,10 @@ mod tests {
         let event_hit = event_hits.first().expect("event search hit");
         assert_eq!(event_hit.node_id, "event:order-created");
         assert_eq!(event_hit.label, "Event");
+
+        let policy_hits = index.search("orders view permission", 5).unwrap();
+        let policy_hit = policy_hits.first().expect("policy search hit");
+        assert_eq!(policy_hit.node_id, "policy:orders-view");
+        assert_eq!(policy_hit.label, "Policy");
     }
 }

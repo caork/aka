@@ -615,7 +615,7 @@ fn symbol_score(member: &ClusterMember) -> u32 {
         "Process" => 22,
         "Class" | "Interface" | "Struct" | "Enum" | "Trait" | "Type" => 18,
         "Function" | "Method" | "Route" | "Tool" | "Job" | "Table" | "Repository" | "Cache"
-        | "Event" => 14,
+        | "Event" | "Policy" => 14,
         _ => 5,
     };
     let source_weight = if member.start_line.is_some() { 4 } else { 0 };

@@ -27,6 +27,7 @@ mod cache_synth;
 mod event_synth;
 mod job_synth;
 mod persistence_synth;
+mod policy_synth;
 mod property_synth;
 mod source_scan;
 mod topic_synth;
@@ -34,6 +35,7 @@ use cache_synth::{synthesize_caches_from_sources, SynthCache};
 use event_synth::{synthesize_events_from_sources, SynthEvent};
 use job_synth::{synthesize_jobs_from_sources, SynthJob};
 use persistence_synth::{synthesize_persistence_from_sources, SynthPersistenceGraph};
+use policy_synth::{synthesize_policies_from_sources, SynthPolicy};
 #[cfg(test)]
 use property_synth::extract_python_class_properties;
 use property_synth::{synthesize_python_properties, SynthProperty};
@@ -794,6 +796,12 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for policy in &synth.policies {
+        let node = policy.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     for node in synth.persistence.node_recs() {
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
@@ -883,6 +891,7 @@ fn export_edges(
         .chain(synth.topics.iter().flat_map(SynthTopic::edge_recs))
         .chain(synth.caches.iter().flat_map(SynthCache::edge_recs))
         .chain(synth.events.iter().flat_map(SynthEvent::edge_recs))
+        .chain(synth.policies.iter().flat_map(SynthPolicy::edge_recs))
         .chain(synth.persistence.edge_recs())
         .chain(synth.edges.iter().cloned())
     {
@@ -1142,6 +1151,7 @@ struct SynthGraph {
     topics: Vec<SynthTopic>,
     caches: Vec<SynthCache>,
     events: Vec<SynthEvent>,
+    policies: Vec<SynthPolicy>,
     persistence: SynthPersistenceGraph,
     properties: Vec<SynthProperty>,
     edges: Vec<EdgeRec>,
@@ -1646,6 +1656,13 @@ fn synthesize_graph_with_progress(
     let events = synthesize_events_from_sources(repo, &nodes);
     emit_phase(
         on_event,
+        "codebase-memory:export-artifacts:synthesize:policies",
+        0,
+        0,
+    );
+    let policies = synthesize_policies_from_sources(repo, &nodes);
+    emit_phase(
+        on_event,
         "codebase-memory:export-artifacts:synthesize:persistence",
         0,
         0,
@@ -1661,6 +1678,7 @@ fn synthesize_graph_with_progress(
         topics,
         caches,
         events,
+        policies,
         persistence,
         properties,
         edges: synthetic_edges,
@@ -7760,6 +7778,144 @@ def handle_order(sender, **kwargs):
             .collect();
         assert!(edge_types.contains(&"PUBLISHES_EVENT".to_string()));
         assert!(edge_types.contains(&"HANDLES_EVENT".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_java_policy_nodes() {
+        let repo = temp_repo("java-policies");
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/security")).unwrap();
+        let file = "src/main/java/com/example/security/OrderController.java";
+        std::fs::write(
+            repo.join(file),
+            r#"package com.example.security;
+
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.access.annotation.Secured;
+
+class OrderController {
+    @PreAuthorize("hasAuthority('orders:read')")
+    public String list() { return "ok"; }
+
+    @Secured({"ROLE_ADMIN"})
+    public void delete() {}
+}"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "list",
+            "com.example.security.OrderController.list",
+            file,
+            (7, 8),
+            json!({
+                "decorators": ["@PreAuthorize(\"hasAuthority('orders:read')\")"],
+                "language": "java",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            2,
+            "delete",
+            "com.example.security.OrderController.delete",
+            file,
+            (10, 11),
+            json!({
+                "decorators": ["@Secured({\"ROLE_ADMIN\"})"],
+                "language": "java",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let preauth = synth
+            .policies
+            .iter()
+            .find(|policy| policy.name == "hasAuthority('orders:read')")
+            .expect("spring preauthorize policy");
+        assert_eq!(preauth.policy_type, "spring-expression");
+        assert_eq!(preauth.subjects.len(), 1);
+        let role = synth
+            .policies
+            .iter()
+            .find(|policy| policy.name == "ROLE_ADMIN")
+            .expect("secured role policy");
+        assert_eq!(role.policy_type, "role");
+        let edge_types: Vec<_> = synth
+            .policies
+            .iter()
+            .flat_map(SynthPolicy::edge_recs)
+            .map(|edge| edge.edge_type)
+            .collect();
+        assert!(edge_types.contains(&"REQUIRES_POLICY".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_python_policy_nodes() {
+        let repo = temp_repo("python-policies");
+        std::fs::write(
+            repo.join("api.py"),
+            r#"from django.contrib.auth.decorators import permission_required
+from fastapi import Security
+
+def require_user():
+    return True
+
+@permission_required("orders.view_order")
+def list_orders(request):
+    return []
+
+def read_order(user=Security(require_user, scopes=["orders:read"])):
+    return {}
+"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "list_orders",
+            "api.list_orders",
+            "api.py",
+            (8, 9),
+            json!({
+                "decorators": ["@permission_required(\"orders.view_order\")"],
+                "language": "python",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            2,
+            "read_order",
+            "api.read_order",
+            "api.py",
+            (11, 12),
+            json!({
+                "language": "python",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let permission = synth
+            .policies
+            .iter()
+            .find(|policy| policy.name == "orders.view_order")
+            .expect("django permission policy");
+        assert_eq!(permission.policy_type, "permission");
+        let dependency = synth
+            .policies
+            .iter()
+            .find(|policy| policy.name == "require_user")
+            .expect("fastapi security dependency");
+        assert_eq!(dependency.policy_type, "dependency");
+        let scope = synth
+            .policies
+            .iter()
+            .find(|policy| policy.name == "orders:read")
+            .expect("fastapi security scope");
+        assert_eq!(scope.policy_type, "scope");
     }
 
     #[test]
