@@ -132,6 +132,76 @@ def sync_order(order_id: str):
 }
 
 #[test]
+fn synthesizes_python_routes_from_decorators_without_route_metadata() {
+    let repo = temp_repo("python-decorator-route-source-facts");
+    std::fs::create_dir_all(repo.join("api")).unwrap();
+    std::fs::write(
+        repo.join("api/orders.py"),
+        r#"from fastapi import APIRouter
+
+router = APIRouter(prefix="/api/orders")
+
+@router.api_route("/{id}", methods=["GET"])
+def get_order(id: str):
+    return {"id": id}
+
+@router.post("/{id}/reserve")
+def reserve_order(id: str):
+    return {"id": id}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Function",
+        "get_order",
+        "api.orders.get_order",
+        "api/orders.py",
+        json!({
+            "decorators": ["@router.api_route(\"/{id}\", methods=[\"GET\"])"],
+            "language": "python",
+        }),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Function",
+        "reserve_order",
+        "api.orders.reserve_order",
+        "api/orders.py",
+        json!({
+            "decorators": ["@router.post(\"/{id}/reserve\")"],
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let get = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}")
+        .expect("FastAPI api_route from decorator source facts");
+    assert_eq!(get.method.as_deref(), Some("GET"));
+    assert_eq!(
+        get.handler_id.as_deref(),
+        Some("cbm:1:api.orders.get_order")
+    );
+    let post = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}/reserve")
+        .expect("FastAPI post route from decorator source facts");
+    assert_eq!(post.method.as_deref(), Some("POST"));
+    assert_eq!(
+        post.handler_id.as_deref(),
+        Some("cbm:2:api.orders.reserve_order")
+    );
+}
+
+#[test]
 fn links_python_httpx_client_consumers_to_routes() {
     let repo = temp_repo("python-httpx-route-consumers");
     std::fs::create_dir_all(repo.join("api")).unwrap();

@@ -2988,18 +2988,30 @@ fn extract_annotated_routes(
 
     let mut routes = Vec::new();
     for node in nodes {
-        let Some(method_path) = node
+        let python_decorator_route = is_python_route_node(node)
+            .then(|| python_decorator_route(&node.decorators))
+            .flatten();
+        let method_path = node
             .route_path
             .clone()
-            .or_else(|| spring_mapping_path(&node.decorators))
-        else {
+            .or_else(|| {
+                python_decorator_route
+                    .as_ref()
+                    .map(|route| route.path.clone())
+            })
+            .or_else(|| spring_mapping_path(&node.decorators));
+        let Some(method_path) = method_path else {
             continue;
         };
+        let route_method = node
+            .route_method
+            .clone()
+            .or_else(|| python_decorator_route.and_then(|route| route.method));
         if !matches!(node.label.as_str(), "Function" | "Method") {
             if !method_path.is_empty() {
                 routes.push(RouteCandidate {
                     route: normalize_route_literal(&method_path),
-                    method: node.route_method.clone(),
+                    method: route_method,
                     handler_id: None,
                     handler_name: None,
                 });
@@ -3033,7 +3045,7 @@ fn extract_annotated_routes(
         for prefix in prefixes {
             routes.push(RouteCandidate {
                 route: join_route_paths(&prefix, &method_path),
-                method: node.route_method.clone(),
+                method: route_method.clone(),
                 handler_id: Some(node.aka_id.clone()),
                 handler_name: Some(node.display_name().to_string()),
             });
@@ -3364,6 +3376,57 @@ fn strip_aka_node_prefix(id_or_qn: &str) -> &str {
 fn is_python_route_node(node: &SynthNode) -> bool {
     node.language.eq_ignore_ascii_case("python")
         || node.file_path.to_ascii_lowercase().ends_with(".py")
+}
+
+#[derive(Debug, Clone)]
+struct PythonDecoratorRoute {
+    path: String,
+    method: Option<String>,
+}
+
+fn python_decorator_route(decorators: &[String]) -> Option<PythonDecoratorRoute> {
+    decorators
+        .iter()
+        .find_map(|decorator| python_decorator_route_one(decorator))
+}
+
+fn python_decorator_route_one(decorator: &str) -> Option<PythonDecoratorRoute> {
+    let text = decorator.trim().trim_start_matches('@');
+    let (_receiver, method_part) = text.split_once('.')?;
+    let method = method_part
+        .split_once('(')
+        .map(|(name, _)| name)
+        .unwrap_or(method_part);
+    let method = match method {
+        "get" => Some("GET".to_string()),
+        "post" => Some("POST".to_string()),
+        "put" => Some("PUT".to_string()),
+        "patch" => Some("PATCH".to_string()),
+        "delete" => Some("DELETE".to_string()),
+        "head" => Some("HEAD".to_string()),
+        "options" => Some("OPTIONS".to_string()),
+        "websocket" | "websocket_route" => Some("WEBSOCKET".to_string()),
+        "api_route" | "route" => None,
+        _ => return None,
+    };
+    let args = decorator_args(text).unwrap_or("");
+    let path = first_route_literal(args).map(|path| normalize_route_literal(&path))?;
+    let method = method.or_else(|| python_methods_arg(args));
+    Some(PythonDecoratorRoute { path, method })
+}
+
+fn decorator_args(text: &str) -> Option<&str> {
+    let open = text.find('(')?;
+    let close = text.rfind(')')?;
+    (close > open).then_some(&text[open + 1..close])
+}
+
+fn python_methods_arg(args: &str) -> Option<String> {
+    let needle = "methods=";
+    let pos = args.find(needle)?;
+    let rest = &args[pos + needle.len()..];
+    let start = rest.find(['"', '\''])?;
+    read_string_literal(rest, start).map(|(literal, _)| literal.to_ascii_uppercase())
 }
 
 fn dedup_route_candidates(candidates: &mut Vec<RouteCandidate>) {
