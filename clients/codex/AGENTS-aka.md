@@ -10,6 +10,7 @@ aka can index the current project without the user opening the desktop import fl
 
 - HTTP MCP asks the Codex client for workspace roots on every tool call and queues any local repo roots for background indexing.
 - stdio fallback (`AKA mcp`) also detects the server process working directory and queues that workspace.
+- For local repositories, follow-up tool `repo` arguments may be the `list_repos` name or a local root/nested path. If a path is not registered yet, aka resolves it to the workspace root, queues background indexing, and reports that the repo is indexing.
 - If the target local repo is not listed, call `analyze` with the repo root, a relative path, or any nested directory inside the repo. aka resolves it to the git/project root, registers it in the shared GUI-visible knowledge base, and schedules background indexing.
 - If the target is a remote GitHub/Git repo, call `import_repo` with `kind: "git"` and the clone URL.
 - If a repo status is `indexing`, retry `list_repos` later before relying on search results. If status is `failed`, inspect `detail` and retry `analyze` or `update_repo`.

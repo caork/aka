@@ -16,6 +16,7 @@ Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_T
 调用任何检索工具前先 `list_repos`。HTTP MCP 会连接 AKA 桌面端本地服务；每次 MCP 工具调用都会尝试通过 roots 读取当前客户端 workspace 并自动排队索引，stdio fallback 会在工具调用时自动发现当前工作区。确认目标仓库已索引且 `status: "ready"` 后再做检索：
 
 - `status: "indexing"` → 稍后重试；`"failed"` → 看 `detail` 字段，必要时用 `analyze` 重建。
+- 本地仓库的后续工具 `repo` 参数既可传 `list_repos` 返回的 `name`，也可直接传本地仓库根目录或仓库内任意子目录；未注册时 aka 会提升到 workspace root、自动排队索引，并提示正在 indexing。
 - 本地目标仓库不在列表里 → 用 `analyze` 确保索引；`repo_path` 可传当前项目根目录、相对路径或仓库内任意子目录，aka 会提升到 git/project root。aka 会把本地仓库注册到同一份 GUI 可见知识库并后台索引，已注册仓库则排队更新。
 - 远程 GitHub/Git 仓库不在本机 → 用 `import_repo`，传 `kind:"git"` 和 clone URL，可选 `name`；aka 会 clone 到受管 checkout 并后台索引。已索引仓库需要刷新时用 `update_repo`。
 - `analyze`/`import_repo`/`update_repo` 返回里的 `repo` 是后续工具要传的仓库名，`status:"indexing"` 时稍后先重试 `list_repos`。
