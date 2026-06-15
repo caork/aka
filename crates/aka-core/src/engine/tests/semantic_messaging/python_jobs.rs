@@ -212,6 +212,9 @@ def rebuild_orders(order_id):
 
 def enqueue_orders(order_id):
     queue.enqueue(rebuild_orders, order_id)
+    queue.enqueue_call(func=rebuild_orders, args=(order_id,))
+    queue.enqueue_in(60, rebuild_orders, order_id)
+    queue.enqueue_at("2026-01-01T00:00:00Z", rebuild_orders, order_id)
 "#,
     )
     .unwrap();
@@ -235,7 +238,7 @@ def enqueue_orders(order_id):
         "enqueue_orders",
         "jobs.enqueue_orders",
         "jobs.py",
-        (12, 13),
+        (12, 16),
         json!({
             "language": "python",
         }),
@@ -257,6 +260,20 @@ def enqueue_orders(order_id):
     assert!(edges.iter().any(|edge| {
         edge.edge_type == "ENQUEUES_JOB" && edge.source_id == "cbm:2:jobs.enqueue_orders"
     }));
+    let enqueue_strategies: BTreeSet<_> = edges
+        .iter()
+        .filter(|edge| edge.edge_type == "ENQUEUES_JOB")
+        .filter_map(|edge| {
+            edge.evidence
+                .as_ref()
+                .and_then(|value| value.get("strategy"))
+                .and_then(|value| value.as_str())
+        })
+        .collect();
+    assert!(enqueue_strategies.contains("python-rq-enqueue"));
+    assert!(enqueue_strategies.contains("python-rq-enqueue-call"));
+    assert!(enqueue_strategies.contains("python-rq-enqueue-in"));
+    assert!(enqueue_strategies.contains("python-rq-enqueue-at"));
 }
 
 #[test]

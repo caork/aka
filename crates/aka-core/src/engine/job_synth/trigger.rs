@@ -127,6 +127,9 @@ fn detect_named_job_dispatches(
         (".delay", "python-celery-delay"),
         (".apply_async", "python-celery-apply-async"),
         (".enqueue", "python-rq-enqueue"),
+        (".enqueue_call", "python-rq-enqueue-call"),
+        (".enqueue_in", "python-rq-enqueue-in"),
+        (".enqueue_at", "python-rq-enqueue-at"),
         (".send", "python-dramatiq-send"),
         (".send_with_options", "python-dramatiq-send-with-options"),
         (".schedule", "python-huey-schedule"),
@@ -211,14 +214,33 @@ fn dispatch_names_for_call(text: &str, call_start: usize, args: &str, callee: &s
         if let Some(receiver) = receiver_ident_before(text, call_start) {
             out.push(receiver);
         }
-    } else if callee == ".enqueue" {
-        for arg in split_top_level_commas(args).into_iter().take(1) {
-            if let Some(name) = first_callable_name(arg) {
-                out.push(name);
-            }
+    } else if matches!(
+        callee,
+        ".enqueue" | ".enqueue_call" | ".enqueue_in" | ".enqueue_at"
+    ) {
+        let args = split_top_level_commas(args);
+        if let Some(name) = rq_callable_arg_name(&args, callee) {
+            out.push(name);
         }
     }
     out
+}
+
+fn rq_callable_arg_name(args: &[&str], callee: &str) -> Option<String> {
+    for arg in args {
+        if let Some((key, value)) = arg.split_once('=') {
+            if key.trim() == "func" {
+                return first_callable_name(value);
+            }
+        }
+    }
+    let positional_index = if matches!(callee, ".enqueue_in" | ".enqueue_at") {
+        1
+    } else {
+        0
+    };
+    args.get(positional_index)
+        .and_then(|arg| first_callable_name(arg))
 }
 
 fn receiver_ident_before(text: &str, dot_start: usize) -> Option<String> {
