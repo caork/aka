@@ -668,6 +668,8 @@ fn is_symbol_label(label: &str) -> bool {
             | "Route"
             | "Tool"
             | "Job"
+            | "Table"
+            | "Repository"
             | "Resource"
     )
 }
@@ -686,6 +688,8 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Route"
             | "Tool"
             | "Job"
+            | "Table"
+            | "Repository"
     )
 }
 
@@ -699,7 +703,7 @@ fn is_container_label(label: &str) -> bool {
 fn node_search_text(node: &NodeRec) -> String {
     if !matches!(
         node.label.as_str(),
-        "Process" | "Route" | "Tool" | "Job" | "Community" | "Resource"
+        "Process" | "Route" | "Tool" | "Job" | "Table" | "Repository" | "Community" | "Resource"
     ) {
         return String::new();
     }
@@ -712,10 +716,15 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "schedule");
     push_prop_str(&mut parts, &node.properties, "handlerName");
     push_prop_str(&mut parts, &node.properties, "strategy");
+    push_prop_str(&mut parts, &node.properties, "tableName");
+    push_prop_str(&mut parts, &node.properties, "tableSource");
+    push_prop_str(&mut parts, &node.properties, "entityName");
+    push_prop_str(&mut parts, &node.properties, "repositorySource");
     push_prop_str(&mut parts, &node.properties, "route");
     push_prop_str(&mut parts, &node.properties, "tool");
     push_prop_array(&mut parts, &node.properties, "trace");
     push_prop_array(&mut parts, &node.properties, "steps");
+    push_prop_array(&mut parts, &node.properties, "columns");
     push_prop_array(&mut parts, &node.properties, "responseKeys");
     push_prop_array(&mut parts, &node.properties, "errorKeys");
     push_prop_array(&mut parts, &node.properties, "middleware");
@@ -859,30 +868,59 @@ mod tests {
     }
 
     #[test]
-    fn indexes_job_application_nodes() {
+    fn indexes_application_semantic_nodes() {
         let dir = tempfile::tempdir().unwrap();
-        let mut props = Map::new();
-        props.insert("name".into(), Value::String("orders.cleanup".into()));
-        props.insert("jobType".into(), Value::String("apscheduler-job".into()));
-        props.insert(
+        let mut job_props = Map::new();
+        job_props.insert("name".into(), Value::String("orders.cleanup".into()));
+        job_props.insert("jobType".into(), Value::String("apscheduler-job".into()));
+        job_props.insert(
             "schedule".into(),
             Value::String("trigger=cron,hour=3".into()),
         );
-        props.insert("handlerName".into(), Value::String("cleanup_orders".into()));
-        props.insert(
+        job_props.insert("handlerName".into(), Value::String("cleanup_orders".into()));
+        job_props.insert(
             "strategy".into(),
             Value::String("python-apscheduler-scheduled-job".into()),
         );
-        props.insert("filePath".into(), Value::String("tasks.py".into()));
+        job_props.insert("filePath".into(), Value::String("tasks.py".into()));
+
+        let mut table_props = Map::new();
+        table_props.insert("name".into(), Value::String("orders".into()));
+        table_props.insert("tableName".into(), Value::String("orders".into()));
+        table_props.insert("entityName".into(), Value::String("Order".into()));
+        table_props.insert(
+            "columns".into(),
+            Value::Array(vec![Value::String("status".into())]),
+        );
+
+        let mut repo_props = Map::new();
+        repo_props.insert("name".into(), Value::String("OrderRepository".into()));
+        repo_props.insert("entityName".into(), Value::String("Order".into()));
+        repo_props.insert(
+            "repositorySource".into(),
+            Value::String("java-spring-data-repository".into()),
+        );
 
         let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
         writer
             .add_nodes(
-                [NodeRec {
-                    id: "job:orders-cleanup".into(),
-                    label: "Job".into(),
-                    properties: props,
-                }]
+                [
+                    NodeRec {
+                        id: "job:orders-cleanup".into(),
+                        label: "Job".into(),
+                        properties: job_props,
+                    },
+                    NodeRec {
+                        id: "table:orders".into(),
+                        label: "Table".into(),
+                        properties: table_props,
+                    },
+                    NodeRec {
+                        id: "repository:orders".into(),
+                        label: "Repository".into(),
+                        properties: repo_props,
+                    },
+                ]
                 .into_iter(),
             )
             .unwrap();
@@ -895,5 +933,15 @@ mod tests {
         assert_eq!(hit.node_id, "job:orders-cleanup");
         assert_eq!(hit.label, "Job");
         assert_eq!(hit.name, "orders.cleanup");
+
+        let table_hits = index.search("orders status table", 5).unwrap();
+        let table_hit = table_hits.first().expect("table search hit");
+        assert_eq!(table_hit.node_id, "table:orders");
+        assert_eq!(table_hit.label, "Table");
+
+        let repo_hits = index.search("order repository spring data", 5).unwrap();
+        let repo_hit = repo_hits.first().expect("repository search hit");
+        assert_eq!(repo_hit.node_id, "repository:orders");
+        assert_eq!(repo_hit.label, "Repository");
     }
 }

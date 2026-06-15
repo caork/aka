@@ -24,9 +24,11 @@ use serde_json::{json, Map, Value};
 use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION};
 
 mod job_synth;
+mod persistence_synth;
 mod property_synth;
 mod topic_synth;
 use job_synth::{synthesize_jobs_from_sources, SynthJob};
+use persistence_synth::{synthesize_persistence_from_sources, SynthPersistenceGraph};
 #[cfg(test)]
 use property_synth::extract_python_class_properties;
 use property_synth::{synthesize_python_properties, SynthProperty};
@@ -771,6 +773,11 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for node in synth.persistence.node_recs() {
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     emit_export_progress(on_event, "nodes", count, total);
     Ok(count)
 }
@@ -853,6 +860,7 @@ fn export_edges(
         .chain(synth.tools.iter().flat_map(SynthTool::edge_recs))
         .chain(synth.jobs.iter().flat_map(SynthJob::edge_recs))
         .chain(synth.topics.iter().flat_map(SynthTopic::edge_recs))
+        .chain(synth.persistence.edge_recs())
         .chain(synth.edges.iter().cloned())
     {
         serde_json::to_writer(&mut out, &edge)?;
@@ -1109,6 +1117,7 @@ struct SynthGraph {
     tools: Vec<SynthTool>,
     jobs: Vec<SynthJob>,
     topics: Vec<SynthTopic>,
+    persistence: SynthPersistenceGraph,
     properties: Vec<SynthProperty>,
     edges: Vec<EdgeRec>,
 }
@@ -1596,6 +1605,13 @@ fn synthesize_graph_with_progress(
         0,
     );
     let topics = synthesize_topics_from_sources(repo, &nodes);
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:synthesize:persistence",
+        0,
+        0,
+    );
+    let persistence = synthesize_persistence_from_sources(repo, &nodes);
 
     Ok(SynthGraph {
         communities,
@@ -1604,6 +1620,7 @@ fn synthesize_graph_with_progress(
         tools,
         jobs,
         topics,
+        persistence,
         properties,
         edges: synthetic_edges,
     })
@@ -5637,6 +5654,22 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_node_props_at(
+        conn: &Connection,
+        id: i64,
+        spec: (&str, &str, &str, &str),
+        lines: (i64, i64),
+        props: Value,
+    ) {
+        let (label, name, qn, file) = spec;
+        conn.execute(
+            "INSERT INTO nodes (id, project, label, name, qualified_name, file_path, start_line, end_line, properties)
+             VALUES (?1, 'demo', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![id, label, name, qn, file, lines.0, lines.1, props.to_string()],
+        )
+        .unwrap();
+    }
+
     fn insert_function_node_props_at(
         conn: &Connection,
         id: i64,
@@ -7489,6 +7522,172 @@ def cleanup_orders():
         assert!(aps.schedule.as_deref().is_some_and(
             |schedule| schedule.contains("trigger=cron") && schedule.contains("hour=3")
         ));
+    }
+
+    #[test]
+    fn synthesizes_java_persistence_tables_and_repositories() {
+        let repo = temp_repo("java-persistence");
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+        std::fs::write(
+            repo.join("src/main/java/com/example/orders/Order.java"),
+            r#"package com.example.orders;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "orders")
+class Order {
+    @Column(name = "status")
+    String status;
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("src/main/java/com/example/orders/OrderRepository.java"),
+            r#"package com.example.orders;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+interface OrderRepository extends JpaRepository<Order, Long> {
+}"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_node_props_at(
+            &conn,
+            1,
+            (
+                "Class",
+                "Order",
+                "com.example.orders.Order",
+                "src/main/java/com/example/orders/Order.java",
+            ),
+            (8, 12),
+            json!({
+                "decorators": ["@Entity", "@Table(name = \"orders\")"],
+                "language": "java",
+            }),
+        );
+        insert_node_props_at(
+            &conn,
+            2,
+            (
+                "Interface",
+                "OrderRepository",
+                "com.example.orders.OrderRepository",
+                "src/main/java/com/example/orders/OrderRepository.java",
+            ),
+            (5, 6),
+            json!({
+                "language": "java",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let nodes = synth.persistence.node_recs();
+        assert!(nodes.iter().any(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+        }));
+        assert!(nodes.iter().any(|node| {
+            node.label == "Repository"
+                && node.properties.get("entityName").and_then(Value::as_str) == Some("Order")
+        }));
+        let edge_types: Vec<_> = synth
+            .persistence
+            .edge_recs()
+            .into_iter()
+            .map(|edge| edge.edge_type)
+            .collect();
+        assert!(edge_types.contains(&"MAPS_TO_TABLE".to_string()));
+        assert!(edge_types.contains(&"MANAGES_ENTITY".to_string()));
+        assert!(edge_types.contains(&"REPOSITORY_FOR".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_python_persistence_tables_repositories_and_relationships() {
+        let repo = temp_repo("python-persistence");
+        std::fs::write(
+            repo.join("models.py"),
+            r#"from sqlalchemy import Column, ForeignKey, Integer, String
+from sqlalchemy.orm import relationship
+
+class Order(Base):
+    __tablename__ = "orders"
+    id = Column(Integer, primary_key=True)
+    customer_id = Column(ForeignKey("customers.id"))
+    customer = relationship("Customer")
+
+class Customer(Base):
+    __tablename__ = "customers"
+    id = Column(Integer, primary_key=True)
+
+class OrderRepository:
+    model = Order
+"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_node_props_at(
+            &conn,
+            1,
+            ("Class", "Order", "models.Order", "models.py"),
+            (4, 8),
+            json!({
+                "language": "python",
+            }),
+        );
+        insert_node_props_at(
+            &conn,
+            2,
+            ("Class", "Customer", "models.Customer", "models.py"),
+            (10, 12),
+            json!({
+                "language": "python",
+            }),
+        );
+        insert_node_props_at(
+            &conn,
+            3,
+            (
+                "Class",
+                "OrderRepository",
+                "models.OrderRepository",
+                "models.py",
+            ),
+            (14, 15),
+            json!({
+                "language": "python",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let nodes = synth.persistence.node_recs();
+        assert!(nodes.iter().any(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+        }));
+        assert!(nodes.iter().any(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("customers")
+        }));
+        assert!(nodes.iter().any(|node| {
+            node.label == "Repository"
+                && node.properties.get("entityName").and_then(Value::as_str) == Some("Order")
+        }));
+        let edge_types: Vec<_> = synth
+            .persistence
+            .edge_recs()
+            .into_iter()
+            .map(|edge| edge.edge_type)
+            .collect();
+        assert!(edge_types.contains(&"MAPS_TO_TABLE".to_string()));
+        assert!(edge_types.contains(&"MANAGES_ENTITY".to_string()));
+        assert!(edge_types.contains(&"HAS_RELATION".to_string()));
     }
 
     #[test]
