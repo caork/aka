@@ -626,6 +626,17 @@ def get_order(id: str, user = Depends(get_current_user)):
                 .and_then(Value::as_str)
                 == Some("fastapi-depends")
     }));
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "DEPENDS_ON"
+            && edge.source_id == "cbm:4:api.orders.get_order"
+            && edge.target_id == "cbm:1:api.orders.get_current_user"
+            && edge
+                .evidence
+                .as_ref()
+                .and_then(|v| v.get("kind"))
+                .and_then(Value::as_str)
+                == Some("python-fastapi-dependency")
+    }));
 
     let process = synth
         .processes
@@ -2055,6 +2066,120 @@ class ReindexCli implements Runnable {
 }
 
 #[test]
+fn synthesizes_spring_dependency_injection_edges() {
+    let repo = temp_repo("spring-dependencies");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/OrderController.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.stereotype.Component;
+
+@Component
+class OrderController {
+    private final OrderService service;
+
+    OrderController(OrderService service) {
+        this.service = service;
+    }
+
+    @Autowired
+    private OrderRepository repository;
+}
+
+class OrderConfig {
+    @Bean
+    OrderHandler orderHandler(OrderService service, OrderRepository repository) {
+        return new OrderHandler(service, repository);
+    }
+}
+
+class OrderService {}
+interface OrderRepository {}
+class OrderHandler {}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderController",
+            "com.example.orders.OrderController",
+            file,
+        ),
+        (7, 17),
+        json!({
+            "language": "java",
+            "decorators": ["@Component"],
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Class",
+            "OrderService",
+            "com.example.orders.OrderService",
+            file,
+        ),
+        (27, 27),
+        json!({"language": "java"}),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Interface",
+            "OrderRepository",
+            "com.example.orders.OrderRepository",
+            file,
+        ),
+        (28, 28),
+        json!({"language": "java"}),
+    );
+    insert_node_props_at(
+        &conn,
+        4,
+        (
+            "Method",
+            "orderHandler",
+            "com.example.orders.OrderConfig.orderHandler",
+            file,
+        ),
+        (21, 24),
+        json!({
+            "language": "java",
+            "decorators": ["@Bean"],
+            "parent_class": "com.example.orders.OrderConfig",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "DEPENDS_ON"
+            && edge.source_id == "cbm:1:com.example.orders.OrderController"
+            && edge.target_id == "cbm:2:com.example.orders.OrderService"
+    }));
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "DEPENDS_ON"
+            && edge.source_id == "cbm:1:com.example.orders.OrderController"
+            && edge.target_id == "cbm:3:com.example.orders.OrderRepository"
+    }));
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "DEPENDS_ON"
+            && edge.source_id == "cbm:4:com.example.orders.OrderConfig.orderHandler"
+            && edge.target_id == "cbm:2:com.example.orders.OrderService"
+    }));
+}
+
+#[test]
 fn ignores_test_source_command_entrypoints() {
     let repo = temp_repo("test-source-commands");
     std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
@@ -2197,6 +2322,82 @@ class TestMaintenance implements ApplicationRunner {
     assert!(handlers.contains(&"StartupMaintenance"));
     assert!(handlers.contains(&"UntrackedMaintenance"));
     assert!(!handlers.contains(&"TestMaintenance"));
+}
+
+#[test]
+fn command_synthesis_excludes_build_configured_test_roots() {
+    let repo = temp_repo("configured-test-source-commands");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    std::fs::create_dir_all(repo.join("src/fixture/java/com/example/ops")).unwrap();
+    std::fs::write(
+        repo.join("pom.xml"),
+        r#"<project>
+  <build>
+    <testSourceDirectory>src/fixture/java</testSourceDirectory>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    let main_file = "src/main/java/com/example/ops/StartupMaintenance.java";
+    let fixture_file = "src/fixture/java/com/example/ops/FixtureMaintenance.java";
+    std::fs::write(
+        repo.join(main_file),
+        r#"package com.example.ops;
+import org.springframework.boot.ApplicationRunner;
+class StartupMaintenance implements ApplicationRunner {
+    public void run(org.springframework.boot.ApplicationArguments args) {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(fixture_file),
+        r#"package com.example.ops;
+import org.springframework.boot.CommandLineRunner;
+class FixtureMaintenance implements CommandLineRunner {
+    public void run(String... args) {}
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", main_file, fixture_file]);
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "StartupMaintenance",
+            "com.example.ops.StartupMaintenance",
+            main_file,
+        ),
+        (3, 5),
+        json!({"language": "java"}),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Class",
+            "FixtureMaintenance",
+            "com.example.ops.FixtureMaintenance",
+            fixture_file,
+        ),
+        (3, 5),
+        json!({"language": "java"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let handlers: BTreeSet<_> = synth
+        .commands
+        .iter()
+        .map(|command| command.handler_name.as_str())
+        .collect();
+    assert!(handlers.contains("StartupMaintenance"));
+    assert!(!handlers.contains("FixtureMaintenance"));
 }
 
 #[test]
@@ -3083,7 +3284,11 @@ class OrderServiceTest {
 "#,
     )
     .unwrap();
-    std::fs::write(repo.join(migration_file), "CREATE TABLE orders (id bigint);\n").unwrap();
+    std::fs::write(
+        repo.join(migration_file),
+        "CREATE TABLE orders (id bigint);\n",
+    )
+    .unwrap();
     std::fs::write(
         repo.join(test_migration_file),
         "CREATE TABLE fixture_orders (id bigint);\n",
@@ -3144,10 +3349,16 @@ class OrderServiceTest {
     let transaction_handlers: BTreeSet<_> = synth
         .transactions
         .iter()
-        .flat_map(|tx| tx.endpoints.iter().map(|endpoint| endpoint.node_id.as_str()))
+        .flat_map(|tx| {
+            tx.endpoints
+                .iter()
+                .map(|endpoint| endpoint.node_id.as_str())
+        })
         .collect();
     assert!(transaction_handlers.contains("cbm:1:com.example.orders.OrderService.loadOrder"));
-    assert!(!transaction_handlers.contains("cbm:2:com.example.orders.OrderServiceTest.fixtureOrder"));
+    assert!(
+        !transaction_handlers.contains("cbm:2:com.example.orders.OrderServiceTest.fixtureOrder")
+    );
 
     let table_names: BTreeSet<_> = synth
         .persistence

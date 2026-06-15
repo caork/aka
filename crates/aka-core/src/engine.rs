@@ -23,9 +23,11 @@ use serde_json::{json, Map, Value};
 
 use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION};
 
+mod build_config_scan;
 mod cache_synth;
 mod command_synth;
 mod config_synth;
+mod dependency_synth;
 mod event_synth;
 mod graphql_synth;
 mod job_synth;
@@ -43,6 +45,7 @@ mod transaction_synth;
 use cache_synth::{synthesize_caches_from_sources, SynthCache};
 use command_synth::{synthesize_commands_from_sources, SynthCommand};
 use config_synth::{synthesize_configs_from_sources, SynthConfig};
+use dependency_synth::synthesize_dependency_edges_from_sources;
 use event_synth::{synthesize_events_from_sources, SynthEvent};
 use graphql_synth::{synthesize_graphql_from_sources, SynthGraphqlOperation};
 use job_synth::{synthesize_jobs_from_sources, SynthJob};
@@ -59,8 +62,9 @@ use route_shape::{
 };
 use source_scan::{
     find_call_args, find_matching_paren, is_ident_continue, is_noisy_source_path,
-    is_project_test_source_path, node_at_offset, nodes_by_file, pick_handler_node, read_repo_text,
-    project_code_nodes_by_file, skip_ws, split_top_level_commas, stable_hash, ProjectSourceSet,
+    is_project_test_source_path, node_at_offset, nodes_by_file, pick_handler_node,
+    project_code_nodes_by_file, read_repo_text, skip_ws, split_top_level_commas, stable_hash,
+    ProjectSourceSet,
 };
 use tool_synth::{synthesize_tools_from_sources, SynthTool};
 use topic_synth::{synthesize_topics_from_sources, SynthTopic};
@@ -1572,7 +1576,8 @@ fn synthesize_graph_with_progress(
         0,
     );
     let existing_call_pairs = load_existing_call_pairs(conn, project)?;
-    let synthetic_edges = synthesize_dependency_call_edges(repo, &nodes, &existing_call_pairs);
+    let synthetic_edges =
+        synthesize_dependency_edges_from_sources(repo, &nodes, &existing_call_pairs);
     let calls = load_call_graph(conn, project, &nodes, &synthetic_edges)?;
 
     emit_phase(
@@ -2009,223 +2014,6 @@ fn load_existing_call_pairs(
         ));
     }
     Ok(pairs)
-}
-
-fn synthesize_dependency_call_edges(
-    repo: &Path,
-    nodes: &BTreeMap<String, SynthNode>,
-    existing_call_pairs: &HashSet<(String, String)>,
-) -> Vec<EdgeRec> {
-    let python_functions: Vec<&SynthNode> = nodes
-        .values()
-        .filter(|node| {
-            matches!(node.label.as_str(), "Function" | "Method")
-                && (node.language.eq_ignore_ascii_case("python") || node.file_path.ends_with(".py"))
-                && !node.file_path.is_empty()
-        })
-        .collect();
-    if python_functions.is_empty() {
-        return Vec::new();
-    }
-
-    let mut by_name: HashMap<String, Vec<&SynthNode>> = HashMap::new();
-    let mut by_file_name: HashMap<(String, String), Vec<&SynthNode>> = HashMap::new();
-    for node in &python_functions {
-        by_name.entry(node.name.clone()).or_default().push(*node);
-        by_file_name
-            .entry((node.file_path.clone(), node.name.clone()))
-            .or_default()
-            .push(*node);
-    }
-
-    let mut by_file: BTreeMap<String, Vec<&SynthNode>> = BTreeMap::new();
-    for node in python_functions {
-        by_file
-            .entry(node.file_path.clone())
-            .or_default()
-            .push(node);
-    }
-
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for (file_path, mut file_nodes) in by_file {
-        file_nodes.sort_by_key(|node| node.start_line_key());
-        let Some(text) = read_repo_text(repo, &file_path) else {
-            continue;
-        };
-        for node in file_nodes {
-            if !is_python_route_node(node) {
-                continue;
-            }
-            let Some(source) = node_source_slice(&text, node) else {
-                continue;
-            };
-            for dep in extract_fastapi_depends_targets(source) {
-                let Some(target) =
-                    resolve_python_dependency_target(&file_path, &dep, &by_file_name, &by_name)
-                else {
-                    continue;
-                };
-                if target.aka_id == node.aka_id {
-                    continue;
-                }
-                if existing_call_pairs.contains(&(node.aka_id.clone(), target.aka_id.clone())) {
-                    continue;
-                }
-                let key = (node.aka_id.clone(), target.aka_id.clone(), dep.clone());
-                if !seen.insert(key) {
-                    continue;
-                }
-                out.push(EdgeRec {
-                    id: format!(
-                        "python-depends-call:{:016x}",
-                        stable_hash(&format!("{}|{}|{dep}", node.aka_id, target.aka_id))
-                    ),
-                    source_id: node.aka_id.clone(),
-                    target_id: target.aka_id.clone(),
-                    edge_type: "CALLS".into(),
-                    confidence: 0.74,
-                    reason: "aka FastAPI Depends dependency call".into(),
-                    step: None,
-                    evidence: Some(json!({
-                        "source": "aka-cbm-synth",
-                        "kind": "fastapi-depends",
-                        "dependency": dep,
-                    })),
-                });
-            }
-        }
-    }
-    out
-}
-
-fn node_source_slice<'a>(text: &'a str, node: &SynthNode) -> Option<&'a str> {
-    let start_line = node.start_line_key().max(1) as usize;
-    let end_line = node.end_line_key().max(start_line as i64) as usize;
-    let mut start_idx = 0usize;
-    let mut line = 1usize;
-    for (idx, ch) in text.char_indices() {
-        if line == start_line {
-            start_idx = idx;
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-        }
-    }
-    if line < start_line {
-        return None;
-    }
-    let mut end_idx = text.len();
-    for (idx, ch) in text[start_idx..].char_indices() {
-        if line > end_line {
-            end_idx = start_idx + idx;
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-        }
-    }
-    Some(&text[start_idx..end_idx])
-}
-
-fn extract_fastapi_depends_targets(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut offset = 0usize;
-    while let Some(pos) = text[offset..].find("Depends") {
-        let start = offset + pos;
-        if !is_word_boundary(text, start, "Depends".len()) {
-            offset = start + "Depends".len();
-            continue;
-        }
-        let open = skip_ws(text, start + "Depends".len());
-        if text.as_bytes().get(open) != Some(&b'(') {
-            offset = start + "Depends".len();
-            continue;
-        }
-        let Some(close) = find_matching_paren(text, open) else {
-            offset = open + 1;
-            continue;
-        };
-        let args = &text[open + 1..close];
-        if let Some(dep) = first_depends_callable(args) {
-            out.push(dep);
-        }
-        offset = close + 1;
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn first_depends_callable(args: &str) -> Option<String> {
-    for arg in split_top_level_commas(args) {
-        let arg = arg.trim();
-        if arg.is_empty() {
-            continue;
-        }
-        let value = if let Some((key, value)) = arg.split_once('=') {
-            if !matches!(key.trim(), "dependency" | "call" | "callable") {
-                continue;
-            }
-            value.trim()
-        } else {
-            arg
-        };
-        let value = value.trim_start_matches("lambda ").trim();
-        if value.starts_with('"') || value.starts_with('\'') || value.starts_with("None") {
-            continue;
-        }
-        let name = value
-            .split_once('(')
-            .map(|(name, _)| name)
-            .unwrap_or(value)
-            .trim();
-        if is_python_callable_expr(name) {
-            return Some(name.to_string());
-        }
-    }
-    None
-}
-
-fn is_python_callable_expr(expr: &str) -> bool {
-    let mut parts = expr.split('.');
-    let Some(first) = parts.next() else {
-        return false;
-    };
-    is_python_identifier(first) && parts.all(is_python_identifier)
-}
-
-fn is_python_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn resolve_python_dependency_target<'a>(
-    file_path: &str,
-    dep: &str,
-    by_file_name: &HashMap<(String, String), Vec<&'a SynthNode>>,
-    by_name: &HashMap<String, Vec<&'a SynthNode>>,
-) -> Option<&'a SynthNode> {
-    let dep_name = dep.rsplit('.').next().unwrap_or(dep);
-    by_file_name
-        .get(&(file_path.to_string(), dep_name.to_string()))
-        .and_then(|nodes| nodes.first().copied())
-        .or_else(|| {
-            by_name
-                .get(dep_name)
-                .and_then(|nodes| (nodes.len() == 1).then(|| nodes[0]))
-        })
-}
-
-fn is_word_boundary(text: &str, start: usize, len: usize) -> bool {
-    let before = text[..start].chars().next_back();
-    let after = text[start + len..].chars().next();
-    before.is_none_or(|ch| !is_ident_continue(ch)) && after.is_none_or(|ch| !is_ident_continue(ch))
 }
 
 fn load_native_community_memberships(

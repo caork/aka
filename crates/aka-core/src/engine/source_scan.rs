@@ -2,20 +2,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command as GitCommand;
 
+use super::build_config_scan::discover_project_test_roots;
 use super::SynthNode;
 
 #[derive(Debug, Clone)]
 pub(super) struct ProjectSourceSet {
     files: BTreeSet<String>,
     has_git_listing: bool,
+    test_roots: BTreeSet<String>,
 }
 
 impl ProjectSourceSet {
     pub(super) fn discover(repo: &Path) -> Self {
         let files = git_project_files(repo);
+        let test_roots = discover_project_test_roots(repo, &files);
         Self {
             has_git_listing: !files.is_empty(),
             files,
+            test_roots,
         }
     }
 
@@ -24,6 +28,7 @@ impl ProjectSourceSet {
         if normalized.is_empty()
             || is_noisy_source_path(&normalized)
             || is_project_test_source_path(&normalized)
+            || self.is_project_test_root_file(&normalized)
         {
             return false;
         }
@@ -39,6 +44,12 @@ impl ProjectSourceSet {
 
     pub(super) fn has_git_listing(&self) -> bool {
         self.has_git_listing
+    }
+
+    fn is_project_test_root_file(&self, file_path: &str) -> bool {
+        self.test_roots
+            .iter()
+            .any(|root| path_is_within_dir(file_path, root))
     }
 }
 
@@ -63,6 +74,13 @@ fn git_project_files(repo: &Path) -> BTreeSet<String> {
         .map(normalize_repo_path)
         .filter(|path| !path.is_empty())
         .collect()
+}
+
+fn path_is_within_dir(path: &str, dir: &str) -> bool {
+    path == dir
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 pub(super) struct CallArgs<'a> {
@@ -244,7 +262,9 @@ pub(super) fn project_code_nodes_by_file<'a>(
         .filter(|(file_path, file_nodes)| {
             project_sources.contains_project_file(repo, file_path)
                 && (is_project_code_source_path(file_path)
-                    || file_nodes.iter().any(|node| is_business_language(&node.language)))
+                    || file_nodes
+                        .iter()
+                        .any(|node| is_business_language(&node.language)))
         })
         .collect()
 }
