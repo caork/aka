@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn test_conn() -> Connection {
@@ -1480,10 +1479,10 @@ const tool = {
         property_name_offsets(text, "name"),
         vec![text.find("name").unwrap()]
     );
-    let tools = extract_tool_defs(text);
+    let tools = tool_synth::extract_tool_defs_for_tests(text);
     assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name, "sync_orders");
-    assert_eq!(tools[0].description, "Đồng bộ đơn hàng");
+    assert_eq!(tools[0].0, "sync_orders");
+    assert_eq!(tools[0].1, "Đồng bộ đơn hàng");
 }
 
 #[test]
