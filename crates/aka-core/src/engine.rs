@@ -2465,16 +2465,16 @@ fn synthesize_routes_from_sources(
                 handler_name: handler.map(|n| n.display_name().to_string()),
             });
         }
-        route_candidates.extend(
-            extract_route_handler_literals(&text)
-                .into_iter()
-                .map(|route| RouteCandidate {
+        if is_js_ts_route_source(file_path, file_nodes) {
+            route_candidates.extend(extract_route_handler_literals(&text).into_iter().map(
+                |route| RouteCandidate {
                     route,
                     method: None,
                     handler_id: handler.map(|n| n.aka_id.clone()),
                     handler_name: handler.map(|n| n.display_name().to_string()),
-                }),
-        );
+                },
+            ));
+        }
         route_candidates.extend(extract_annotated_routes(
             file_nodes,
             python_prefixes.get(file_path),
@@ -2686,6 +2686,13 @@ fn route_nodes_by_file(nodes: &BTreeMap<String, SynthNode>) -> BTreeMap<String, 
                 })
         })
         .collect()
+}
+
+fn is_js_ts_route_source(file_path: &str, file_nodes: &[&SynthNode]) -> bool {
+    is_js_ts_source_path(file_path)
+        || file_nodes
+            .iter()
+            .any(|node| is_js_ts_language(&node.language))
 }
 
 fn is_js_ts_source_path(file_path: &str) -> bool {
@@ -5298,6 +5305,10 @@ def get_order(id: str):
             .iter()
             .find(|route| route.route == "/api/orders/{id}")
             .expect("fastapi route with include_router prefix");
+        assert!(
+            synth.routes.iter().all(|route| route.route != "/{id}"),
+            "Python decorator literals should not create unprefixed duplicate routes"
+        );
         assert_eq!(route.method.as_deref(), Some("GET"));
         assert_eq!(
             route.handler_id.as_deref(),
@@ -5347,6 +5358,10 @@ def get_order(id: str):
             .iter()
             .find(|route| route.route == "/api/orders/{id}")
             .expect("fastapi route with local APIRouter prefix");
+        assert!(
+            synth.routes.iter().all(|route| route.route != "/{id}"),
+            "Python decorator literals should not create unprefixed duplicate routes"
+        );
         assert_eq!(route.method.as_deref(), Some("GET"));
         assert_eq!(
             route.handler_id.as_deref(),
