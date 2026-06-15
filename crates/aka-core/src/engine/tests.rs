@@ -1939,6 +1939,87 @@ fn source_language_warning_ignores_build_configured_test_sources() {
 }
 
 #[test]
+fn synthesizes_java_source_symbols_when_cbm_misses_java_nodes() {
+    let repo = temp_repo("java-source-symbol-fallback");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/OrderController.java";
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/orders")
+class OrderController {
+    @GetMapping("/{id}")
+    OrderDto getOrder(String id) {
+        return loadOrder(id);
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join("application.yml"), "server: {}\n").unwrap();
+    run_git(&repo, &["add", "pom.xml", file, "application.yml"]);
+
+    let conn = test_conn();
+    insert_file_hash(&conn, "application.yml");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth.source_symbols.iter().any(|symbol| {
+        symbol.node().label == "Class" && symbol.node().qn == "com.example.orders.OrderController"
+    }));
+    assert!(synth.source_symbols.iter().any(|symbol| {
+        symbol.node().label == "Method"
+            && symbol.node().name == "getOrder"
+            && symbol.node().parent_class.as_deref() == Some("com.example.orders.OrderController")
+    }));
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}")
+        .expect("Spring route should be synthesized from Java fallback symbols");
+    assert_eq!(route.method.as_deref(), Some("GET"));
+    assert_eq!(route.handler_name.as_deref(), Some("getOrder"));
+}
+
+#[test]
+fn exports_java_source_symbol_nodes_for_search_indexing() {
+    let repo = temp_repo("java-source-symbol-export");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/OrderService.java";
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+class OrderService {
+    void hydrateOrders() {}
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", file]);
+
+    let conn = test_conn();
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let out = repo.join("nodes.ndjson");
+    let exported = export_nodes(&conn, "demo", &out, &synth, 0, &mut |_| {}).unwrap();
+    let text = std::fs::read_to_string(out).unwrap();
+
+    assert!(exported >= 2);
+    assert!(text.contains("\"source\":\"aka-source-scan\""));
+    assert!(text.contains("com.example.orders.OrderService"));
+    assert!(text.contains("hydrateOrders"));
+}
+
+#[test]
 fn reads_cbm_file_hashes_rel_path_column() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(

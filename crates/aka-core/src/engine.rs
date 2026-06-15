@@ -50,6 +50,7 @@ mod route_shape_python;
 mod route_shape_python_calls;
 mod route_spring_functional_synth;
 mod source_scan;
+mod source_symbol_synth;
 mod tool_synth;
 mod topic_synth;
 mod transaction_synth;
@@ -84,6 +85,7 @@ use source_scan::{
     nodes_by_file, pick_handler_node, project_code_nodes_by_file, read_repo_text, skip_ws,
     split_top_level_commas, stable_hash, ProjectSourceSet,
 };
+use source_symbol_synth::{synthesize_source_symbols_from_sources, SynthSourceSymbol};
 use tool_synth::{synthesize_tools_from_sources, SynthTool};
 use topic_synth::{synthesize_topics_from_sources, SynthTopic};
 use transaction_synth::{synthesize_transactions_from_sources, SynthTransaction};
@@ -885,6 +887,12 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for symbol in &synth.source_symbols {
+        let node = symbol.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     for node in synth.persistence.node_recs() {
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
@@ -1263,6 +1271,7 @@ struct SynthGraph {
     persistence: SynthPersistenceGraph,
     transactions: Vec<SynthTransaction>,
     properties: Vec<SynthProperty>,
+    source_symbols: Vec<SynthSourceSymbol>,
     edges: Vec<EdgeRec>,
 }
 
@@ -1591,7 +1600,11 @@ fn synthesize_graph_with_progress(
         0,
         0,
     );
-    let nodes = load_synth_nodes(conn, project)?;
+    let mut nodes = load_synth_nodes(conn, project)?;
+    let source_symbols = synthesize_source_symbols_from_sources(repo, &nodes);
+    for symbol in &source_symbols {
+        nodes.insert(symbol.node().aka_id.clone(), symbol.node().clone());
+    }
     let existing_node_ids = load_existing_node_ids(conn, project)?;
     let properties = synthesize_python_properties(conn, project, repo, &existing_node_ids)?;
     if nodes.is_empty() {
@@ -1627,6 +1640,7 @@ fn synthesize_graph_with_progress(
             resources,
             graphql,
             transactions,
+            source_symbols,
             ..SynthGraph::default()
         });
     }
@@ -1800,6 +1814,7 @@ fn synthesize_graph_with_progress(
         persistence,
         transactions,
         properties,
+        source_symbols,
         edges: synthetic_edges,
     })
 }

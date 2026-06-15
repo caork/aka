@@ -237,9 +237,7 @@ class MaintenanceConfiguration {
     let class_command = commands
         .get("StartupMaintenance")
         .expect("class source-scanned runner");
-    assert!(class_command
-        .handler_id
-        .starts_with("command-handler:source:"));
+    assert!(class_command.handler_id.starts_with("source:java:"));
     assert_eq!(
         class_command.strategy,
         "java-spring-runner-source-declaration"
@@ -247,28 +245,18 @@ class MaintenanceConfiguration {
     let bean_command = commands
         .get("repairOrders")
         .expect("bean source-scanned runner");
-    assert!(bean_command
-        .handler_id
-        .starts_with("command-handler:source:"));
+    assert!(bean_command.handler_id.starts_with("source:java:"));
     assert_eq!(
         bean_command.strategy,
         "java-spring-runner-bean-source-declaration"
     );
 
-    let handler_nodes: Vec<_> = synth
-        .commands
-        .iter()
-        .filter_map(SynthCommand::handler_node_rec)
-        .collect();
-    assert_eq!(handler_nodes.len(), 2);
-    assert!(handler_nodes.iter().any(|node| {
-        node.label == "Class"
-            && node.properties["qualifiedName"] == "com.example.ops.StartupMaintenance"
+    assert!(synth.source_symbols.iter().any(|symbol| {
+        symbol.node().label == "Class" && symbol.node().qn == "com.example.ops.StartupMaintenance"
     }));
-    assert!(handler_nodes.iter().any(|node| {
-        node.label == "Method"
-            && node.properties["qualifiedName"]
-                == "com.example.ops.MaintenanceConfiguration.repairOrders"
+    assert!(synth.source_symbols.iter().any(|symbol| {
+        symbol.node().label == "Method"
+            && symbol.node().qn == "com.example.ops.MaintenanceConfiguration.repairOrders"
     }));
 }
 
