@@ -249,6 +249,7 @@ fn synthesizes_spring_batch_job_and_step_beans() {
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.JobLauncher;
 import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.context.annotation.Bean;
 
@@ -267,6 +268,12 @@ class OrderBatchConfig {
             .build();
     }
 }
+
+class OrderImportController {
+    void launchImport(JobLauncher jobLauncher, Job importOrdersJob) throws Exception {
+        jobLauncher.run(importOrdersJob, null);
+    }
+}
 "#,
     )
     .unwrap();
@@ -281,7 +288,7 @@ class OrderBatchConfig {
             "com.example.jobs.OrderBatchConfig.importOrdersJob",
             file,
         ),
-        (11, 15),
+        (12, 16),
         json!({
             "language": "java",
         }),
@@ -295,7 +302,21 @@ class OrderBatchConfig {
             "com.example.jobs.OrderBatchConfig.loadOrdersStep",
             file,
         ),
-        (18, 22),
+        (19, 23),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
+            "launchImport",
+            "com.example.jobs.OrderImportController.launchImport",
+            file,
+        ),
+        (27, 29),
         json!({
             "language": "java",
         }),
@@ -314,6 +335,10 @@ class OrderBatchConfig {
         edge.edge_type == "USES_STEP"
             && edge.source_id == job.id
             && edge.target_id == "cbm:2:com.example.jobs.OrderBatchConfig.loadOrdersStep"
+    }));
+    assert!(job.edge_recs().iter().any(|edge| {
+        edge.edge_type == "ENQUEUES_JOB"
+            && edge.source_id == "cbm:3:com.example.jobs.OrderImportController.launchImport"
     }));
 
     let step = synth

@@ -26,6 +26,24 @@ pub(super) fn attach_job_triggers(
         .filter(|(_, job)| job.job_type == "spring-async")
         .map(|(idx, job)| (idx, job.handler_id.clone(), job.handler_name.clone()))
         .collect();
+    let spring_batch_jobs: BTreeMap<String, usize> = jobs
+        .iter()
+        .enumerate()
+        .filter(|(_, job)| job.job_type == "spring-batch-job")
+        .flat_map(|(idx, job)| {
+            [
+                (
+                    job.handler_name
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(&job.handler_name)
+                        .to_string(),
+                    idx,
+                ),
+                (job.name.clone(), idx),
+            ]
+        })
+        .collect();
     let mut named_jobs: BTreeMap<String, usize> = BTreeMap::new();
     for (idx, job) in jobs.iter().enumerate() {
         named_jobs.insert(job.name.clone(), idx);
@@ -55,6 +73,12 @@ pub(super) fn attach_job_triggers(
                 &file_nodes,
                 &named_jobs,
             ))
+            .chain(detect_spring_batch_job_launcher_calls(
+                &text,
+                &file_path,
+                &file_nodes,
+                &spring_batch_jobs,
+            ))
         {
             if !seen.insert((
                 trigger.job_index,
@@ -82,6 +106,36 @@ struct JobTriggerDetection {
     node_id: String,
     file_path: String,
     strategy: String,
+}
+
+fn detect_spring_batch_job_launcher_calls(
+    text: &str,
+    file_path: &str,
+    nodes: &[&SynthNode],
+    batch_jobs: &BTreeMap<String, usize>,
+) -> Vec<JobTriggerDetection> {
+    let mut out = Vec::new();
+    if batch_jobs.is_empty() {
+        return out;
+    }
+    for call in find_call_args(text, ".run") {
+        let Some(source) = node_at_offset(text, nodes, call.start) else {
+            continue;
+        };
+        let args = split_top_level_commas(call.args);
+        let Some(job_name) = args.first().and_then(|arg| first_callable_name(arg)) else {
+            continue;
+        };
+        if let Some(job_index) = batch_jobs.get(&job_name) {
+            out.push(JobTriggerDetection {
+                job_index: *job_index,
+                node_id: source.aka_id.clone(),
+                file_path: file_path.to_string(),
+                strategy: "java-spring-batch-job-launcher-run".into(),
+            });
+        }
+    }
+    out
 }
 
 fn detect_async_handler_calls(
