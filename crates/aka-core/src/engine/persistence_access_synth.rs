@@ -95,6 +95,25 @@ pub(super) fn normalize_table_access_key(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
+pub(super) fn table_access_edges_for_sql(
+    node_id: &str,
+    sql: &str,
+    table_lookup: &BTreeMap<String, TableAccessRef>,
+    strategy: &str,
+) -> Vec<EdgeRec> {
+    sql_table_accesses(sql, table_lookup)
+        .into_iter()
+        .map(|(kind, table, _)| {
+            table_access_edge(TableAccessDetection {
+                table,
+                node_id: node_id.to_string(),
+                kind,
+                strategy: strategy.to_string(),
+            })
+        })
+        .collect()
+}
+
 fn detect_sql_literal_table_accesses(
     text: &str,
     nodes: &[&SynthNode],
@@ -130,9 +149,9 @@ fn detect_annotation_table_accesses(
             let Some(name) = decorator_name(decorator) else {
                 continue;
             };
-            if !matches!(name, "Query" | "NativeQuery" | "NamedQuery") {
+            let Some(strategy_prefix) = java_annotation_sql_strategy_prefix(name) else {
                 continue;
-            }
+            };
             let Some(query) = first_raw_string_literal(decorator) else {
                 continue;
             };
@@ -141,12 +160,25 @@ fn detect_annotation_table_accesses(
                     table,
                     node_id: node.aka_id.clone(),
                     kind,
-                    strategy: format!("java-annotation-{}", name.to_ascii_lowercase()),
+                    strategy: strategy_prefix.into(),
                 });
             }
         }
     }
     out
+}
+
+fn java_annotation_sql_strategy_prefix(name: &str) -> Option<&'static str> {
+    match name {
+        "Query" => Some("java-annotation-query"),
+        "NativeQuery" => Some("java-annotation-nativequery"),
+        "NamedQuery" => Some("java-annotation-namedquery"),
+        "Select" => Some("java-mybatis-select"),
+        "Insert" => Some("java-mybatis-insert"),
+        "Update" => Some("java-mybatis-update"),
+        "Delete" => Some("java-mybatis-delete"),
+        _ => None,
+    }
 }
 
 fn detect_orm_table_accesses(

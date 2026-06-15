@@ -497,3 +497,289 @@ class OrderServiceTest {
             && edge.source_id == "cbm:4:com.example.orders.OrderServiceTest.fixture"
     }));
 }
+
+#[test]
+fn synthesizes_java_mybatis_annotation_table_access_edges() {
+    let repo = temp_repo("java-mybatis-annotation-table-access");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let entity_file = "src/main/java/com/example/orders/Order.java";
+    let mapper_file = "src/main/java/com/example/orders/OrderMapper.java";
+    std::fs::write(
+        repo.join(entity_file),
+        r#"package com.example.orders;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "orders")
+class Order {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(mapper_file),
+        r#"package com.example.orders;
+
+import org.apache.ibatis.annotations.Delete;
+import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
+
+@Mapper
+interface OrderMapper {
+    @Select("select * from orders where id = #{id}")
+    Order findById(long id);
+
+    @Update("update orders set status = #{status} where id = #{id}")
+    int updateStatus(long id, String status);
+
+    @Delete("delete from orders where status = #{status}")
+    int deleteByStatus(String status);
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "Order", "com.example.orders.Order", entity_file),
+        (6, 8),
+        json!({
+            "decorators": ["@Entity", "@Table(name = \"orders\")"],
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "findById",
+        "com.example.orders.OrderMapper.findById",
+        mapper_file,
+        (10, 11),
+        json!({
+            "decorators": ["@Select(\"select * from orders where id = #{id}\")"],
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "updateStatus",
+        "com.example.orders.OrderMapper.updateStatus",
+        mapper_file,
+        (13, 14),
+        json!({
+            "decorators": ["@Update(\"update orders set status = #{status} where id = #{id}\")"],
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "deleteByStatus",
+        "com.example.orders.OrderMapper.deleteByStatus",
+        mapper_file,
+        (16, 17),
+        json!({
+            "decorators": ["@Delete(\"delete from orders where status = #{status}\")"],
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let table_id = synth
+        .persistence
+        .node_recs()
+        .into_iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+        })
+        .expect("orders table")
+        .id;
+    let edges = synth.persistence.edge_recs();
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "READS_TABLE"
+            && edge.source_id == "cbm:2:com.example.orders.OrderMapper.findById"
+            && edge.target_id == table_id
+            && edge
+                .evidence
+                .as_ref()
+                .and_then(|v| v.get("strategy"))
+                .and_then(Value::as_str)
+                == Some("java-mybatis-select")
+    }));
+    for writer in [
+        "cbm:3:com.example.orders.OrderMapper.updateStatus",
+        "cbm:4:com.example.orders.OrderMapper.deleteByStatus",
+    ] {
+        assert!(
+            edges.iter().any(|edge| {
+                edge.edge_type == "WRITES_TABLE"
+                    && edge.source_id == writer
+                    && edge.target_id == table_id
+                    && edge
+                        .evidence
+                        .as_ref()
+                        .and_then(|v| v.get("strategy"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|strategy| strategy.starts_with("java-mybatis-"))
+            }),
+            "expected {writer} to write orders through MyBatis annotations"
+        );
+    }
+}
+
+#[test]
+fn synthesizes_java_mybatis_xml_table_access_edges() {
+    let repo = temp_repo("java-mybatis-xml-table-access");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    std::fs::create_dir_all(repo.join("src/main/resources/mapper")).unwrap();
+    std::fs::create_dir_all(repo.join("src/test/resources/mapper")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    let entity_file = "src/main/java/com/example/orders/Order.java";
+    let mapper_file = "src/main/java/com/example/orders/OrderMapper.java";
+    let xml_file = "src/main/resources/mapper/OrderMapper.xml";
+    let test_xml_file = "src/test/resources/mapper/OrderMapper.xml";
+    std::fs::write(
+        repo.join(entity_file),
+        r#"package com.example.orders;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "orders")
+class Order {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(mapper_file),
+        r#"package com.example.orders;
+
+interface OrderMapper {
+    Order findById(long id);
+    int markShipped(long id);
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(xml_file),
+        r#"<mapper namespace="com.example.orders.OrderMapper">
+  <select id="findById" resultType="com.example.orders.Order">
+    select * from orders where id = #{id}
+  </select>
+  <update id="markShipped">
+    update orders set status = 'SHIPPED' where id = #{id}
+  </update>
+</mapper>
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(test_xml_file),
+        r#"<mapper namespace="com.example.orders.OrderMapper">
+  <delete id="findById">delete from orders</delete>
+</mapper>
+"#,
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        &[
+            "add",
+            "pom.xml",
+            entity_file,
+            mapper_file,
+            xml_file,
+            test_xml_file,
+        ],
+    );
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "Order", "com.example.orders.Order", entity_file),
+        (6, 8),
+        json!({
+            "decorators": ["@Entity", "@Table(name = \"orders\")"],
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "findById",
+        "com.example.orders.OrderMapper.findById",
+        mapper_file,
+        (4, 4),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.orders.OrderMapper",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "markShipped",
+        "com.example.orders.OrderMapper.markShipped",
+        mapper_file,
+        (5, 5),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.orders.OrderMapper",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let table_id = synth
+        .persistence
+        .node_recs()
+        .into_iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+        })
+        .expect("orders table")
+        .id;
+    let edges = synth.persistence.edge_recs();
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "READS_TABLE"
+            && edge.source_id == "cbm:2:com.example.orders.OrderMapper.findById"
+            && edge.target_id == table_id
+            && edge
+                .evidence
+                .as_ref()
+                .and_then(|v| v.get("strategy"))
+                .and_then(Value::as_str)
+                == Some("java-mybatis-xml-select")
+    }));
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "WRITES_TABLE"
+            && edge.source_id == "cbm:3:com.example.orders.OrderMapper.markShipped"
+            && edge.target_id == table_id
+            && edge
+                .evidence
+                .as_ref()
+                .and_then(|v| v.get("strategy"))
+                .and_then(Value::as_str)
+                == Some("java-mybatis-xml-update")
+    }));
+    assert!(!edges.iter().any(|edge| {
+        edge.edge_type == "WRITES_TABLE"
+            && edge.source_id == "cbm:2:com.example.orders.OrderMapper.findById"
+            && edge
+                .evidence
+                .as_ref()
+                .and_then(|v| v.get("strategy"))
+                .and_then(Value::as_str)
+                == Some("java-mybatis-xml-delete")
+    }));
+}
