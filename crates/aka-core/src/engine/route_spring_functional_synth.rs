@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use super::{
-    find_call_args, read_repo_text, read_string_literal, ProjectSourceSet, RouteCandidate,
-    SynthNode,
+    find_call_args, find_matching_paren, read_repo_text, read_string_literal, ProjectSourceSet,
+    RouteCandidate, SynthNode,
 };
 
 pub(super) fn spring_functional_routes_from_repo(
@@ -39,6 +39,7 @@ fn spring_functional_routes(
     }
 
     let mut out = Vec::new();
+    let nest_prefixes = spring_nest_prefixes(text);
     for predicate in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
         for call in find_call_args(text, predicate) {
             let Some(route) = first_string_literal(call.args) else {
@@ -49,8 +50,11 @@ fn spring_functional_routes(
             };
             let handler = method_in_package(methods, &handler_name, package_name)
                 .or_else(|| methods.get(&handler_name).copied());
+            let route = nest_prefix_for(&nest_prefixes, call.start)
+                .map(|prefix| join_route_paths(prefix, &route))
+                .unwrap_or_else(|| normalize_spring_functional_route(&route));
             out.push(RouteCandidate {
-                route: normalize_spring_functional_route(&route),
+                route,
                 method: Some(predicate.to_string()),
                 handler_id: handler.map(|node| node.aka_id.clone()),
                 handler_name: handler.map(|node| node.display_name().to_string()),
@@ -58,6 +62,53 @@ fn spring_functional_routes(
         }
     }
     out
+}
+
+#[derive(Debug)]
+struct NestPrefix {
+    start: usize,
+    end: usize,
+    prefix: String,
+}
+
+fn spring_nest_prefixes(text: &str) -> Vec<NestPrefix> {
+    let mut out = Vec::new();
+    for call in find_call_args(text, "nest") {
+        let Some(prefix) = nest_path_prefix(call.args) else {
+            continue;
+        };
+        let Some(open) = text[call.start..].find('(').map(|idx| call.start + idx) else {
+            continue;
+        };
+        let Some(end) = find_matching_paren(text, open) else {
+            continue;
+        };
+        out.push(NestPrefix {
+            start: call.start,
+            end,
+            prefix: normalize_spring_functional_route(&prefix),
+        });
+    }
+    out
+}
+
+fn nest_path_prefix(args: &str) -> Option<String> {
+    for callee in ["path", "RequestPredicates.path"] {
+        for call in find_call_args(args, callee) {
+            if let Some(prefix) = first_string_literal(call.args) {
+                return Some(prefix);
+            }
+        }
+    }
+    None
+}
+
+fn nest_prefix_for(prefixes: &[NestPrefix], offset: usize) -> Option<&str> {
+    prefixes
+        .iter()
+        .filter(|prefix| offset >= prefix.start && offset <= prefix.end)
+        .max_by_key(|prefix| prefix.start)
+        .map(|prefix| prefix.prefix.as_str())
 }
 
 fn method_in_package<'a>(
@@ -201,6 +252,22 @@ fn normalize_spring_functional_route(route: &str) -> String {
         route.to_string()
     } else {
         format!("/{route}")
+    }
+}
+
+fn join_route_paths(prefix: &str, route: &str) -> String {
+    let prefix = normalize_spring_functional_route(prefix);
+    let route = normalize_spring_functional_route(route);
+    if prefix == "/" {
+        route
+    } else if route == "/" {
+        prefix
+    } else {
+        format!(
+            "{}/{}",
+            prefix.trim_end_matches('/'),
+            route.trim_start_matches('/')
+        )
     }
 }
 

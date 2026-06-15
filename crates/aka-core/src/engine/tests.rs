@@ -986,7 +986,9 @@ fn synthesizes_spring_functional_router_routes() {
         r#"package com.example.orders;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.GET;
+import static org.springframework.web.reactive.function.server.RequestPredicates.path;
 import static org.springframework.web.reactive.function.server.RequestPredicates.POST;
+import static org.springframework.web.reactive.function.server.RouterFunctions.nest;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 
 import org.springframework.context.annotation.Bean;
@@ -996,8 +998,9 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 class OrderRoutes {
     @Bean
     RouterFunction<ServerResponse> routes(OrderHandler handler) {
-        return route(GET("/api/orders/{id}"), handler::getOrder)
-            .andRoute(POST("/api/orders"), handler::createOrder);
+        return nest(path("/api"),
+            route(GET("/orders/{id}"), handler::getOrder)
+                .andRoute(POST("/orders"), handler::createOrder));
     }
 }
 "#,
