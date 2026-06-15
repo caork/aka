@@ -5,7 +5,8 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_call_args, find_matching_paren, node_at_offset, project_code_nodes_by_file,
-    read_repo_text, skip_ws, stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
+    read_repo_text, skip_ws, split_top_level_commas, stable_hash, EdgeRec, NodeRec,
+    ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -162,6 +163,7 @@ fn extract_resource_detections(
         "python-httpx-client",
         text.contains("httpx") || text.contains("AsyncClient") || text.contains("Client("),
     ));
+    out.extend(extract_python_httpx_client_relative_calls(text, nodes));
     out.extend(extract_contextual_http_client_calls(
         text,
         nodes,
@@ -177,6 +179,50 @@ fn extract_resource_detections(
             .then_with(|| a.strategy.cmp(&b.strategy))
     });
     out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id && a.strategy == b.strategy);
+    out
+}
+
+fn extract_python_httpx_client_relative_calls(
+    text: &str,
+    nodes: &[&SynthNode],
+) -> Vec<ResourceDetection> {
+    if !(text.contains("httpx") || text.contains("AsyncClient") || text.contains("Client(")) {
+        return Vec::new();
+    }
+    let base_urls = httpx_base_urls(text);
+    if base_urls.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for method in [
+        ".get", ".post", ".put", ".patch", ".delete", ".request", ".stream",
+    ] {
+        for call in find_call_args(text, method) {
+            let Some(node) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            for url in relative_urls_from_args(call.args, &base_urls) {
+                out.push(ResourceDetection {
+                    url,
+                    node_id: node.aka_id.clone(),
+                    strategy: "python-httpx-client".into(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn httpx_base_urls(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for callee in ["httpx.Client", "httpx.AsyncClient", "Client", "AsyncClient"] {
+        for call in find_call_args(text, callee) {
+            out.extend(keyword_url_literals(call.args, "base_url"));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.truncate(4);
     out
 }
 
@@ -204,7 +250,7 @@ fn extract_spring_restclient_uri_calls(text: &str, nodes: &[&SynthNode]) -> Vec<
         };
         let args = &text[open + 1..close];
         let mut urls = url_literals(args);
-        urls.extend(restclient_relative_urls(args, &base_urls));
+        urls.extend(relative_urls_from_args(args, &base_urls));
         urls.sort();
         urls.dedup();
         for url in urls {
@@ -232,7 +278,7 @@ fn restclient_base_urls(text: &str) -> Vec<String> {
     out
 }
 
-fn restclient_relative_urls(args: &str, base_urls: &[String]) -> Vec<String> {
+fn relative_urls_from_args(args: &str, base_urls: &[String]) -> Vec<String> {
     let Some(path) = first_relative_path_literal(args) else {
         return Vec::new();
     };
@@ -240,6 +286,19 @@ fn restclient_relative_urls(args: &str, base_urls: &[String]) -> Vec<String> {
         .iter()
         .map(|base| join_url_paths(base, &path))
         .collect()
+}
+
+fn keyword_url_literals(args: &str, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let needle = format!("{key}=");
+    for part in split_top_level_commas(args) {
+        let trimmed = part.trim();
+        if !trimmed.starts_with(&needle) {
+            continue;
+        }
+        out.extend(url_literals(&trimmed[needle.len()..]));
+    }
+    out
 }
 
 fn first_relative_path_literal(args: &str) -> Option<String> {
