@@ -14,10 +14,12 @@ pub(super) struct ProjectSourceSet {
 
 impl ProjectSourceSet {
     pub(super) fn discover(repo: &Path) -> Self {
-        let files = git_project_files(repo);
+        let git_files = git_project_files(repo);
+        let has_git_listing = git_files.is_some();
+        let files = git_files.unwrap_or_else(|| discover_repo_files(repo));
         let test_roots = discover_project_test_roots(repo, &files);
         Self {
-            has_git_listing: !files.is_empty(),
+            has_git_listing,
             files,
             test_roots,
         }
@@ -62,7 +64,7 @@ impl ProjectSourceSet {
     }
 }
 
-fn git_project_files(repo: &Path) -> BTreeSet<String> {
+fn git_project_files(repo: &Path) -> Option<BTreeSet<String>> {
     let Ok(output) = GitCommand::new("git")
         .arg("-C")
         .arg(repo)
@@ -73,16 +75,52 @@ fn git_project_files(repo: &Path) -> BTreeSet<String> {
         .arg("--exclude-standard")
         .output()
     else {
-        return BTreeSet::new();
+        return None;
     };
     if !output.status.success() {
-        return BTreeSet::new();
+        return None;
     }
-    String::from_utf8_lossy(&output.stdout)
-        .split('\0')
-        .map(normalize_repo_path)
-        .filter(|path| !path.is_empty())
-        .collect()
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .map(normalize_repo_path)
+            .filter(|path| !path.is_empty() && !is_noisy_source_path(path))
+            .collect(),
+    )
+}
+
+fn discover_repo_files(repo: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    collect_repo_files(repo, repo, &mut out);
+    out
+}
+
+fn collect_repo_files(repo: &Path, dir: &Path, out: &mut BTreeSet<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(repo)
+            .ok()
+            .and_then(Path::to_str)
+            .map(normalize_repo_path);
+        let Some(rel) = rel else {
+            continue;
+        };
+        if rel.is_empty() || is_noisy_source_path(&rel) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_repo_files(repo, &path, out);
+        } else if file_type.is_file() {
+            out.insert(rel);
+        }
+    }
 }
 
 fn path_is_within_dir(path: &str, dir: &str) -> bool {

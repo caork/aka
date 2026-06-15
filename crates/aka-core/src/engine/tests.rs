@@ -2727,6 +2727,139 @@ class TestMaintenance implements ApplicationRunner {
 }
 
 #[test]
+fn command_synthesis_excludes_gitignored_source_files() {
+    let repo = temp_repo("gitignored-command-sources");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    std::fs::write(repo.join(".gitignore"), "scratch/\n").unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    let tracked_file = "src/main/java/com/example/ops/StartupMaintenance.java";
+    let ignored_file = "scratch/IgnoredMaintenance.java";
+    std::fs::create_dir_all(repo.join("scratch")).unwrap();
+    std::fs::write(
+        repo.join(tracked_file),
+        r#"package com.example.ops;
+import org.springframework.boot.ApplicationRunner;
+class StartupMaintenance implements ApplicationRunner {
+    public void run(org.springframework.boot.ApplicationArguments args) {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(ignored_file),
+        r#"package com.example.ops;
+import org.springframework.boot.CommandLineRunner;
+class IgnoredMaintenance implements CommandLineRunner {
+    public void run(String... args) {}
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", ".gitignore", "pom.xml", tracked_file]);
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "StartupMaintenance",
+            "com.example.ops.StartupMaintenance",
+            tracked_file,
+        ),
+        (3, 5),
+        json!({"language": "java"}),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Class",
+            "IgnoredMaintenance",
+            "com.example.ops.IgnoredMaintenance",
+            ignored_file,
+        ),
+        (3, 5),
+        json!({"language": "java"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let handlers: BTreeSet<_> = synth
+        .commands
+        .iter()
+        .map(|command| command.handler_name.as_str())
+        .collect();
+    assert!(handlers.contains("StartupMaintenance"));
+    assert!(!handlers.contains("IgnoredMaintenance"));
+}
+
+#[test]
+fn command_synthesis_falls_back_to_repo_files_without_git() {
+    let repo = temp_repo("filesystem-project-command-sources");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    let main_file = "src/main/java/com/example/ops/StartupMaintenance.java";
+    let test_file = "src/test/java/com/example/ops/TestMaintenance.java";
+    std::fs::write(
+        repo.join(main_file),
+        r#"package com.example.ops;
+import org.springframework.boot.ApplicationRunner;
+class StartupMaintenance implements ApplicationRunner {
+    public void run(org.springframework.boot.ApplicationArguments args) {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(test_file),
+        r#"package com.example.ops;
+import org.springframework.boot.CommandLineRunner;
+class TestMaintenance implements CommandLineRunner {
+    public void run(String... args) {}
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "StartupMaintenance",
+            "com.example.ops.StartupMaintenance",
+            main_file,
+        ),
+        (3, 5),
+        json!({"language": "java"}),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Class",
+            "TestMaintenance",
+            "com.example.ops.TestMaintenance",
+            test_file,
+        ),
+        (3, 5),
+        json!({"language": "java"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let handlers: BTreeSet<_> = synth
+        .commands
+        .iter()
+        .map(|command| command.handler_name.as_str())
+        .collect();
+    assert!(handlers.contains("StartupMaintenance"));
+    assert!(!handlers.contains("TestMaintenance"));
+}
+
+#[test]
 fn command_synthesis_excludes_build_configured_test_roots() {
     let repo = temp_repo("configured-test-source-commands");
     run_git(&repo, &["init"]);
