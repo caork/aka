@@ -58,6 +58,7 @@ const DEFINITION_LABELS: &[&str] = &[
     "Table",
     "Repository",
     "Cache",
+    "Event",
     "Resource",
 ];
 

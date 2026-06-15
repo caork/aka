@@ -671,6 +671,7 @@ fn is_symbol_label(label: &str) -> bool {
             | "Table"
             | "Repository"
             | "Cache"
+            | "Event"
             | "Resource"
     )
 }
@@ -692,6 +693,7 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Table"
             | "Repository"
             | "Cache"
+            | "Event"
     )
 }
 
@@ -712,6 +714,7 @@ fn node_search_text(node: &NodeRec) -> String {
             | "Table"
             | "Repository"
             | "Cache"
+            | "Event"
             | "Community"
             | "Resource"
     ) {
@@ -732,6 +735,8 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "repositorySource");
     push_prop_str(&mut parts, &node.properties, "backend");
     push_prop_str(&mut parts, &node.properties, "cacheSource");
+    push_prop_str(&mut parts, &node.properties, "bus");
+    push_prop_str(&mut parts, &node.properties, "eventSource");
     push_prop_str(&mut parts, &node.properties, "route");
     push_prop_str(&mut parts, &node.properties, "tool");
     push_prop_array(&mut parts, &node.properties, "trace");
@@ -918,6 +923,14 @@ mod tests {
         cache_props.insert("backend".into(), Value::String("redis".into()));
         cache_props.insert("cacheSource".into(), Value::String("source-scan".into()));
 
+        let mut event_props = Map::new();
+        event_props.insert("name".into(), Value::String("OrderCreatedEvent".into()));
+        event_props.insert(
+            "bus".into(),
+            Value::String("spring-application-event".into()),
+        );
+        event_props.insert("eventSource".into(), Value::String("source-scan".into()));
+
         let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
         writer
             .add_nodes(
@@ -941,6 +954,11 @@ mod tests {
                         id: "cache:orders-last".into(),
                         label: "Cache".into(),
                         properties: cache_props,
+                    },
+                    NodeRec {
+                        id: "event:order-created".into(),
+                        label: "Event".into(),
+                        properties: event_props,
                     },
                 ]
                 .into_iter(),
@@ -970,5 +988,10 @@ mod tests {
         let cache_hit = cache_hits.first().expect("cache search hit");
         assert_eq!(cache_hit.node_id, "cache:orders-last");
         assert_eq!(cache_hit.label, "Cache");
+
+        let event_hits = index.search("order created spring event", 5).unwrap();
+        let event_hit = event_hits.first().expect("event search hit");
+        assert_eq!(event_hit.node_id, "event:order-created");
+        assert_eq!(event_hit.label, "Event");
     }
 }

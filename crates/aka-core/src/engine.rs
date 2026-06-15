@@ -24,11 +24,13 @@ use serde_json::{json, Map, Value};
 use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION};
 
 mod cache_synth;
+mod event_synth;
 mod job_synth;
 mod persistence_synth;
 mod property_synth;
 mod topic_synth;
 use cache_synth::{synthesize_caches_from_sources, SynthCache};
+use event_synth::{synthesize_events_from_sources, SynthEvent};
 use job_synth::{synthesize_jobs_from_sources, SynthJob};
 use persistence_synth::{synthesize_persistence_from_sources, SynthPersistenceGraph};
 #[cfg(test)]
@@ -781,6 +783,12 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for event in &synth.events {
+        let node = event.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     for node in synth.persistence.node_recs() {
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
@@ -869,6 +877,7 @@ fn export_edges(
         .chain(synth.jobs.iter().flat_map(SynthJob::edge_recs))
         .chain(synth.topics.iter().flat_map(SynthTopic::edge_recs))
         .chain(synth.caches.iter().flat_map(SynthCache::edge_recs))
+        .chain(synth.events.iter().flat_map(SynthEvent::edge_recs))
         .chain(synth.persistence.edge_recs())
         .chain(synth.edges.iter().cloned())
     {
@@ -1127,6 +1136,7 @@ struct SynthGraph {
     jobs: Vec<SynthJob>,
     topics: Vec<SynthTopic>,
     caches: Vec<SynthCache>,
+    events: Vec<SynthEvent>,
     persistence: SynthPersistenceGraph,
     properties: Vec<SynthProperty>,
     edges: Vec<EdgeRec>,
@@ -1624,6 +1634,13 @@ fn synthesize_graph_with_progress(
     let caches = synthesize_caches_from_sources(repo, &nodes);
     emit_phase(
         on_event,
+        "codebase-memory:export-artifacts:synthesize:events",
+        0,
+        0,
+    );
+    let events = synthesize_events_from_sources(repo, &nodes);
+    emit_phase(
+        on_event,
         "codebase-memory:export-artifacts:synthesize:persistence",
         0,
         0,
@@ -1638,6 +1655,7 @@ fn synthesize_graph_with_progress(
         jobs,
         topics,
         caches,
+        events,
         persistence,
         properties,
         edges: synthetic_edges,
@@ -7851,6 +7869,138 @@ def evict_order():
         assert!(edge_types.contains(&"READS_CACHE".to_string()));
         assert!(edge_types.contains(&"WRITES_CACHE".to_string()));
         assert!(edge_types.contains(&"EVICTS_CACHE".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_java_event_nodes() {
+        let repo = temp_repo("java-events");
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/events")).unwrap();
+        let file = "src/main/java/com/example/events/OrderEvents.java";
+        std::fs::write(
+            repo.join(file),
+            r#"package com.example.events;
+
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.event.EventListener;
+
+class OrderCreatedEvent {}
+
+class OrderEvents {
+    private ApplicationEventPublisher publisher;
+
+    public void publish(String id) {
+        publisher.publishEvent(new OrderCreatedEvent());
+    }
+
+    @EventListener(OrderCreatedEvent.class)
+    public void onCreated(OrderCreatedEvent event) {}
+}"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "publish",
+            "com.example.events.OrderEvents.publish",
+            file,
+            (11, 13),
+            json!({
+                "language": "java",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            2,
+            "onCreated",
+            "com.example.events.OrderEvents.onCreated",
+            file,
+            (16, 16),
+            json!({
+                "decorators": ["@EventListener(OrderCreatedEvent.class)"],
+                "language": "java",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let event = synth
+            .events
+            .iter()
+            .find(|event| event.name == "OrderCreatedEvent")
+            .expect("spring event");
+        assert_eq!(event.bus, "spring-application-event");
+        assert_eq!(event.publishers.len(), 1);
+        assert_eq!(event.handlers.len(), 1);
+        let edge_types: Vec<_> = event
+            .edge_recs()
+            .into_iter()
+            .map(|edge| edge.edge_type)
+            .collect();
+        assert!(edge_types.contains(&"PUBLISHES_EVENT".to_string()));
+        assert!(edge_types.contains(&"HANDLES_EVENT".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_python_signal_event_nodes() {
+        let repo = temp_repo("python-events");
+        std::fs::write(
+            repo.join("signals.py"),
+            r#"from django.dispatch import Signal, receiver
+
+order_created = Signal()
+
+def publish_order(order_id):
+    order_created.send(sender=None, order_id=order_id)
+
+@receiver(order_created)
+def handle_order(sender, **kwargs):
+    return kwargs
+"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "publish_order",
+            "signals.publish_order",
+            "signals.py",
+            (5, 6),
+            json!({
+                "language": "python",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            2,
+            "handle_order",
+            "signals.handle_order",
+            "signals.py",
+            (9, 10),
+            json!({
+                "decorators": ["@receiver(order_created)"],
+                "language": "python",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let event = synth
+            .events
+            .iter()
+            .find(|event| event.name == "order_created")
+            .expect("python signal");
+        assert_eq!(event.bus, "python-signal");
+        assert_eq!(event.publishers.len(), 1);
+        assert_eq!(event.handlers.len(), 1);
+        let edge_types: Vec<_> = event
+            .edge_recs()
+            .into_iter()
+            .map(|edge| edge.edge_type)
+            .collect();
+        assert!(edge_types.contains(&"PUBLISHES_EVENT".to_string()));
+        assert!(edge_types.contains(&"HANDLES_EVENT".to_string()));
     }
 
     #[test]
