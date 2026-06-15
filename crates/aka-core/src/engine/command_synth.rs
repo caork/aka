@@ -105,13 +105,7 @@ pub(super) fn synthesize_commands_from_sources(
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    for file_path in project_sources
-        .project_files(repo)
-        .filter(|path| is_jvm_source_path(path) || by_file.contains_key(*path))
-    {
-        if !is_jvm_source_path(file_path) {
-            continue;
-        }
+    for file_path in project_jvm_source_files(repo, &project_sources) {
         let Some(text) = read_repo_text(repo, file_path) else {
             continue;
         };
@@ -158,13 +152,7 @@ pub(super) fn command_entry_hints_from_sources(
     let project_sources = ProjectSourceSet::discover(repo);
     let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
     let mut out = BTreeMap::new();
-    for file_path in project_sources
-        .project_files(repo)
-        .filter(|path| is_jvm_source_path(path) || by_file.contains_key(*path))
-    {
-        if !is_jvm_source_path(file_path) {
-            continue;
-        }
+    for file_path in project_jvm_source_files(repo, &project_sources) {
         let Some(text) = read_repo_text(repo, file_path) else {
             continue;
         };
@@ -282,6 +270,15 @@ fn detect_spring_runner_commands<'a>(
             )
         })
         .collect()
+}
+
+fn project_jvm_source_files<'a>(
+    repo: &'a Path,
+    project_sources: &'a ProjectSourceSet,
+) -> impl Iterator<Item = &'a str> + 'a {
+    project_sources
+        .project_files(repo)
+        .filter(|path| is_jvm_source_path(path))
 }
 
 #[derive(Debug, Clone)]
