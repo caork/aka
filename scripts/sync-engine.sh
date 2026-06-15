@@ -6,8 +6,8 @@
 #
 # By default this builds the existing maintained checkout at
 # engine/codebase-memory-mcp-src without resetting it. Use --refresh-upstream
-# only to fetch remotes for a deliberate upstream sync; it never resets or
-# cleans the maintained checkout.
+# only to fetch the aka fork and upstream remotes for a deliberate upstream
+# sync; it never resets or cleans the maintained checkout.
 set -euo pipefail
 
 REFRESH_UPSTREAM=0
@@ -44,16 +44,22 @@ if [[ ! -d "${CHECKOUT}/.git" ]]; then
   fi
 fi
 
-if [[ ${REFRESH_UPSTREAM} -eq 1 ]]; then
-  git -C "${CHECKOUT}" remote set-url origin "${FORK_URL}"
-  if git -C "${CHECKOUT}" remote get-url upstream >/dev/null 2>&1; then
-    git -C "${CHECKOUT}" remote set-url upstream "${UPSTREAM_URL}"
+ensure_remote() {
+  local name="$1"
+  local url="$2"
+  if git -C "${CHECKOUT}" remote get-url "${name}" >/dev/null 2>&1; then
+    git -C "${CHECKOUT}" remote set-url "${name}" "${url}"
   else
-    git -C "${CHECKOUT}" remote add upstream "${UPSTREAM_URL}"
+    git -C "${CHECKOUT}" remote add "${name}" "${url}"
   fi
-  git -C "${CHECKOUT}" fetch --tags --prune origin
+}
+
+if [[ ${REFRESH_UPSTREAM} -eq 1 ]]; then
+  ensure_remote aka "${FORK_URL}"
+  ensure_remote upstream "${UPSTREAM_URL}"
+  git -C "${CHECKOUT}" fetch --tags --prune aka
   git -C "${CHECKOUT}" fetch --tags --prune upstream
-  echo "Fetched origin (${FORK_URL}) and upstream (${UPSTREAM_URL})."
+  echo "Fetched aka (${FORK_URL}) and upstream (${UPSTREAM_URL})."
   echo "Review and merge/rebase manually inside ${CHECKOUT}; this script will build the current checkout as-is."
 fi
 
