@@ -21,7 +21,7 @@
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe
 #                                             Windows Tauri GUI NSIS installer
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-portable.zip
-#                                             Windows Tauri GUI portable exe（engine 内嵌）
+#                                             Windows Tauri GUI portable bundle（exe + resources + README）
 #
 # 产物（--checksums-only 子命令，主流程不自动跑）:
 #   dist/SHA256SUMS                         dist/ 下所有产物（含 dist/docker/*）的 sha256
@@ -306,12 +306,32 @@ assert_zip_has_engine() {
   return 1
 }
 
+prepare_client_integration_resources() {
+  local dst
+  dst="$1"
+  rm -rf "${dst}"
+  mkdir -p "${dst}"
+  cp -R "${REPO_ROOT}/clients" "${dst}/clients"
+  cp -R "${REPO_ROOT}/.claude-plugin" "${dst}/.claude-plugin"
+  find "${dst}" \( -name '.DS_Store' -o -name '._*' \) -delete
+
+  for entry in \
+    "clients/opencode/plugins/aka.js" \
+    "clients/opencode/skills/aka-code-graph/SKILL.md" \
+    "clients/claude-code/skills/aka-code-graph/SKILL.md" \
+    ".claude-plugin/marketplace.json"; do
+    [[ -f "${dst}/${entry}" ]] || { echo "error: 客户端集成资源缺少 ${entry}" >&2; return 1; }
+  done
+  echo "==> 准备客户端集成资源: ${dst}"
+}
+
 prepare_desktop_resources() {
   local triple platform
   triple="$1"
   platform="$(platform_from_triple "${triple}")"
   echo "==> 准备桌面内置资源 (${platform})"
   copy_engine_resource "${platform}"
+  prepare_client_integration_resources "${TAURI_RESOURCES_DIR}/client-integrations"
 }
 
 macos_notarization_credentials_present() {
@@ -402,6 +422,59 @@ find_tauri_dmg() {
   local dmg_dir
   dmg_dir="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/dmg"
   find "${dmg_dir}" -maxdepth 1 -type f -name '*.dmg' | sort | tail -n 1
+}
+
+write_windows_portable_readme() {
+  local file
+  file="$1"
+  cat > "${file}" <<EOF
+AKA Desktop Portable for Windows
+Version: ${VERSION}
+
+Run AKA.exe to start the desktop app. The app starts a local MCP endpoint at:
+  http://127.0.0.1:4112/mcp
+
+WebView2 runtime:
+- The setup.exe installer includes the Microsoft Edge WebView2 bootstrapper.
+- The portable ZIP does not install WebView2. If AKA.exe does not open a
+  window on a fresh Windows machine, install Microsoft Edge WebView2 Runtime
+  or use the setup.exe installer from the same release.
+
+Portable contents:
+- AKA.exe
+- resources/engine/codebase-memory-mcp.exe
+- resources/client-integrations/clients/opencode
+- resources/client-integrations/clients/claude-code
+- resources/client-integrations/clients/codex
+
+Client integrations:
+- OpenCode package files are in resources/client-integrations/clients/opencode.
+- Claude Code package files are in resources/client-integrations/clients/claude-code.
+- Standalone client zips are also published on the GitHub release.
+
+This preview uses public GitHub release download URLs only.
+EOF
+}
+
+assert_windows_portable_zip() {
+  local zip_path listing entry
+  zip_path="$1"
+  [[ -f "${zip_path}" ]] || { echo "error: 找不到 Windows portable zip: ${zip_path}" >&2; return 1; }
+  unzip -t "${zip_path}" >/dev/null
+  listing="$(unzip -Z1 "${zip_path}")"
+  for entry in \
+    "AKA.exe" \
+    "README-Windows.txt" \
+    "resources/engine/codebase-memory-mcp.exe" \
+    "resources/client-integrations/clients/opencode/plugins/aka.js" \
+    "resources/client-integrations/clients/opencode/skills/aka-code-graph/SKILL.md" \
+    "resources/client-integrations/clients/claude-code/skills/aka-code-graph/SKILL.md"; do
+    if ! grep -qxF "${entry}" <<< "${listing}"; then
+      echo "error: Windows portable zip 缺少 ${entry}" >&2
+      return 1
+    fi
+  done
+  echo "==> 校验 Windows portable zip: ${zip_path}"
 }
 
 package_clients() {
@@ -597,6 +670,11 @@ package_windows_desktop() {
     rm -rf "${embed_dir}" "${TAURI_RESOURCES_DIR}/engine"
     mkdir -p "${embed_dir}" "${TAURI_RESOURCES_DIR}/engine"
     cp "${engine_bin}" "${embed_dir}/codebase-memory-mcp.exe"
+    cp "${engine_bin}" "${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe"
+    if [[ -f "${REPO_ROOT}/engine/ENGINE_SHA" ]]; then
+      cp "${REPO_ROOT}/engine/ENGINE_SHA" "${TAURI_RESOURCES_DIR}/engine/ENGINE_SHA"
+    fi
+    prepare_client_integration_resources "${TAURI_RESOURCES_DIR}/client-integrations"
     echo "==> 内嵌 Windows CBM engine: ${engine_bin} -> ${embed_dir}/codebase-memory-mcp.exe"
     rm -rf "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/engine"
     local tauri_args=(build --target "${win_triple}" --bundles nsis --ci)
@@ -625,8 +703,22 @@ package_windows_desktop() {
   rm -f "${portable_zip}"
   stage="$(mktemp -d)"
   cp "${exe_path}" "${stage}/AKA.exe"
-  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe)
+  mkdir -p "${stage}/resources"
+  if [[ -d "${TAURI_RESOURCES_DIR}/engine" ]]; then
+    cp -R "${TAURI_RESOURCES_DIR}/engine" "${stage}/resources/engine"
+  else
+    mkdir -p "${stage}/resources/engine"
+    cp "${TAURI_DIR}/embedded-engine/codebase-memory-mcp.exe" "${stage}/resources/engine/codebase-memory-mcp.exe"
+  fi
+  if [[ -d "${TAURI_RESOURCES_DIR}/client-integrations" ]]; then
+    cp -R "${TAURI_RESOURCES_DIR}/client-integrations" "${stage}/resources/client-integrations"
+  else
+    prepare_client_integration_resources "${stage}/resources/client-integrations"
+  fi
+  write_windows_portable_readme "${stage}/README-Windows.txt"
+  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe README-Windows.txt resources)
   rm -rf "${stage}"
+  assert_windows_portable_zip "${portable_zip}"
   echo "==> ${portable_zip}"
 }
 

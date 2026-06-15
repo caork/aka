@@ -1,5 +1,14 @@
 {
   "bundle": {
-    "resources": {}
+    "resources": {
+      "resources/engine": "engine",
+      "resources/client-integrations": "client-integrations"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      }
+    }
   }
 }

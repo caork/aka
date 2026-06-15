@@ -243,6 +243,10 @@ jobs:
           echo "setup_name=aka-desktop-${VERSION}-x86_64-pc-windows-msvc-setup.exe" >> "$GITHUB_OUTPUT"
           echo "portable_name=aka-desktop-${VERSION}-x86_64-pc-windows-msvc-portable.zip" >> "$GITHUB_OUTPUT"
 
+      - name: Smoke Windows desktop portable
+        shell: pwsh
+        run: scripts/smoke-windows-desktop.ps1 -PortableZip "dist/${{ steps.pkg.outputs.portable_name }}" -Seconds 10
+
       - name: Upload to release
         if: github.ref_type == 'tag'
         env:

@@ -24,8 +24,7 @@ struct DesktopMcpRuntime {
 }
 
 #[cfg(target_os = "windows")]
-const EMBEDDED_CBM_ENGINE: &[u8] =
-    include_bytes!("../embedded-engine/codebase-memory-mcp.exe");
+const EMBEDDED_CBM_ENGINE: &[u8] = include_bytes!("../embedded-engine/codebase-memory-mcp.exe");
 
 fn fallback_app_data_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
@@ -181,23 +180,31 @@ fn configure_desktop_runtime(app: &tauri::App) -> anyhow::Result<AkaBackend> {
 }
 
 #[cfg(target_os = "windows")]
-fn configure_backend(_app: &tauri::App, app_data_dir: &std::path::Path) -> anyhow::Result<AkaBackend> {
+fn configure_backend(
+    _app: &tauri::App,
+    app_data_dir: &std::path::Path,
+) -> anyhow::Result<AkaBackend> {
     Ok(AkaBackend::with_engine_dir(ensure_embedded_engine_dir(
         app_data_dir,
     )?))
 }
 
 #[cfg(not(target_os = "windows"))]
-fn configure_backend(app: &tauri::App, _app_data_dir: &std::path::Path) -> anyhow::Result<AkaBackend> {
+fn configure_backend(
+    app: &tauri::App,
+    _app_data_dir: &std::path::Path,
+) -> anyhow::Result<AkaBackend> {
     let resource_dir = app
         .path()
         .resource_dir()
         .unwrap_or_else(|_| fallback_resource_dir());
-    Ok(if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
-        AkaBackend::with_engine_dir(engine_dir)
-    } else {
-        AkaBackend::new()
-    })
+    Ok(
+        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+            AkaBackend::with_engine_dir(engine_dir)
+        } else {
+            AkaBackend::new()
+        },
+    )
 }
 
 fn start_desktop_mcp_server(backend: BackendState) -> anyhow::Result<DesktopMcpRuntime> {
