@@ -340,7 +340,10 @@ fn is_safe_cross_file_endpoint(info: &NodeInfo) -> bool {
 }
 
 fn is_global_or_derived_label(label: &str) -> bool {
-    matches!(label, "Community" | "Process" | "Route" | "Tool")
+    matches!(
+        label,
+        "Community" | "Process" | "Route" | "GraphQL" | "Tool"
+    )
 }
 
 fn remove_if_exists(path: &Path) -> Result<()> {

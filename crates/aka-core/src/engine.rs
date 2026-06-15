@@ -25,6 +25,7 @@ use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTR
 
 mod cache_synth;
 mod event_synth;
+mod graphql_synth;
 mod job_synth;
 mod persistence_synth;
 mod policy_synth;
@@ -36,6 +37,7 @@ mod tool_synth;
 mod topic_synth;
 use cache_synth::{synthesize_caches_from_sources, SynthCache};
 use event_synth::{synthesize_events_from_sources, SynthEvent};
+use graphql_synth::{synthesize_graphql_from_sources, SynthGraphqlOperation};
 use job_synth::{synthesize_jobs_from_sources, SynthJob};
 use persistence_synth::{synthesize_persistence_from_sources, SynthPersistenceGraph};
 use policy_synth::{synthesize_policies_from_sources, SynthPolicy};
@@ -818,6 +820,12 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for operation in &synth.graphql {
+        let node = operation.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     for node in synth.persistence.node_recs() {
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
@@ -909,6 +917,12 @@ fn export_edges(
         .chain(synth.events.iter().flat_map(SynthEvent::edge_recs))
         .chain(synth.policies.iter().flat_map(SynthPolicy::edge_recs))
         .chain(synth.resources.iter().flat_map(SynthResource::edge_recs))
+        .chain(
+            synth
+                .graphql
+                .iter()
+                .flat_map(SynthGraphqlOperation::edge_recs),
+        )
         .chain(synth.persistence.edge_recs())
         .chain(synth.edges.iter().cloned())
     {
@@ -1170,6 +1184,7 @@ struct SynthGraph {
     events: Vec<SynthEvent>,
     policies: Vec<SynthPolicy>,
     resources: Vec<SynthResource>,
+    graphql: Vec<SynthGraphqlOperation>,
     persistence: SynthPersistenceGraph,
     properties: Vec<SynthProperty>,
     edges: Vec<EdgeRec>,
@@ -1616,6 +1631,13 @@ fn synthesize_graph_with_progress(
     let resources = synthesize_resources_from_sources(repo, &nodes);
     emit_phase(
         on_event,
+        "codebase-memory:export-artifacts:synthesize:graphql",
+        0,
+        0,
+    );
+    let graphql = synthesize_graphql_from_sources(repo, &nodes, &processes);
+    emit_phase(
+        on_event,
         "codebase-memory:export-artifacts:synthesize:persistence",
         0,
         0,
@@ -1633,6 +1655,7 @@ fn synthesize_graph_with_progress(
         events,
         policies,
         resources,
+        graphql,
         persistence,
         properties,
         edges: synthetic_edges,

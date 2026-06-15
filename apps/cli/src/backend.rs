@@ -53,6 +53,7 @@ const DEFINITION_LABELS: &[&str] = &[
     "Enum",
     "Trait",
     "Route",
+    "GraphQL",
     "Tool",
     "Job",
     "Table",
