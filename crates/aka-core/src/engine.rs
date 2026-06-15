@@ -23,7 +23,9 @@ use serde_json::{json, Map, Value};
 
 use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION};
 
+mod job_synth;
 mod topic_synth;
+use job_synth::{synthesize_jobs_from_sources, SynthJob};
 use topic_synth::{synthesize_topics_from_sources, SynthTopic};
 
 const DEFAULT_CBM_MODE: &str = "fast";
@@ -753,6 +755,12 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for job in &synth.jobs {
+        let node = job.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     for topic in &synth.topics {
         let node = topic.node_rec();
         serde_json::to_writer(&mut out, &node)?;
@@ -839,6 +847,7 @@ fn export_edges(
         .chain(synth.processes.iter().flat_map(SynthProcess::edge_recs))
         .chain(synth.routes.iter().flat_map(SynthRoute::edge_recs))
         .chain(synth.tools.iter().flat_map(SynthTool::edge_recs))
+        .chain(synth.jobs.iter().flat_map(SynthJob::edge_recs))
         .chain(synth.topics.iter().flat_map(SynthTopic::edge_recs))
         .chain(synth.edges.iter().cloned())
     {
@@ -1094,6 +1103,7 @@ struct SynthGraph {
     processes: Vec<SynthProcess>,
     routes: Vec<SynthRoute>,
     tools: Vec<SynthTool>,
+    jobs: Vec<SynthJob>,
     topics: Vec<SynthTopic>,
     properties: Vec<SynthProperty>,
     edges: Vec<EdgeRec>,
@@ -1624,6 +1634,13 @@ fn synthesize_graph_with_progress(
     let tools = synthesize_tools_from_sources(repo, &nodes, &processes, &native_tools);
     emit_phase(
         on_event,
+        "codebase-memory:export-artifacts:synthesize:jobs",
+        0,
+        0,
+    );
+    let jobs = synthesize_jobs_from_sources(repo, &nodes, &processes);
+    emit_phase(
+        on_event,
         "codebase-memory:export-artifacts:synthesize:topics",
         0,
         0,
@@ -1635,6 +1652,7 @@ fn synthesize_graph_with_progress(
         processes,
         routes,
         tools,
+        jobs,
         topics,
         properties,
         edges: synthetic_edges,
@@ -7488,6 +7506,187 @@ def publish(producer):
             .collect();
         assert!(edge_types.contains(&"CONSUMES_TOPIC".to_string()));
         assert!(edge_types.contains(&"PUBLISHES_TOPIC".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_spring_scheduled_jobs() {
+        let repo = temp_repo("spring-scheduled-jobs");
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/jobs")).unwrap();
+        let file = "src/main/java/com/example/jobs/BillingJobs.java";
+        std::fs::write(
+            repo.join(file),
+            r#"package com.example.jobs;
+
+import org.springframework.scheduling.annotation.Scheduled;
+
+class BillingJobs {
+    @Scheduled(cron = "0 0 * * * *")
+    public void settleInvoices() {
+        settleOpenInvoices();
+    }
+
+    void settleOpenInvoices() {
+        writeLedger();
+    }
+
+    void writeLedger() {}
+}"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "settleInvoices",
+            "com.example.jobs.BillingJobs.settleInvoices",
+            file,
+            (6, 8),
+            json!({
+                "decorators": ["@Scheduled(cron = \"0 0 * * * *\")"],
+                "language": "java",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            2,
+            "settleOpenInvoices",
+            "com.example.jobs.BillingJobs.settleOpenInvoices",
+            file,
+            (10, 12),
+            json!({
+                "language": "java",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            3,
+            "writeLedger",
+            "com.example.jobs.BillingJobs.writeLedger",
+            file,
+            (14, 14),
+            json!({
+                "language": "java",
+            }),
+        );
+        insert_edge(&conn, 1, 1, 2, "CALLS");
+        insert_edge(&conn, 2, 2, 3, "CALLS");
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let job = synth
+            .jobs
+            .iter()
+            .find(|job| job.handler_id == "cbm:1:com.example.jobs.BillingJobs.settleInvoices")
+            .expect("spring scheduled job");
+        assert_eq!(job.job_type, "spring-scheduled");
+        assert_eq!(job.schedule.as_deref(), Some("cron=0 0 * * * *"));
+        assert_eq!(job.process_ids.len(), 1);
+
+        let edge_types: Vec<_> = job
+            .edge_recs()
+            .into_iter()
+            .map(|edge| edge.edge_type)
+            .collect();
+        assert!(edge_types.contains(&"HANDLES_JOB".to_string()));
+        assert!(edge_types.contains(&"ENTRY_POINT_OF".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_python_task_jobs() {
+        let repo = temp_repo("python-task-jobs");
+        std::fs::write(
+            repo.join("tasks.py"),
+            r#"from celery import shared_task
+from apscheduler.schedulers.background import BackgroundScheduler
+
+@shared_task(name="orders.sync")
+def sync_orders():
+    load_orders()
+
+def load_orders():
+    write_orders()
+
+def write_orders():
+    return []
+
+scheduler = BackgroundScheduler()
+
+@scheduler.scheduled_job("cron", id="orders.cleanup", hour="3")
+def cleanup_orders():
+    return None
+"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "sync_orders",
+            "tasks.sync_orders",
+            "tasks.py",
+            (4, 6),
+            json!({
+                "decorators": ["@shared_task(name=\"orders.sync\")"],
+                "language": "python",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            2,
+            "load_orders",
+            "tasks.load_orders",
+            "tasks.py",
+            (8, 9),
+            json!({
+                "language": "python",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            3,
+            "write_orders",
+            "tasks.write_orders",
+            "tasks.py",
+            (11, 12),
+            json!({
+                "language": "python",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            4,
+            "cleanup_orders",
+            "tasks.cleanup_orders",
+            "tasks.py",
+            (17, 18),
+            json!({
+                "decorators": ["@scheduler.scheduled_job(\"cron\", id=\"orders.cleanup\", hour=\"3\")"],
+                "language": "python",
+            }),
+        );
+        insert_edge(&conn, 1, 1, 2, "CALLS");
+        insert_edge(&conn, 2, 2, 3, "CALLS");
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let celery = synth
+            .jobs
+            .iter()
+            .find(|job| job.name == "orders.sync")
+            .expect("celery task job");
+        assert_eq!(celery.job_type, "celery-task");
+        assert_eq!(celery.handler_id, "cbm:1:tasks.sync_orders");
+        assert_eq!(celery.process_ids.len(), 1);
+
+        let aps = synth
+            .jobs
+            .iter()
+            .find(|job| job.name == "orders.cleanup")
+            .expect("apscheduler job");
+        assert_eq!(aps.job_type, "apscheduler-job");
+        assert!(aps.schedule.as_deref().is_some_and(
+            |schedule| schedule.contains("trigger=cron") && schedule.contains("hour=3")
+        ));
     }
 
     #[test]
