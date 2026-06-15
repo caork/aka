@@ -1,8 +1,8 @@
 diff --git a/src/discover/discover.c b/src/discover/discover.c
-index 314c00c..f07a33a 100644
+index 314c00c..48da43f 100644
 --- a/src/discover/discover.c
 +++ b/src/discover/discover.c
-@@ -131,6 +131,39 @@ static bool str_contains(const char *s, const char *sub) {
+@@ -131,6 +131,45 @@ static bool str_contains(const char *s, const char *sub) {
      return strstr(s, sub) != NULL;
  }
  
@@ -10,25 +10,31 @@ index 314c00c..f07a33a 100644
 +    return str_in_list(dirname, FAST_SKIP_DIRS);
 +}
 +
-+static bool is_jvm_source_package_path(const char *rel_path) {
-+    if (!rel_path) {
++static bool path_has_segment(const char *rel_path, const char *segment) {
++    if (!rel_path || !segment || segment[0] == '\0') {
 +        return false;
 +    }
-+    return str_contains(rel_path, "src/main/java/") ||
-+           str_contains(rel_path, "src/main/java") ||
-+           str_contains(rel_path, "src/test/java/") ||
-+           str_contains(rel_path, "src/test/java") ||
-+           str_contains(rel_path, "src/main/kotlin/") ||
-+           str_contains(rel_path, "src/main/kotlin") ||
-+           str_contains(rel_path, "src/test/kotlin/") ||
-+           str_contains(rel_path, "src/test/kotlin") ||
-+           str_contains(rel_path, "src/main/scala/") ||
-+           str_contains(rel_path, "src/main/scala") ||
-+           str_contains(rel_path, "src/test/scala/") ||
-+           str_contains(rel_path, "src/test/scala") ||
-+           str_contains(rel_path, "src/main/groovy/") ||
-+           str_contains(rel_path, "src/main/groovy") ||
-+           str_contains(rel_path, "src/test/groovy/");
++    size_t seg_len = strlen(segment);
++    const char *cur = rel_path;
++    while (*cur) {
++        const char *next = strchr(cur, '/');
++        size_t len = next ? (size_t)(next - cur) : strlen(cur);
++        if (len == seg_len && strncmp(cur, segment, len) == 0) {
++            return true;
++        }
++        if (!next) {
++            break;
++        }
++        cur = next + 1;
++    }
++    return false;
++}
++
++static bool is_jvm_source_package_path(const char *rel_path) {
++    return path_has_segment(rel_path, "java") ||
++           path_has_segment(rel_path, "kotlin") ||
++           path_has_segment(rel_path, "scala") ||
++           path_has_segment(rel_path, "groovy");
 +}
 +
 +static bool keep_fast_source_package_dir(const char *entry_name, const char *rel_path,
@@ -42,7 +48,7 @@ index 314c00c..f07a33a 100644
  /* ── Public filter functions ─────────────────────── */
  
  bool cbm_should_skip_dir(const char *dirname, cbm_index_mode_t mode) {
-@@ -275,7 +305,9 @@ static bool should_skip_directory(const char *entry_name, const char *rel_path,
+@@ -275,7 +314,9 @@ static bool should_skip_directory(const char *entry_name, const char *rel_path,
                                    const cbm_discover_opts_t *opts, const cbm_gitignore_t *gitignore,
                                    const cbm_gitignore_t *cbmignore, const cbm_gitignore_t *local_gi,
                                    const char *local_gi_prefix) {
@@ -54,10 +60,10 @@ index 314c00c..f07a33a 100644
      }
      if (gitignore && cbm_gitignore_matches(gitignore, rel_path, true)) {
 diff --git a/tests/test_discover.c b/tests/test_discover.c
-index af51a92..3520467 100644
+index af51a92..f02dc35 100644
 --- a/tests/test_discover.c
 +++ b/tests/test_discover.c
-@@ -605,6 +605,55 @@ TEST(discover_generic_dirs_fast_mode) {
+@@ -605,6 +605,61 @@ TEST(discover_generic_dirs_fast_mode) {
      PASS();
  }
  
@@ -80,6 +86,10 @@ index af51a92..3520467 100644
 +                  "package com.example;\nclass App {}\n");
 +    th_write_file(TH_PATH(base, "services/order/src/test/java/com/example/AppTest.java"),
 +                  "package com.example;\nclass AppTest {}\n");
++    th_write_file(TH_PATH(base, "src/integrationTest/java/com/example/tools/ItTool.java"),
++                  "package com.example.tools;\nclass ItTool {}\n");
++    th_write_file(TH_PATH(base, "legacy/src/java/com/example/generated/LegacyGenerated.java"),
++                  "package com.example.generated;\nclass LegacyGenerated {}\n");
 +
 +    cbm_discover_opts_t opts = {.mode = CBM_MODE_FAST};
 +    cbm_file_info_t *files = NULL;
@@ -87,7 +97,7 @@ index af51a92..3520467 100644
 +
 +    int rc = cbm_discover(base, &opts, &files, &count);
 +    ASSERT_EQ(rc, 0);
-+    ASSERT_EQ(count, 7);
++    ASSERT_EQ(count, 9);
 +    const char *expected[] = {
 +        "src/main/java/com/example/RootApp.java",
 +        "src/main/java/com/example/generated/GeneratedApp.java",
@@ -96,8 +106,10 @@ index af51a92..3520467 100644
 +        "src/test/java/com/example/RootAppTest.java",
 +        "services/order/src/main/java/com/example/App.java",
 +        "services/order/src/test/java/com/example/AppTest.java",
++        "src/integrationTest/java/com/example/tools/ItTool.java",
++        "legacy/src/java/com/example/generated/LegacyGenerated.java",
 +    };
-+    for (int i = 0; i < 7; i++) {
++    for (int i = 0; i < 9; i++) {
 +        bool found = false;
 +        for (int j = 0; j < count; j++) {
 +            found = found || strcmp(files[j].rel_path, expected[i]) == 0;
@@ -113,7 +125,7 @@ index af51a92..3520467 100644
  TEST(discover_cbmignore_no_git) {
      char *base = th_mktempdir("cbm_disc_nogit");
      ASSERT(base != NULL);
-@@ -792,6 +841,7 @@ SUITE(discover) {
+@@ -792,6 +847,7 @@ SUITE(discover) {
      RUN_TEST(discover_new_ignore_patterns);
      RUN_TEST(discover_generic_dirs_full_mode);
      RUN_TEST(discover_generic_dirs_fast_mode);
