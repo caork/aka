@@ -67,7 +67,42 @@ fn java_route_response_types(text: &str, file_path: &str) -> Vec<String> {
             out.insert(model);
         }
     }
+    out.extend(java_constructed_response_types(text));
     out.into_iter().collect()
+}
+
+fn java_constructed_response_types(text: &str) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !(trimmed.starts_with("return ")
+            || trimmed.contains("ResponseEntity.")
+            || trimmed.contains(".body("))
+        {
+            continue;
+        }
+        let mut offset = 0usize;
+        while let Some(pos) = trimmed[offset..].find("new ") {
+            let start = offset + pos + "new ".len();
+            let Some((name, end)) = read_java_identifier(trimmed, skip_ws(trimmed, start)) else {
+                offset = start;
+                continue;
+            };
+            let simple = name.rsplit('.').next().unwrap_or(name);
+            if is_java_ident(simple) && !is_java_common_constructed_type(simple) {
+                out.insert(simple.to_string());
+            }
+            offset = end;
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn is_java_common_constructed_type(name: &str) -> bool {
+    matches!(
+        name,
+        "String" | "Object" | "ArrayList" | "HashMap" | "LinkedHashMap" | "ResponseEntity"
+    )
 }
 
 fn java_response_model_name(return_type: &str) -> Option<String> {
