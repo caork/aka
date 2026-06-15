@@ -106,6 +106,7 @@ fn synthesizes_python_external_http_resources() {
 import httpx
 import requests
 import requests_toolbelt.sessions
+import urllib.request
 
 def charge(order_id):
     response = requests.post(f"https://payments.example.com/v1/orders/{order_id}/charge")
@@ -130,6 +131,9 @@ async def notify(order_id):
     async with httpx.AsyncClient() as client:
         response = await client.post("https://events.example.com/orders", json={"id": order_id})
         return response.status_code
+
+def legacy_webhook(order_id):
+    return urllib.request.urlopen(f"https://legacy.example.com/hooks/{order_id}").status
 "#,
     )
     .unwrap();
@@ -141,7 +145,7 @@ async def notify(order_id):
         "charge",
         "payments.charge",
         "payments.py",
-        (5, 7),
+        (7, 9),
         json!({
             "language": "python",
         }),
@@ -152,7 +156,7 @@ async def notify(order_id):
         "refund",
         "payments.refund",
         "payments.py",
-        (9, 12),
+        (11, 14),
         json!({
             "language": "python",
         }),
@@ -163,7 +167,7 @@ async def notify(order_id):
         "reserve",
         "payments.reserve",
         "payments.py",
-        (14, 17),
+        (16, 19),
         json!({
             "language": "python",
         }),
@@ -174,7 +178,7 @@ async def notify(order_id):
         "sync_stock",
         "payments.sync_stock",
         "payments.py",
-        (19, 22),
+        (21, 24),
         json!({
             "language": "python",
         }),
@@ -185,7 +189,18 @@ async def notify(order_id):
         "notify",
         "payments.notify",
         "payments.py",
-        (24, 27),
+        (26, 29),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        6,
+        "legacy_webhook",
+        "payments.legacy_webhook",
+        "payments.py",
+        (31, 32),
         json!({
             "language": "python",
         }),
@@ -229,6 +244,21 @@ async def notify(order_id):
                 edge.edge_type == "HTTP_CALLS" && edge.source_id == "cbm:5:payments.notify"
             })
     }));
+    let legacy = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "https://legacy.example.com/hooks/{param}")
+        .expect("urllib legacy webhook resource");
+    let legacy_edge = legacy
+        .edge_recs()
+        .into_iter()
+        .find(|edge| edge.source_id == "cbm:6:payments.legacy_webhook")
+        .expect("urllib HTTP_CALLS edge");
+    assert_eq!(legacy_edge.edge_type, "HTTP_CALLS");
+    assert_eq!(
+        legacy_edge.evidence.as_ref().unwrap()["strategy"],
+        "python-urllib"
+    );
 }
 
 #[test]

@@ -140,6 +140,7 @@ fn extract_resource_detections(
         ("httpx.patch", "python-httpx"),
         ("httpx.delete", "python-httpx"),
         ("aiohttp.request", "python-aiohttp"),
+        (".urlopen", "python-urllib"),
         (".getForObject", "java-resttemplate"),
         (".getForEntity", "java-resttemplate"),
         (".postForObject", "java-resttemplate"),
@@ -166,6 +167,7 @@ fn extract_resource_detections(
     ));
     out.extend(extract_python_httpx_client_relative_calls(text, nodes));
     out.extend(extract_python_requests_base_url_session_calls(text, nodes));
+    out.extend(extract_python_urllib_calls(text, nodes));
     out.extend(extract_contextual_http_client_calls(
         text,
         nodes,
@@ -178,10 +180,28 @@ fn extract_resource_detections(
         a.url
             .cmp(&b.url)
             .then_with(|| a.node_id.cmp(&b.node_id))
+            .then_with(|| {
+                resource_strategy_rank(&a.strategy).cmp(&resource_strategy_rank(&b.strategy))
+            })
             .then_with(|| a.strategy.cmp(&b.strategy))
     });
     out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id && a.strategy == b.strategy);
     out
+}
+
+fn resource_strategy_rank(strategy: &str) -> u8 {
+    if strategy == "literal-http-url" {
+        10
+    } else {
+        0
+    }
+}
+
+fn extract_python_urllib_calls(text: &str, nodes: &[&SynthNode]) -> Vec<ResourceDetection> {
+    if !(text.contains("urllib") || text.contains("urlopen")) {
+        return Vec::new();
+    }
+    extract_call_url_detections(text, nodes, "urlopen", "python-urllib")
 }
 
 fn extract_python_aiohttp_client_relative_calls(
