@@ -97,6 +97,13 @@ public class OrderDto {
     private int total;
     private String error;
 }
+
+@Data
+@Builder
+class AuditEvent {
+    private String actor;
+    private String action;
+}
 "#,
     )
     .unwrap();
@@ -115,6 +122,10 @@ import org.springframework.web.bind.annotation.RestController;
 public class OrderController {
     @GetMapping("/{id}")
     public ResponseEntity<?> getOrder(String id) {
+        AuditEvent ignored = AuditEvent.builder()
+            .actor("system")
+            .action("read-order")
+            .build();
         return ResponseEntity.ok(OrderDto.builder()
             .id(id)
             .status("ok")
@@ -166,4 +177,6 @@ public class OrderController {
     assert!(route.response_keys.contains(&"status".to_string()));
     assert!(route.response_keys.contains(&"total".to_string()));
     assert!(route.error_keys.contains(&"error".to_string()));
+    assert!(!route.response_keys.contains(&"actor".to_string()));
+    assert!(!route.response_keys.contains(&"action".to_string()));
 }

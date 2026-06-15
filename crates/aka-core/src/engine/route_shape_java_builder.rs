@@ -10,6 +10,26 @@ use super::{
 
 pub(super) fn java_builder_response_types(text: &str) -> Vec<String> {
     let mut out = BTreeSet::new();
+    for window in java_response_expression_windows(text) {
+        for name in java_builder_types_in_window(window) {
+            out.insert(name);
+        }
+    }
+    out.into_iter().collect()
+}
+
+pub(super) fn java_builder_response_keys(text: &str) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    for window in java_response_expression_windows(text) {
+        for key in java_builder_keys_in_window(window) {
+            keys.insert(key);
+        }
+    }
+    keys.into_iter().collect()
+}
+
+fn java_builder_types_in_window(text: &str) -> Vec<String> {
+    let mut out = BTreeSet::new();
     let mut offset = 0usize;
     while let Some(pos) = text[offset..].find(".builder(") {
         let builder_pos = offset + pos;
@@ -26,7 +46,7 @@ pub(super) fn java_builder_response_types(text: &str) -> Vec<String> {
     out.into_iter().collect()
 }
 
-pub(super) fn java_builder_response_keys(text: &str) -> Vec<String> {
+fn java_builder_keys_in_window(text: &str) -> Vec<String> {
     let mut keys = BTreeSet::new();
     let mut offset = 0usize;
     while let Some(pos) = text[offset..].find(".builder(") {
@@ -46,6 +66,57 @@ pub(super) fn java_builder_response_keys(text: &str) -> Vec<String> {
         offset = chain_end + ".build(".len();
     }
     keys.into_iter().collect()
+}
+
+fn java_response_expression_windows(text: &str) -> Vec<&str> {
+    let mut windows = Vec::new();
+    for marker in ["return ", "ResponseEntity.", ".body("] {
+        let mut offset = 0usize;
+        while let Some(rel) = text[offset..].find(marker) {
+            let start = offset + rel;
+            let end = java_statement_window_end(text, start);
+            windows.push(&text[start..end]);
+            offset = start + marker.len();
+        }
+    }
+    windows
+}
+
+fn java_statement_window_end(text: &str, start: usize) -> usize {
+    let mut paren = 0i32;
+    let mut bracket = 0i32;
+    let mut brace = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut escape = false;
+    for (rel, byte) in text.as_bytes()[start..].iter().copied().enumerate() {
+        if let Some(q) = quote {
+            if escape {
+                escape = false;
+            } else if byte == b'\\' {
+                escape = true;
+            } else if byte == q {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            b'[' => bracket += 1,
+            b']' => bracket -= 1,
+            b'{' => brace += 1,
+            b'}' => {
+                if paren <= 0 && bracket <= 0 && brace <= 0 {
+                    return start + rel;
+                }
+                brace -= 1;
+            }
+            b';' if paren <= 0 && bracket <= 0 && brace <= 0 => return start + rel + 1,
+            _ => {}
+        }
+    }
+    text.len()
 }
 
 fn java_qualified_name_before(text: &str, pos: usize) -> Option<(String, usize)> {
