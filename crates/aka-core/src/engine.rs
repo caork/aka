@@ -2201,7 +2201,7 @@ fn fetch_literal_windows(text: &str) -> Vec<&str> {
         let mut offset = 0usize;
         while let Some(pos) = text[offset..].find(marker) {
             let start = offset + pos;
-            let end = (start + 600).min(text.len());
+            let end = clamp_char_boundary(text, start + 600);
             windows.push(&text[start..end]);
             offset = start + marker.len();
         }
@@ -2223,7 +2223,7 @@ fn literal_occurrences(text: &str, needle: &str) -> Vec<usize> {
 fn extract_accessed_keys_near_route(text: &str, route: &str) -> Vec<String> {
     let mut keys = BTreeSet::new();
     for idx in literal_occurrences(text, route) {
-        let end = (idx + 2000).min(text.len());
+        let end = clamp_char_boundary(text, idx + 2000);
         let window = &text[idx..end];
         for key in dotted_property_names(window) {
             if !is_common_property(&key) {
@@ -2350,8 +2350,8 @@ fn extract_tool_defs(text: &str) -> Vec<ToolDef> {
         }
     }
     for idx in property_name_offsets(text, "name") {
-        let window_start = idx.saturating_sub(240);
-        let window_end = (idx + 400).min(text.len());
+        let window_start = clamp_char_boundary(text, idx.saturating_sub(240));
+        let window_end = clamp_char_boundary(text, idx + 400);
         let window = &text[window_start..window_end];
         let lower = window.to_ascii_lowercase();
         if !(lower.contains("tool") || lower.contains("inputschema") || lower.contains("schema")) {
@@ -2377,8 +2377,8 @@ fn extract_tool_defs(text: &str) -> Vec<ToolDef> {
 }
 
 fn extract_description_near(text: &str, idx: usize) -> String {
-    let start = idx.saturating_sub(120);
-    let end = (idx + 600).min(text.len());
+    let start = clamp_char_boundary(text, idx.saturating_sub(120));
+    let end = clamp_char_boundary(text, idx + 600);
     let window = &text[start..end];
     for key in ["description", "title"] {
         if let Some(pos) = window.find(key) {
@@ -2394,6 +2394,14 @@ fn extract_description_near(text: &str, idx: usize) -> String {
         }
     }
     String::new()
+}
+
+fn clamp_char_boundary(text: &str, idx: usize) -> usize {
+    let mut idx = idx.min(text.len());
+    while idx > 0 && !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
 }
 
 fn is_plausible_tool_name(name: &str) -> bool {
@@ -2579,25 +2587,21 @@ fn ident_words(text: &str) -> Vec<String> {
 
 fn property_name_offsets(text: &str, name: &str) -> Vec<usize> {
     let mut out = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i + name.len() <= bytes.len() {
-        if &text[i..i + name.len()] == name {
-            let before = i
-                .checked_sub(1)
-                .and_then(|idx| text.as_bytes().get(idx))
-                .copied()
-                .map(char::from);
-            let after = text.as_bytes().get(i + name.len()).copied().map(char::from);
-            if before.is_none_or(|ch| !is_ident_continue(ch))
-                && after.is_none_or(|ch| !is_ident_continue(ch))
-            {
-                out.push(i);
-            }
-            i += name.len();
-        } else {
-            i += 1;
+    let mut search_from = 0usize;
+    while let Some(rel) = text[search_from..].find(name) {
+        let i = search_from + rel;
+        let before = i
+            .checked_sub(1)
+            .and_then(|idx| text.as_bytes().get(idx))
+            .copied()
+            .map(char::from);
+        let after = text.as_bytes().get(i + name.len()).copied().map(char::from);
+        if before.is_none_or(|ch| !is_ident_continue(ch))
+            && after.is_none_or(|ch| !is_ident_continue(ch))
+        {
+            out.push(i);
         }
+        search_from = i + name.len();
     }
     out
 }
@@ -2614,14 +2618,21 @@ fn read_string_literal(text: &str, start: usize) -> Option<(String, usize)> {
     while i < bytes.len() {
         let b = bytes[i];
         if escape {
-            out.push(b as char);
+            let ch = text[i..].chars().next()?;
+            out.push(ch);
             escape = false;
-        } else if b == b'\\' {
+            i += ch.len_utf8();
+            continue;
+        }
+        if b == b'\\' {
             escape = true;
         } else if b == quote {
             return Some((out, i + 1));
         } else {
-            out.push(b as char);
+            let ch = text[i..].chars().next()?;
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
         }
         i += 1;
     }
@@ -3765,5 +3776,23 @@ mod tests {
         assert_eq!(tool.description, "Index a repository");
         assert!(tool.handler_id.is_some());
         assert_eq!(tool.edge_recs()[0].edge_type, "HANDLES_TOOL");
+    }
+
+    #[test]
+    fn scans_tool_properties_across_non_ascii_text() {
+        let text = r#"const label = "cấu hình";
+const tool = {
+  name: "sync_orders",
+  description: "Đồng bộ đơn hàng"
+};"#;
+
+        assert_eq!(
+            property_name_offsets(text, "name"),
+            vec![text.find("name").unwrap()]
+        );
+        let tools = extract_tool_defs(text);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "sync_orders");
+        assert_eq!(tools[0].description, "Đồng bộ đơn hàng");
     }
 }
