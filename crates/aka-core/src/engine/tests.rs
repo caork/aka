@@ -2040,10 +2040,14 @@ router = APIRouter(prefix="/api")
 
 class OrderService:
     def load_order(self, order_id: str):
+        def normalize(raw):
+            return raw
         return {"id": order_id}
 
 @router.get("/orders/{order_id}")
 async def get_order(order_id: str):
+    def local_trace():
+        return order_id
     return OrderService().load_order(order_id)
 "#,
     )
@@ -2071,6 +2075,10 @@ async def get_order(order_id: str):
                 .iter()
                 .any(|decorator| decorator == "@router.get(\"/orders/{order_id}\")")
     }));
+    assert!(!synth
+        .source_symbols
+        .iter()
+        .any(|symbol| matches!(symbol.node().name.as_str(), "normalize" | "local_trace")));
     let route = synth
         .routes
         .iter()

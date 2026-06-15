@@ -5,11 +5,13 @@ use super::{line_number_at_offset, stable_hash, SynthNode};
 pub(super) fn python_source_symbols(file_path: &str, text: &str) -> Vec<SynthNode> {
     let module = python_module_name(file_path);
     let declarations = python_declarations(text);
+    let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     for decl in declarations
         .iter()
         .filter(|decl| decl.kind == PyDeclKind::Class && decl.indent == 0)
     {
+        let method_indent = direct_child_indent_for_class(&lines, decl);
         let qn = python_qn(&module, None, &decl.name);
         out.push(source_node(SourceNodeSpec {
             label: "Class",
@@ -27,7 +29,7 @@ pub(super) fn python_source_symbols(file_path: &str, text: &str) -> Vec<SynthNod
                 && candidate.indent > decl.indent
                 && candidate.start > decl.start
                 && candidate.start < decl.end
-                && direct_child_indent(text, decl, candidate)
+                && Some(candidate.indent) == method_indent
         }) {
             out.push(source_node(SourceNodeSpec {
                 label: "Method",
@@ -86,6 +88,7 @@ struct PyDecl {
     kind: PyDeclKind,
     name: String,
     indent: usize,
+    start_line: i64,
     start: usize,
     end: usize,
     decorators: Vec<String>,
@@ -109,6 +112,7 @@ fn python_declarations(text: &str) -> Vec<PyDecl> {
             kind,
             name,
             indent,
+            start_line: (start_line + 1) as i64,
             start,
             end,
             decorators: decorators_before(&lines, idx),
@@ -186,13 +190,16 @@ fn python_block_end_line(lines: &[&str], start_idx: usize, indent: usize) -> usi
     end
 }
 
-fn direct_child_indent(text: &str, class: &PyDecl, method: &PyDecl) -> bool {
-    let lines: Vec<&str> = text.lines().collect();
-    let method_line = line_number_at_offset(text, method.start).saturating_sub(1) as usize;
-    lines
-        .get(method_line)
-        .map(|line| line.len().saturating_sub(line.trim_start().len()) > class.indent)
-        .unwrap_or(false)
+fn direct_child_indent_for_class(lines: &[&str], class: &PyDecl) -> Option<usize> {
+    let class_line = class.start_line.saturating_sub(1) as usize;
+    lines.iter().skip(class_line + 1).find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return None;
+        }
+        let indent = line.len().saturating_sub(line.trim_start().len());
+        (indent > class.indent).then_some(indent)
+    })
 }
 
 fn line_offsets(text: &str) -> Vec<usize> {
