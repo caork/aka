@@ -40,7 +40,8 @@ fn spring_functional_routes(
 
     let mut out = Vec::new();
     let nest_prefixes = spring_nest_prefixes(text);
-    for predicate in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+    let builder_path_prefixes = spring_builder_path_prefixes(text);
+    for predicate in HTTP_METHODS {
         for call in find_call_args(text, predicate) {
             let Some(route) = first_string_literal(call.args) else {
                 continue;
@@ -60,9 +61,30 @@ fn spring_functional_routes(
                 handler_name: handler.map(|node| node.display_name().to_string()),
             });
         }
+        for call in spring_builder_method_calls(text, predicate) {
+            let Some(route) = first_string_literal(call.args) else {
+                continue;
+            };
+            let Some(handler_name) = handler_method_in_args(call.args) else {
+                continue;
+            };
+            let handler = method_in_package(methods, &handler_name, package_name)
+                .or_else(|| methods.get(&handler_name).copied());
+            let route = builder_prefix_for(&builder_path_prefixes, call.start)
+                .map(|prefix| join_route_paths(prefix, &route))
+                .unwrap_or_else(|| normalize_spring_functional_route(&route));
+            out.push(RouteCandidate {
+                route,
+                method: Some((*predicate).to_string()),
+                handler_id: handler.map(|node| node.aka_id.clone()),
+                handler_name: handler.map(|node| node.display_name().to_string()),
+            });
+        }
     }
     out
 }
+
+const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
 #[derive(Debug)]
 struct NestPrefix {
@@ -90,6 +112,80 @@ fn spring_nest_prefixes(text: &str) -> Vec<NestPrefix> {
         });
     }
     out
+}
+
+#[derive(Debug)]
+struct BuilderPathPrefix {
+    start: usize,
+    end: usize,
+    prefix: String,
+}
+
+#[derive(Debug)]
+struct SpringBuilderMethodCall<'a> {
+    start: usize,
+    args: &'a str,
+}
+
+fn spring_builder_path_prefixes(text: &str) -> Vec<BuilderPathPrefix> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(rel) = text[offset..].find(".path") {
+        let start = offset + rel;
+        let open = skip_java_ws(text, start + ".path".len());
+        if text.as_bytes().get(open) != Some(&b'(') {
+            offset = start + ".path".len();
+            continue;
+        }
+        let Some(close) = find_matching_paren(text, open) else {
+            offset = open + 1;
+            continue;
+        };
+        if let Some(prefix) = first_string_literal(&text[open + 1..close]) {
+            out.push(BuilderPathPrefix {
+                start,
+                end: close,
+                prefix: normalize_spring_functional_route(&prefix),
+            });
+        }
+        offset = close + 1;
+    }
+    out
+}
+
+fn spring_builder_method_calls<'a>(
+    text: &'a str,
+    method: &str,
+) -> Vec<SpringBuilderMethodCall<'a>> {
+    let mut out = Vec::new();
+    let marker = format!(".{method}");
+    let mut offset = 0usize;
+    while let Some(rel) = text[offset..].find(&marker) {
+        let start = offset + rel;
+        let open = skip_java_ws(text, start + marker.len());
+        if text.as_bytes().get(open) != Some(&b'(') {
+            offset = start + marker.len();
+            continue;
+        }
+        let Some(close) = find_matching_paren(text, open) else {
+            offset = open + 1;
+            continue;
+        };
+        out.push(SpringBuilderMethodCall {
+            start,
+            args: &text[open + 1..close],
+        });
+        offset = close + 1;
+    }
+    out
+}
+
+fn builder_prefix_for(prefixes: &[BuilderPathPrefix], offset: usize) -> Option<&str> {
+    prefixes
+        .iter()
+        .filter(|prefix| offset >= prefix.start && offset <= prefix.end)
+        .max_by_key(|prefix| prefix.start)
+        .map(|prefix| prefix.prefix.as_str())
 }
 
 fn nest_path_prefix(args: &str) -> Option<String> {
@@ -234,16 +330,20 @@ fn first_string_literal(args: &str) -> Option<String> {
     read_string_literal(args, idx).map(|(literal, _)| literal)
 }
 
-fn handler_method_after(text: &str, predicate_start: usize) -> Option<String> {
-    let window_end = (predicate_start + 400).min(text.len());
-    let window = &text[predicate_start..window_end];
-    let marker = window.find("::")?;
-    let after = &window[marker + 2..];
+fn handler_method_in_args(args: &str) -> Option<String> {
+    let marker = args.find("::")?;
+    let after = &args[marker + 2..];
     let name: String = after
         .chars()
         .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
         .collect();
     (!name.is_empty()).then_some(name)
+}
+
+fn handler_method_after(text: &str, predicate_start: usize) -> Option<String> {
+    let window_end = (predicate_start + 400).min(text.len());
+    let window = &text[predicate_start..window_end];
+    handler_method_in_args(window)
 }
 
 fn normalize_spring_functional_route(route: &str) -> String {
@@ -279,4 +379,12 @@ fn strip_node_prefix(id_or_qn: &str) -> &str {
         }
     }
     id_or_qn
+}
+
+fn skip_java_ws(text: &str, mut idx: usize) -> usize {
+    let bytes = text.as_bytes();
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    idx
 }
