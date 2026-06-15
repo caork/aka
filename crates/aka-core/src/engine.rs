@@ -3424,9 +3424,26 @@ fn python_router_prefixes_by_file<'a>(
                 .or_default()
                 .push(file_path.clone());
         }
+        if let Some(package_key) = python_package_file_key(file_path) {
+            long_to_files
+                .entry(package_key.clone())
+                .or_default()
+                .push(file_path.clone());
+            short_to_files
+                .entry(
+                    package_key
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&package_key)
+                        .to_string(),
+                )
+                .or_default()
+                .push(file_path.clone());
+        }
     }
 
     let mut out: BTreeMap<String, PythonRoutePrefixes> = BTreeMap::new();
+    let mut include_edges: BTreeMap<String, Vec<PythonIncludeRouterEdge>> = BTreeMap::new();
     for file_path in &python_files {
         let Some(text) = read_repo_text(repo, file_path) else {
             continue;
@@ -3437,41 +3454,61 @@ fn python_router_prefixes_by_file<'a>(
         }
         let imports = python_router_imports(&text);
         for include in extract_python_router_includes(&text) {
-            let targets: Vec<String> =
-                if let Some((module_expr, _)) = python_router_module_expr(&include.router_expr) {
-                    let module_name = module_expr.rsplit('.').next().unwrap_or(module_expr);
-                    imports
-                        .module_aliases
-                        .get(module_name)
-                        .and_then(|long_key| long_to_files.get(long_key))
-                        .cloned()
-                        .or_else(|| short_to_files.get(module_name).cloned())
-                        .unwrap_or_default()
-                } else if let Some(import) = imports.router_names.get(&include.router_expr) {
-                    if let Some(long_key) = &import.long_key {
-                        long_to_files.get(long_key).cloned().unwrap_or_default()
-                    } else {
-                        short_to_files
-                            .get(&import.short_key)
-                            .cloned()
-                            .unwrap_or_default()
-                    }
-                } else {
-                    Vec::new()
-                };
+            let targets = python_include_targets(
+                &include.router_expr,
+                &imports,
+                &short_to_files,
+                &long_to_files,
+            );
             for target in targets {
-                out.entry(target)
+                include_edges
+                    .entry(file_path.clone())
                     .or_default()
-                    .include
-                    .push(normalize_route_literal(&include.prefix));
+                    .push(PythonIncludeRouterEdge {
+                        target_file: target.clone(),
+                        prefix: normalize_route_literal(&include.prefix),
+                    });
             }
         }
+    }
+    let transitive_prefixes =
+        transitive_python_include_prefixes(&python_files, &include_edges, &out);
+    for (file_path, prefixes) in transitive_prefixes {
+        out.entry(file_path).or_default().include.extend(prefixes);
     }
     for prefixes in out.values_mut() {
         prefixes.include.sort();
         prefixes.include.dedup();
     }
     out
+}
+
+fn python_include_targets(
+    router_expr: &str,
+    imports: &PythonRouterImports,
+    short_to_files: &HashMap<String, Vec<String>>,
+    long_to_files: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    if let Some((module_expr, _)) = python_router_module_expr(router_expr) {
+        let module_name = module_expr.rsplit('.').next().unwrap_or(module_expr);
+        return imports
+            .module_aliases
+            .get(module_name)
+            .and_then(|long_key| long_to_files.get(long_key))
+            .cloned()
+            .or_else(|| short_to_files.get(module_name).cloned())
+            .unwrap_or_default();
+    }
+    if let Some(import) = imports.router_names.get(router_expr) {
+        if let Some(long_key) = &import.long_key {
+            return long_to_files.get(long_key).cloned().unwrap_or_default();
+        }
+        return short_to_files
+            .get(&import.short_key)
+            .cloned()
+            .unwrap_or_default();
+    }
+    Vec::new()
 }
 
 #[derive(Debug, Default)]
@@ -3520,6 +3557,12 @@ fn collect_repo_python_source_files(repo: &Path, dir: &Path, out: &mut Vec<Strin
 #[derive(Debug)]
 struct PythonIncludeRouter {
     router_expr: String,
+    prefix: String,
+}
+
+#[derive(Debug)]
+struct PythonIncludeRouterEdge {
+    target_file: String,
     prefix: String,
 }
 
@@ -3690,6 +3733,85 @@ fn extract_python_router_includes(text: &str) -> Vec<PythonIncludeRouter> {
     out
 }
 
+fn transitive_python_include_prefixes(
+    file_paths: &[String],
+    include_edges: &BTreeMap<String, Vec<PythonIncludeRouterEdge>>,
+    prefixes_by_file: &BTreeMap<String, PythonRoutePrefixes>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut has_parent = BTreeSet::new();
+    for edges in include_edges.values() {
+        for edge in edges {
+            has_parent.insert(edge.target_file.clone());
+        }
+    }
+    let roots: Vec<String> = file_paths
+        .iter()
+        .filter(|file_path| !has_parent.contains(*file_path))
+        .cloned()
+        .collect();
+    let mut out = BTreeMap::new();
+    for root in roots {
+        collect_python_include_prefixes(
+            &root,
+            "",
+            include_edges,
+            prefixes_by_file,
+            &mut BTreeSet::new(),
+            &mut out,
+        );
+    }
+    out
+}
+
+fn collect_python_include_prefixes(
+    file_path: &str,
+    prefix: &str,
+    include_edges: &BTreeMap<String, Vec<PythonIncludeRouterEdge>>,
+    prefixes_by_file: &BTreeMap<String, PythonRoutePrefixes>,
+    stack: &mut BTreeSet<String>,
+    out: &mut BTreeMap<String, Vec<String>>,
+) {
+    if !stack.insert(file_path.to_string()) {
+        return;
+    }
+    if let Some(edges) = include_edges.get(file_path) {
+        for edge in edges {
+            let next_prefix = join_route_paths(prefix, &edge.prefix);
+            out.entry(edge.target_file.clone())
+                .or_default()
+                .push(next_prefix.clone());
+            let child_prefix = python_file_router_prefix(prefixes_by_file, &edge.target_file)
+                .map(|local| join_route_paths(&next_prefix, local))
+                .unwrap_or_else(|| next_prefix.clone());
+            collect_python_include_prefixes(
+                &edge.target_file,
+                &child_prefix,
+                include_edges,
+                prefixes_by_file,
+                stack,
+                out,
+            );
+        }
+    }
+    stack.remove(file_path);
+}
+
+fn python_file_router_prefix<'a>(
+    prefixes_by_file: &'a BTreeMap<String, PythonRoutePrefixes>,
+    file_path: &str,
+) -> Option<&'a str> {
+    let prefixes = prefixes_by_file.get(file_path)?;
+    prefixes
+        .local_by_router
+        .get("router")
+        .or_else(|| {
+            (prefixes.local_by_router.len() == 1)
+                .then(|| prefixes.local_by_router.values().next())
+                .flatten()
+        })
+        .map(String::as_str)
+}
+
 fn extract_python_router_mounts(
     text: &str,
     call_name: &str,
@@ -3708,13 +3830,10 @@ fn extract_python_router_mounts(
             continue;
         };
         let args = &text[open + 1..close];
-        if let (Some(router_expr), Some(prefix)) = (
-            first_call_argument(args),
-            keyword_string_arg(args, prefix_kw),
-        ) {
+        if let Some(router_expr) = first_call_argument(args) {
             out.push(PythonIncludeRouter {
                 router_expr,
-                prefix,
+                prefix: keyword_string_arg(args, prefix_kw).unwrap_or_else(|| "/".into()),
             });
         }
         offset = close + 1;
@@ -3777,6 +3896,14 @@ fn python_file_long_key(rel: &str) -> Option<String> {
     let (parent_path, stem) = no_ext.rsplit_once('/')?;
     let parent = parent_path.rsplit('/').next().unwrap_or(parent_path);
     Some(format!("{parent}/{stem}"))
+}
+
+fn python_package_file_key(rel: &str) -> Option<String> {
+    let normalized = rel.replace('\\', "/");
+    normalized
+        .strip_suffix("/__init__.py")
+        .filter(|package| !package.is_empty())
+        .map(str::to_string)
 }
 
 fn python_module_long_key(module: &str) -> Option<String> {

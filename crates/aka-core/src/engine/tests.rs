@@ -1027,6 +1027,84 @@ def get_order(id: str):
 }
 
 #[test]
+fn synthesizes_nested_fastapi_include_router_prefixes() {
+    let repo = temp_repo("fastapi-nested-routes");
+    std::fs::create_dir_all(repo.join("api/v1")).unwrap();
+    std::fs::write(
+        repo.join("main.py"),
+        r#"from fastapi import FastAPI
+from api import v1
+
+app = FastAPI()
+app.include_router(v1.router, prefix="/api")
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("api/v1/__init__.py"),
+        r#"from fastapi import APIRouter
+from api.v1 import orders
+
+router = APIRouter(prefix="/v1")
+router.include_router(orders.router)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("api/v1/orders.py"),
+        r#"from fastapi import APIRouter
+
+router = APIRouter(prefix="/orders")
+
+@router.get("/{id}")
+def get_order(id: str):
+    return {"id": id}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Function",
+        "get_order",
+        "api.v1.orders.get_order",
+        "api/v1/orders.py",
+        json!({
+            "decorators": ["@router.get(\"/{id}\")"],
+            "language": "python",
+            "route_method": "GET",
+            "route_path": "/{id}",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/v1/orders/{id}")
+        .unwrap_or_else(|| {
+            panic!(
+                "fastapi route with nested include_router prefixes; got {:?}",
+                synth
+                    .routes
+                    .iter()
+                    .map(|route| route.route.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(route.method.as_deref(), Some("GET"));
+    assert_eq!(
+        route.handler_id.as_deref(),
+        Some("cbm:1:api.v1.orders.get_order")
+    );
+    assert!(synth.routes.iter().all(|route| {
+        route.route != "/v1/orders/{id}" && route.route != "/orders/{id}" && route.route != "/{id}"
+    }));
+}
+
+#[test]
 fn synthesizes_django_urlconf_routes() {
     let repo = temp_repo("django-urlconf-routes");
     std::fs::create_dir_all(repo.join("orders")).unwrap();
