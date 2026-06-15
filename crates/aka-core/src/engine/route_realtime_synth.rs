@@ -1,13 +1,17 @@
 use std::collections::BTreeMap;
 
-use super::{join_route_paths, normalize_route_literal, RouteCandidate, SynthNode};
+use super::{
+    join_route_paths, normalize_route_literal, python_route_prefixes_for_node, PythonRoutePrefixes,
+    RouteCandidate, SynthNode,
+};
 
 pub(super) fn realtime_routes_by_file(
     nodes_by_file: &BTreeMap<String, Vec<&SynthNode>>,
+    python_prefixes_by_file: &BTreeMap<String, PythonRoutePrefixes>,
 ) -> BTreeMap<String, Vec<RouteCandidate>> {
     let mut out = BTreeMap::new();
     for (file_path, nodes) in nodes_by_file {
-        let routes = realtime_routes(nodes);
+        let routes = realtime_routes(nodes, python_prefixes_by_file.get(file_path));
         if !routes.is_empty() {
             out.insert(file_path.clone(), routes);
         }
@@ -15,7 +19,10 @@ pub(super) fn realtime_routes_by_file(
     out
 }
 
-fn realtime_routes(nodes: &[&SynthNode]) -> Vec<RouteCandidate> {
+fn realtime_routes(
+    nodes: &[&SynthNode],
+    python_prefixes: Option<&PythonRoutePrefixes>,
+) -> Vec<RouteCandidate> {
     let mut class_prefixes: BTreeMap<String, String> = BTreeMap::new();
     for node in nodes
         .iter()
@@ -36,23 +43,37 @@ fn realtime_routes(nodes: &[&SynthNode]) -> Vec<RouteCandidate> {
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
     {
         for mapping in realtime_method_mappings(&node.decorators) {
-            let prefix = node
-                .parent_class
-                .as_ref()
-                .and_then(|parent| class_prefixes.get(parent))
-                .map(String::as_str)
-                .unwrap_or("");
-            routes.push(RouteCandidate {
-                route: join_realtime_paths(prefix, &mapping.path),
-                method: Some(mapping.method),
-                handler_id: Some(node.aka_id.clone()),
-                handler_name: Some(node.display_name().to_string()),
-            });
+            let prefixes = realtime_prefixes_for_node(node, &class_prefixes, python_prefixes);
+            for prefix in prefixes {
+                routes.push(RouteCandidate {
+                    route: join_realtime_paths(&prefix, &mapping.path),
+                    method: Some(mapping.method.clone()),
+                    handler_id: Some(node.aka_id.clone()),
+                    handler_name: Some(node.display_name().to_string()),
+                });
+            }
         }
     }
     routes.sort_by(|a, b| a.route.cmp(&b.route).then_with(|| a.method.cmp(&b.method)));
     routes.dedup_by(|a, b| a.route == b.route && a.method == b.method);
     routes
+}
+
+fn realtime_prefixes_for_node(
+    node: &SynthNode,
+    class_prefixes: &BTreeMap<String, String>,
+    python_prefixes: Option<&PythonRoutePrefixes>,
+) -> Vec<String> {
+    if is_python_node(node) {
+        python_route_prefixes_for_node(python_prefixes, node)
+    } else {
+        vec![node
+            .parent_class
+            .as_ref()
+            .and_then(|parent| class_prefixes.get(parent))
+            .cloned()
+            .unwrap_or_default()]
+    }
 }
 
 struct RealtimeMapping {
@@ -87,7 +108,7 @@ fn realtime_mapping_path(decorators: &[String]) -> Option<String> {
             name.to_ascii_lowercase().as_str(),
             "messagemapping" | "serverendpoint"
         )
-            .then(|| annotation_path(decorator).unwrap_or_else(|| "/".into()))
+        .then(|| annotation_path(decorator).unwrap_or_else(|| "/".into()))
     })
 }
 
@@ -162,4 +183,9 @@ fn join_realtime_paths(prefix: &str, suffix: &str) -> String {
     } else {
         join_route_paths(prefix, suffix)
     }
+}
+
+fn is_python_node(node: &SynthNode) -> bool {
+    node.language.eq_ignore_ascii_case("python")
+        || node.file_path.to_ascii_lowercase().ends_with(".py")
 }

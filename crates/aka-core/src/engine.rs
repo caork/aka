@@ -2469,7 +2469,7 @@ fn synthesize_routes_from_sources(
     let django_routes_by_file = django_urlconf_routes_from_repo(repo, &project_sources, &by_file);
     let spring_functional_routes_by_file =
         spring_functional_routes_from_repo(repo, &project_sources, nodes);
-    let realtime_routes_by_file = realtime_routes_by_file(&by_file);
+    let realtime_routes_by_file = realtime_routes_by_file(&by_file, &python_prefixes);
     let mut routes: BTreeMap<(String, String), SynthRoute> = BTreeMap::new();
     for native in native_routes {
         let route = route_from_path(&native.file_path)
@@ -3249,7 +3249,7 @@ fn strip_aka_node_prefix(id_or_qn: &str) -> &str {
     id_or_qn
 }
 
-fn python_route_prefixes_for_node(
+pub(super) fn python_route_prefixes_for_node(
     python_prefixes: Option<&PythonRoutePrefixes>,
     node: &SynthNode,
 ) -> Vec<String> {
@@ -3367,9 +3367,9 @@ fn python_router_prefixes_by_file<'a>(
 }
 
 #[derive(Debug, Default)]
-struct PythonRoutePrefixes {
-    include: Vec<String>,
-    local_by_router: HashMap<String, String>,
+pub(super) struct PythonRoutePrefixes {
+    pub(super) include: Vec<String>,
+    pub(super) local_by_router: HashMap<String, String>,
 }
 
 fn repo_python_source_files(repo: &Path) -> Vec<String> {
@@ -3545,6 +3545,8 @@ fn router_name_from_python_decorators(decorators: &[String]) -> Option<&str> {
                 | "options"
                 | "api_route"
                 | "route"
+                | "websocket"
+                | "websocket_route"
         ) {
             Some(receiver)
         } else {

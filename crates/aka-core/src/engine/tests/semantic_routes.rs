@@ -32,7 +32,12 @@ class OrderSocket {
     insert_node_props_at(
         &conn,
         1,
-        ("Class", "OrderSocket", "com.example.realtime.OrderSocket", file),
+        (
+            "Class",
+            "OrderSocket",
+            "com.example.realtime.OrderSocket",
+            file,
+        ),
         (6, 16),
         json!({
             "decorators": ["@MessageMapping(\"/ws\")"],
@@ -137,5 +142,60 @@ async def order_socket(websocket: WebSocket, order_id: str):
     assert_eq!(
         route.handler_id.as_deref(),
         Some("cbm:1:realtime.order_socket")
+    );
+}
+
+#[test]
+fn synthesizes_fastapi_websocket_router_prefixes() {
+    let repo = temp_repo("python-fastapi-websocket-prefixes");
+    std::fs::create_dir_all(repo.join("orders")).unwrap();
+    std::fs::write(repo.join("orders/__init__.py"), "").unwrap();
+    std::fs::write(
+        repo.join("main.py"),
+        r#"from fastapi import FastAPI
+from orders import realtime
+
+app = FastAPI()
+app.include_router(realtime.router, prefix="/api")
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("orders/realtime.py"),
+        r#"from fastapi import APIRouter, WebSocket
+
+router = APIRouter(prefix="/orders")
+
+@router.websocket("/{order_id}/events")
+async def order_events(websocket: WebSocket, order_id: str):
+    await websocket.accept()
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "order_events",
+        "orders.realtime.order_events",
+        "orders/realtime.py",
+        (6, 7),
+        json!({
+            "decorators": ["@router.websocket(\"/{order_id}/events\")"],
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{order_id}/events")
+        .expect("fastapi websocket route with include and local prefixes");
+    assert_eq!(route.method.as_deref(), Some("WEBSOCKET"));
+    assert_eq!(
+        route.handler_id.as_deref(),
+        Some("cbm:1:orders.realtime.order_events")
     );
 }
