@@ -381,6 +381,11 @@ fn export_artifacts(
         edges: count_edges(&conn, project)?,
         chunks: count_chunkable_nodes(&conn, project)?,
     };
+    if let Err(err) = warn_missing_source_extensions(repo, &conn, project, on_event) {
+        on_event(&EngineEvent::Warning {
+            message: format!("source language coverage check failed: {err}"),
+        });
+    }
 
     emit_phase(
         on_event,
@@ -503,6 +508,158 @@ fn count_files(conn: &Connection, project: &str) -> Result<u64, rusqlite::Error>
     )
 }
 
+fn warn_missing_source_extensions(
+    repo: &Path,
+    conn: &Connection,
+    project: &str,
+    on_event: &mut impl FnMut(&EngineEvent),
+) -> Result<(), EngineError> {
+    let repo_exts = repo_source_extensions(repo)?;
+    if repo_exts.is_empty() {
+        return Ok(());
+    }
+    let indexed_exts = indexed_source_extensions(conn, project)?;
+    for (ext, language) in [
+        ("java", "Java"),
+        ("py", "Python"),
+        ("go", "Go"),
+        ("rs", "Rust"),
+        ("ts", "TypeScript"),
+        ("tsx", "TSX"),
+        ("js", "JavaScript"),
+        ("jsx", "JSX"),
+    ] {
+        if repo_exts.contains(ext) && !indexed_exts.contains(ext) {
+            on_event(&EngineEvent::Warning {
+                message: format!(
+                    "CBM indexed 0 {language} source files even though the repository contains .{ext} files; graph/search may be incomplete. Try AKA_CBM_MODE=full or sync/fix the CBM engine discovery rules."
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn indexed_source_extensions(
+    conn: &Connection,
+    project: &str,
+) -> Result<HashSet<String>, EngineError> {
+    let mut exts = HashSet::new();
+    if let Some(file_hash_col) = file_hashes_path_column(conn)? {
+        let sql = format!("SELECT {file_hash_col} FROM file_hashes WHERE project = ?1");
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([project])?;
+        while let Some(row) = rows.next()? {
+            if let Some(ext) = source_extension(&text_col(row, 0)?) {
+                exts.insert(ext);
+            }
+        }
+    }
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT file_path FROM nodes WHERE project = ?1 AND file_path != ''")?;
+    let mut rows = stmt.query([project])?;
+    while let Some(row) = rows.next()? {
+        if let Some(ext) = source_extension(&text_col(row, 0)?) {
+            exts.insert(ext);
+        }
+    }
+    Ok(exts)
+}
+
+fn file_hashes_path_column(conn: &Connection) -> Result<Option<&'static str>, EngineError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(file_hashes)")?;
+    let mut rows = stmt.query([])?;
+    let mut has_rel_path = false;
+    let mut has_file_path = false;
+    while let Some(row) = rows.next()? {
+        let name = text_col(row, 1)?;
+        if name == "rel_path" {
+            has_rel_path = true;
+        } else if name == "file_path" {
+            has_file_path = true;
+        }
+    }
+    Ok(if has_rel_path {
+        Some("rel_path")
+    } else if has_file_path {
+        Some("file_path")
+    } else {
+        None
+    })
+}
+
+fn repo_source_extensions(repo: &Path) -> Result<HashSet<String>, EngineError> {
+    let mut exts = HashSet::new();
+    collect_repo_source_extensions(repo, repo, &mut exts)?;
+    Ok(exts)
+}
+
+fn collect_repo_source_extensions(
+    repo: &Path,
+    dir: &Path,
+    exts: &mut HashSet<String>,
+) -> Result<(), EngineError> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if is_source_discovery_skip_dir(name) {
+                continue;
+            }
+            collect_repo_source_extensions(repo, &path, exts)?;
+        } else if file_type.is_file() {
+            let Ok(rel) = path.strip_prefix(repo) else {
+                continue;
+            };
+            if let Some(ext) = source_extension(&rel.to_string_lossy()) {
+                exts.insert(ext);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn source_extension(path: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    let ext = Path::new(&path)
+        .extension()
+        .and_then(|v| v.to_str())?
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "java" | "py" | "go" | "rs" | "ts" | "tsx" | "js" | "jsx"
+    )
+    .then_some(ext)
+}
+
+fn is_source_discovery_skip_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | ".hg"
+            | ".svn"
+            | "node_modules"
+            | "vendor"
+            | "vendors"
+            | "target"
+            | "build"
+            | "dist"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+            | ".idea"
+            | ".vscode"
+            | ".next"
+            | ".nuxt"
+            | ".turbo"
+            | "coverage"
+    )
+}
+
 fn export_nodes(
     conn: &Connection,
     project: &str,
@@ -571,6 +728,12 @@ fn export_nodes(
     }
     for process in &synth.processes {
         let node = process.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
+    for property in &synth.properties {
+        let node = property.node_rec();
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
         count += 1;
@@ -651,6 +814,11 @@ fn export_edges(
         emit_export_progress(on_event, "edges", count, total);
     }
     for edge in semantic.edge_recs() {
+        serde_json::to_writer(&mut out, &edge)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
+    for edge in synth.properties.iter().map(SynthProperty::edge_rec) {
         serde_json::to_writer(&mut out, &edge)?;
         out.write_all(b"\n")?;
         count += 1;
@@ -908,6 +1076,7 @@ struct SynthGraph {
     processes: Vec<SynthProcess>,
     routes: Vec<SynthRoute>,
     tools: Vec<SynthTool>,
+    properties: Vec<SynthProperty>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -1269,6 +1438,60 @@ impl SynthProcess {
     }
 }
 
+#[derive(Debug, Clone)]
+struct SynthProperty {
+    id: String,
+    owner_id: String,
+    owner_name: String,
+    name: String,
+    declared_type: Option<String>,
+    file_path: String,
+    start_line: u32,
+    end_line: u32,
+}
+
+impl SynthProperty {
+    fn node_rec(&self) -> NodeRec {
+        let mut properties = Map::new();
+        properties.insert("name".into(), Value::String(self.name.clone()));
+        properties.insert("qualifiedName".into(), Value::String(self.id.clone()));
+        properties.insert("filePath".into(), Value::String(self.file_path.clone()));
+        properties.insert("startLine".into(), Value::from(self.start_line));
+        properties.insert("endLine".into(), Value::from(self.end_line));
+        properties.insert("ownerId".into(), Value::String(self.owner_id.clone()));
+        properties.insert("ownerName".into(), Value::String(self.owner_name.clone()));
+        properties.insert(
+            "source".into(),
+            Value::String("aka-python-property-synth".into()),
+        );
+        if let Some(declared_type) = &self.declared_type {
+            properties.insert("declaredType".into(), Value::String(declared_type.clone()));
+        }
+        NodeRec {
+            id: self.id.clone(),
+            label: "Property".into(),
+            properties,
+        }
+    }
+
+    fn edge_rec(&self) -> EdgeRec {
+        EdgeRec {
+            id: format!("{}:has-property", self.id),
+            source_id: self.owner_id.clone(),
+            target_id: self.id.clone(),
+            edge_type: "HAS_PROPERTY".into(),
+            confidence: 0.82,
+            reason: "aka Python class property synthesis".into(),
+            step: None,
+            evidence: Some(json!({
+                "source": "aka-python-property-synth",
+                "owner": self.owner_name,
+                "declaredType": self.declared_type,
+            })),
+        }
+    }
+}
+
 fn synthesize_graph_with_progress(
     conn: &Connection,
     project: &str,
@@ -1292,8 +1515,13 @@ fn synthesize_graph_with_progress(
         0,
     );
     let nodes = load_synth_nodes(conn, project)?;
+    let existing_node_ids = load_existing_node_ids(conn, project)?;
+    let properties = synthesize_python_properties(conn, project, repo, &existing_node_ids)?;
     if nodes.is_empty() {
-        return Ok(SynthGraph::default());
+        return Ok(SynthGraph {
+            properties,
+            ..SynthGraph::default()
+        });
     }
     emit_phase(
         on_event,
@@ -1337,11 +1565,13 @@ fn synthesize_graph_with_progress(
     let processes = if native_processes {
         Vec::new()
     } else {
+        let symbol_count = count_process_symbol_basis(conn, project)?;
         synthesize_processes_from_calls(
             &nodes,
             &calls.adjacency,
             &calls.indegree,
             &community_memberships,
+            symbol_count,
         )
     };
     emit_phase(
@@ -1364,6 +1594,7 @@ fn synthesize_graph_with_progress(
         processes,
         routes,
         tools,
+        properties,
     })
 }
 
@@ -1482,6 +1713,178 @@ fn load_synth_nodes(
         );
     }
     Ok(nodes)
+}
+
+fn load_existing_node_ids(
+    conn: &Connection,
+    project: &str,
+) -> Result<HashSet<String>, EngineError> {
+    let mut ids = HashSet::new();
+    let mut stmt = conn.prepare("SELECT id, qualified_name FROM nodes WHERE project = ?1")?;
+    let mut rows = stmt.query([project])?;
+    while let Some(row) = rows.next()? {
+        let cbm_id: i64 = row.get(0)?;
+        let qn = text_col(row, 1)?;
+        ids.insert(aka_node_id(cbm_id, &qn));
+    }
+    Ok(ids)
+}
+
+fn count_process_symbol_basis(conn: &Connection, project: &str) -> Result<usize, EngineError> {
+    let count: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE project = ?1 AND label != 'File'",
+        [project],
+        |row| row.get(0),
+    )?;
+    Ok(count as usize)
+}
+
+fn synthesize_python_properties(
+    conn: &Connection,
+    project: &str,
+    repo: &Path,
+    existing_node_ids: &HashSet<String>,
+) -> Result<Vec<SynthProperty>, EngineError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, qualified_name, file_path, start_line, end_line \
+         FROM nodes \
+         WHERE project = ?1 AND label = 'Class' AND file_path LIKE '%.py' AND file_path != '' \
+         ORDER BY file_path, start_line, id",
+    )?;
+    let mut rows = stmt.query([project])?;
+    let mut sources = SourceCache::new(repo);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    while let Some(row) = rows.next()? {
+        let cbm_id: i64 = row.get(0)?;
+        let owner_name = text_col(row, 1)?;
+        let owner_qn = text_col(row, 2)?;
+        let file_path = text_col(row, 3)?;
+        let start_line: i64 = row.get(4)?;
+        let end_line: i64 = row.get(5)?;
+        if owner_name.is_empty()
+            || owner_name.starts_with('[')
+            || start_line <= 0
+            || end_line < start_line
+        {
+            continue;
+        }
+        let Some(text) = sources.read_file(&file_path) else {
+            continue;
+        };
+        let owner_id = aka_node_id(cbm_id, &owner_qn);
+        for prop in extract_python_class_properties(
+            &text,
+            &file_path,
+            &owner_id,
+            &owner_name,
+            start_line as usize,
+            end_line as usize,
+        ) {
+            if !existing_node_ids.contains(&prop.id) && seen.insert(prop.id.clone()) {
+                out.push(prop);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn extract_python_class_properties(
+    text: &str,
+    file_path: &str,
+    owner_id: &str,
+    owner_name: &str,
+    start_line_1based: usize,
+    end_line_1based: usize,
+) -> Vec<SynthProperty> {
+    let lines: Vec<&str> = text.lines().collect();
+    if start_line_1based == 0 || start_line_1based > lines.len() {
+        return Vec::new();
+    }
+    let class_idx = start_line_1based - 1;
+    let class_indent = leading_spaces(lines[class_idx]);
+    let mut out = Vec::new();
+    let upper = end_line_1based.min(lines.len());
+    for (line_no, line) in lines.iter().enumerate().take(upper).skip(class_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('@') {
+            continue;
+        }
+        let indent = leading_spaces(line);
+        if indent <= class_indent {
+            break;
+        }
+        if indent != class_indent + 4 {
+            continue;
+        }
+        let Some((name, declared_type)) = parse_python_property_line(trimmed) else {
+            continue;
+        };
+        let key = format!("{owner_id}:{name}:{}", line_no + 1);
+        out.push(SynthProperty {
+            id: format!("python-property:{:016x}", stable_hash(&key)),
+            owner_id: owner_id.to_string(),
+            owner_name: owner_name.to_string(),
+            name,
+            declared_type,
+            file_path: file_path.to_string(),
+            start_line: line_no as u32,
+            end_line: line_no as u32,
+        });
+    }
+    out
+}
+
+fn parse_python_property_line(line: &str) -> Option<(String, Option<String>)> {
+    if line.starts_with("def ")
+        || line.starts_with("class ")
+        || line.starts_with("async ")
+        || line.starts_with("return ")
+        || line.starts_with("pass")
+    {
+        return None;
+    }
+    let code = line.split('#').next()?.trim();
+    let (left, right) = split_assignment_or_annotation(code)?;
+    let name = left.trim();
+    if !is_python_ident(name) || name.starts_with("__") {
+        return None;
+    }
+    let declared_type = right
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.trim_end_matches(',').to_string());
+    Some((name.to_string(), declared_type))
+}
+
+fn split_assignment_or_annotation(code: &str) -> Option<(&str, Option<&str>)> {
+    if let Some((name, rest)) = code.split_once(':') {
+        let declared = rest.split('=').next().map(str::trim);
+        return Some((name, declared));
+    }
+    let (name, rhs) = code.split_once('=')?;
+    let rhs = rhs.trim_start();
+    if rhs.starts_with("Column(")
+        || rhs.starts_with("relationship(")
+        || rhs.starts_with("mapped_column(")
+        || rhs.starts_with("Field(")
+    {
+        return Some((name, None));
+    }
+    None
+}
+
+fn is_python_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn leading_spaces(line: &str) -> usize {
+    line.chars().take_while(|ch| *ch == ' ').count()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1764,12 +2167,13 @@ fn synthesize_processes_from_calls(
     adjacency: &BTreeMap<String, BTreeSet<String>>,
     indegree: &BTreeMap<String, usize>,
     community_memberships: &BTreeMap<String, Vec<CommunityRef>>,
+    symbol_count: usize,
 ) -> Vec<SynthProcess> {
     if adjacency.is_empty() {
         return Vec::new();
     }
 
-    let max_processes = dynamic_process_cap(nodes.len());
+    let max_processes = dynamic_process_cap(symbol_count);
     let mut starts = find_entry_points(nodes, adjacency, indegree);
     if starts.is_empty() {
         starts = adjacency.keys().cloned().collect();
@@ -3354,6 +3758,28 @@ impl<'a> SourceCache<'a> {
         }
         Some(lines[from..to].join("\n"))
     }
+
+    fn read_file(&mut self, file_path: &str) -> Option<String> {
+        if self.missing.contains(file_path) {
+            return None;
+        }
+        if !self.files.contains_key(file_path) {
+            let path = self.repo.join(file_path);
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    self.files.insert(
+                        file_path.to_string(),
+                        text.lines().map(str::to_string).collect(),
+                    );
+                }
+                Err(_) => {
+                    self.missing.insert(file_path.to_string());
+                    return None;
+                }
+            }
+        }
+        self.files.get(file_path).map(|lines| lines.join("\n"))
+    }
 }
 
 fn parse_props(text: &str) -> Map<String, Value> {
@@ -3475,6 +3901,10 @@ mod tests {
                 target_id INTEGER NOT NULL,
                 type TEXT NOT NULL,
                 properties TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE file_hashes (
+                project TEXT NOT NULL,
+                file_path TEXT NOT NULL
             );",
         )
         .unwrap();
@@ -3495,6 +3925,14 @@ mod tests {
             "INSERT INTO edges (id, project, source_id, target_id, type, properties)
              VALUES (?1, 'demo', ?2, ?3, ?4, '{}')",
             rusqlite::params![id, src, dst, ty],
+        )
+        .unwrap();
+    }
+
+    fn insert_file_hash(conn: &Connection, file_path: &str) {
+        conn.execute(
+            "INSERT INTO file_hashes (project, file_path) VALUES ('demo', ?1)",
+            [file_path],
         )
         .unwrap();
     }
@@ -3919,6 +4357,65 @@ mod tests {
     }
 
     #[test]
+    fn process_cap_uses_whole_graph_symbol_count_like_gitnexus() {
+        let conn = test_conn();
+        let mut id = 1_i64;
+        let mut edge_id = 1_i64;
+        for idx in 0..25 {
+            let entry = id;
+            insert_node(
+                &conn,
+                entry,
+                "Function",
+                &format!("entry{idx}"),
+                &format!("src/api/flow{idx}.ts::entry{idx}"),
+                &format!("src/api/flow{idx}.ts"),
+            );
+            id += 1;
+            let middle = id;
+            insert_node(
+                &conn,
+                middle,
+                "Function",
+                &format!("service{idx}"),
+                &format!("src/service/flow{idx}.ts::service{idx}"),
+                &format!("src/service/flow{idx}.ts"),
+            );
+            id += 1;
+            let terminal = id;
+            insert_node(
+                &conn,
+                terminal,
+                "Function",
+                &format!("save{idx}"),
+                &format!("src/db/flow{idx}.ts::save{idx}"),
+                &format!("src/db/flow{idx}.ts"),
+            );
+            id += 1;
+            insert_edge(&conn, edge_id, entry, middle, "CALLS");
+            edge_id += 1;
+            insert_edge(&conn, edge_id, middle, terminal, "CALLS");
+            edge_id += 1;
+        }
+        for idx in 0..175 {
+            insert_node(
+                &conn,
+                id,
+                "Property",
+                &format!("field{idx}"),
+                &format!("src/models/order.ts::Order::field{idx}"),
+                "src/models/order.ts",
+            );
+            id += 1;
+        }
+
+        let processes = synthesize_graph_quiet(&conn, std::path::Path::new("."))
+            .unwrap()
+            .processes;
+        assert_eq!(processes.len(), 25);
+    }
+
+    #[test]
     fn synthesizes_route_nodes_consumers_and_entry_flows() {
         let repo = temp_repo("routes");
         std::fs::create_dir_all(repo.join("src/pages/api/config")).unwrap();
@@ -4022,6 +4519,107 @@ const tool = {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "sync_orders");
         assert_eq!(tools[0].description, "Đồng bộ đơn hàng");
+    }
+
+    #[test]
+    fn synthesizes_python_class_properties_from_schema_and_orm_fields() {
+        let text = r#"class UserBase(BaseModel):
+    id: int
+    username: str
+    token_type: str = "Bearer"
+
+    class Config:
+        pass
+
+class User(Base):
+    __tablename__ = "users"
+    email = Column(String, unique=True)
+    carts = relationship("Cart")
+
+    def full_name(self):
+        return self.email
+"#;
+
+        let props = extract_python_class_properties(
+            text,
+            "app/schemas/auth.py",
+            "class:userbase",
+            "UserBase",
+            1,
+            7,
+        );
+        let names: Vec<_> = props.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["id", "username", "token_type"]);
+        assert_eq!(props[0].declared_type.as_deref(), Some("int"));
+        assert_eq!(props[2].declared_type.as_deref(), Some("str"));
+        assert_eq!(props[0].start_line, 1);
+
+        let orm = extract_python_class_properties(
+            text,
+            "app/models/models.py",
+            "class:user",
+            "User",
+            9,
+            15,
+        );
+        let names: Vec<_> = orm.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["email", "carts"]);
+    }
+
+    #[test]
+    fn warns_when_engine_misses_repo_source_language() {
+        let repo = temp_repo("missing-java-warning");
+        std::fs::create_dir_all(repo.join("src/main/java/com/example")).unwrap();
+        std::fs::write(
+            repo.join("src/main/java/com/example/App.java"),
+            "class App {}\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("application.yml"), "server: {}\n").unwrap();
+        let conn = test_conn();
+        insert_file_hash(&conn, "application.yml");
+
+        let mut warnings = Vec::new();
+        warn_missing_source_extensions(&repo, &conn, "demo", &mut |ev| {
+            if let EngineEvent::Warning { message } = ev {
+                warnings.push(message.clone());
+            }
+        })
+        .unwrap();
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("0 Java source files"));
+    }
+
+    #[test]
+    fn reads_cbm_file_hashes_rel_path_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                label TEXT NOT NULL,
+                name TEXT,
+                qualified_name TEXT,
+                file_path TEXT,
+                start_line INTEGER,
+                end_line INTEGER,
+                properties TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE file_hashes (
+                project TEXT NOT NULL,
+                rel_path TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO file_hashes (project, rel_path) VALUES ('demo', 'src/main/java/App.java')",
+            [],
+        )
+        .unwrap();
+
+        let exts = indexed_source_extensions(&conn, "demo").unwrap();
+        assert!(exts.contains("java"));
     }
 
     #[test]
