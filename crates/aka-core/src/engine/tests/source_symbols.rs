@@ -143,16 +143,88 @@ class OrderWorkflow {
         edge.edge_type == "CALLS" && edge.source_id == validate && edge.target_id == persist
     }));
     assert!(
-        synth
-            .processes
-            .iter()
-            .any(|process| { process.name.as_str() == "createOrder → persistOrder" }),
-        "processes: {:?}",
+        synth.processes.is_empty(),
+        "Java fallback CALLS without source entry facts must not become process entries: {:?}",
         synth
             .processes
             .iter()
             .map(|process| process.name.as_str())
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn synthesizes_java_runner_processes_from_fallback_source_symbols() {
+    let repo = temp_repo("java-source-symbol-runner-process-fallback");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/StartupMaintenance.java";
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+
+class StartupMaintenance implements ApplicationRunner {
+    public void run(ApplicationArguments args) {
+        loadOrders();
+    }
+
+    void loadOrders() {
+        persistOrders();
+    }
+
+    void persistOrders() {}
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", file]);
+
+    let conn = test_conn();
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+
+    let run = synth
+        .source_symbols
+        .iter()
+        .find(|symbol| symbol.node().qn == "com.example.orders.StartupMaintenance.run")
+        .expect("run fallback symbol")
+        .node()
+        .aka_id
+        .clone();
+    let load = synth
+        .source_symbols
+        .iter()
+        .find(|symbol| symbol.node().qn == "com.example.orders.StartupMaintenance.loadOrders")
+        .expect("loadOrders fallback symbol")
+        .node()
+        .aka_id
+        .clone();
+    let persist = synth
+        .source_symbols
+        .iter()
+        .find(|symbol| symbol.node().qn == "com.example.orders.StartupMaintenance.persistOrders")
+        .expect("persistOrders fallback symbol")
+        .node()
+        .aka_id
+        .clone();
+
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "CALLS" && edge.source_id == run && edge.target_id == load
+    }));
+    assert!(synth.edges.iter().any(|edge| {
+        edge.edge_type == "CALLS" && edge.source_id == load && edge.target_id == persist
+    }));
+    let process = synth
+        .processes
+        .iter()
+        .find(|process| process.name.as_str() == "run → persistOrders")
+        .expect("Spring ApplicationRunner source fact should seed fallback process");
+    assert_eq!(
+        process.node_rec().properties["entryReason"],
+        "java-spring-runner-source-declaration"
     );
 }
 

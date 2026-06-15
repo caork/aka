@@ -3940,6 +3940,12 @@ fn entry_score(
     if callee_count == 0 {
         return 0.0;
     }
+    if is_jvm_business_node(node)
+        && !has_jvm_source_entry_fact(node, command_entry_hint)
+        && !node.name.eq_ignore_ascii_case("main")
+    {
+        return 0.0;
+    }
     let base_score = callee_count as f64 / (caller_count as f64 + 1.0);
     let export_multiplier = if node.is_exported { 2.0 } else { 1.0 };
     let name_multiplier = if is_utility_name(&node.name) {
@@ -3966,6 +3972,54 @@ fn entry_score(
         * framework_multiplier
         * ast_multiplier
         * source_entry_multiplier
+}
+
+fn has_jvm_source_entry_fact(
+    node: &SynthNode,
+    command_entry_hint: Option<&CommandEntryHint>,
+) -> bool {
+    command_entry_hint.is_some()
+        || node.route_path.is_some()
+        || node.route_method.is_some()
+        || node.ast_framework_reason.is_some()
+        || node
+            .decorators
+            .iter()
+            .any(|decorator| jvm_entry_decorator_name(decorator).is_some())
+}
+
+fn jvm_entry_decorator_name(decorator: &str) -> Option<&str> {
+    let trimmed = decorator.trim().trim_start_matches('@');
+    let end = trimmed
+        .find('(')
+        .or_else(|| trimmed.find(char::is_whitespace))
+        .unwrap_or(trimmed.len());
+    let simple = trimmed[..end].rsplit('.').next().unwrap_or(trimmed);
+    matches!(
+        simple,
+        "GetMapping"
+            | "PostMapping"
+            | "PutMapping"
+            | "DeleteMapping"
+            | "PatchMapping"
+            | "RequestMapping"
+            | "MessageMapping"
+            | "SubscribeMapping"
+            | "KafkaListener"
+            | "KafkaHandler"
+            | "RabbitListener"
+            | "JmsListener"
+            | "SqsListener"
+            | "Scheduled"
+            | "Async"
+            | "EventListener"
+            | "TransactionalEventListener"
+            | "QueryMapping"
+            | "MutationMapping"
+            | "SchemaMapping"
+            | "BatchMapping"
+    )
+    .then_some(simple)
 }
 
 fn is_hard_entry_name(name: &str) -> bool {

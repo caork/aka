@@ -281,6 +281,10 @@ fn java_call_chains_without_source_entry_facts_do_not_fallback_to_name_only_proc
 
 class OrderService {
     void processOrders() {
+        validateOrders();
+    }
+
+    void validateOrders() {
         persistOrders();
     }
 
@@ -312,17 +316,33 @@ class OrderService {
         2,
         (
             "Method",
+            "validateOrders",
+            "com.example.orders.OrderService.validateOrders",
+            file,
+        ),
+        (8, 10),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.orders.OrderService",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
             "persistOrders",
             "com.example.orders.OrderService.persistOrders",
             file,
         ),
-        (8, 8),
+        (12, 12),
         json!({
             "language": "java",
             "parent_class": "com.example.orders.OrderService",
         }),
     );
     insert_edge(&conn, 1, 1, 2, "CALLS");
+    insert_edge(&conn, 2, 2, 3, "CALLS");
 
     let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
     assert!(
