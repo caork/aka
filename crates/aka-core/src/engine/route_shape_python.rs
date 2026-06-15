@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use super::route_shape_drf::extract_drf_serializer_keys_from_models;
 use super::{find_call_args, read_repo_text, split_top_level_commas};
+
+pub(super) type PythonModelFields = BTreeMap<String, Vec<String>>;
 
 pub(super) fn extract_python_response_model_keys(text: &str) -> Vec<String> {
     extract_python_response_model_keys_from_models(text, python_class_fields(text))
@@ -37,7 +40,7 @@ pub(super) fn extract_python_response_model_keys_for_file(
 
 fn extract_python_response_model_keys_from_models(
     text: &str,
-    models: BTreeMap<String, Vec<String>>,
+    models: PythonModelFields,
 ) -> Vec<String> {
     if models.is_empty() {
         return Vec::new();
@@ -57,37 +60,6 @@ fn extract_python_response_model_keys_from_models(
         }
     }
     keys.into_iter().collect()
-}
-
-fn extract_drf_serializer_keys_from_models(
-    text: &str,
-    models: &BTreeMap<String, Vec<String>>,
-) -> Vec<String> {
-    let mut keys = BTreeSet::new();
-    for serializer in drf_serializer_class_names(text) {
-        if let Some(fields) = models.get(&serializer) {
-            keys.extend(fields.iter().cloned());
-        }
-    }
-    keys.into_iter().collect()
-}
-
-fn drf_serializer_class_names(text: &str) -> Vec<String> {
-    let mut out = BTreeSet::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let Some((left, right)) = trimmed.split_once('=') else {
-            continue;
-        };
-        if left.trim() != "serializer_class" {
-            continue;
-        }
-        let name = right.trim().split('#').next().unwrap_or("").trim();
-        if let Some(simple) = python_model_name(name) {
-            out.insert(simple);
-        }
-    }
-    out.into_iter().collect()
 }
 
 #[derive(Debug)]
@@ -195,7 +167,7 @@ fn python_response_model_arg(args: &str) -> Option<String> {
     None
 }
 
-fn python_model_name(value: &str) -> Option<String> {
+pub(super) fn python_model_name(value: &str) -> Option<String> {
     let value = value.trim();
     let value = value
         .strip_prefix("list[")
@@ -214,7 +186,7 @@ fn python_model_name(value: &str) -> Option<String> {
     is_python_ident(simple).then(|| simple.to_string())
 }
 
-fn python_class_fields(text: &str) -> BTreeMap<String, Vec<String>> {
+fn python_class_fields(text: &str) -> PythonModelFields {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = BTreeMap::new();
     let mut idx = 0usize;
