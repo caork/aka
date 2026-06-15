@@ -228,7 +228,7 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                 }
             }
             if decorator.contains("RabbitListener") {
-                for topic in annotation_string_values(decorator, &["queues", "queue", "value"]) {
+                for topic in rabbit_listener_topics(decorator) {
                     out.push(TopicDetection {
                         topic,
                         broker: "rabbitmq".into(),
@@ -249,15 +249,7 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
         "java-kafka-template-send",
         0,
     ));
-    out.extend(extract_call_topic_literals(
-        text,
-        nodes,
-        "rabbitTemplate.convertAndSend",
-        "rabbitmq",
-        TopicEndpointKind::Producer,
-        "java-rabbit-template-send",
-        0,
-    ));
+    out.extend(extract_rabbit_template_topics(text, nodes));
     out
 }
 
@@ -353,6 +345,77 @@ fn annotation_string_values(annotation: &str, keys: &[&str]) -> Vec<String> {
     values.sort();
     values.dedup();
     values
+}
+
+fn rabbit_listener_topics(annotation: &str) -> Vec<String> {
+    let mut values = annotation_string_values(annotation, &["queues", "queue", "value"]);
+    values.extend(queue_binding_values(annotation));
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn queue_binding_values(annotation: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for call in find_call_args(annotation, "@Queue") {
+        let args = split_top_level_commas(call.args);
+        for arg in args {
+            let value = arg
+                .split_once('=')
+                .map(|(key, value)| {
+                    if key.trim().ends_with("value") {
+                        Some(value.trim())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(Some(arg.trim()));
+            if let Some(value) = value {
+                values.extend(string_literals(value));
+            }
+        }
+    }
+    for call in find_call_args(annotation, "@QueueBinding") {
+        for arg in split_top_level_commas(call.args) {
+            let Some((key, value)) = arg.split_once('=') else {
+                continue;
+            };
+            if key.trim().ends_with("key") {
+                values.extend(string_literals(value));
+            }
+        }
+    }
+    values
+}
+
+fn extract_rabbit_template_topics(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDetection> {
+    let mut out = Vec::new();
+    for call in find_call_args(text, "rabbitTemplate.convertAndSend") {
+        let Some(node) =
+            node_at_offset(text, nodes, call.start).or_else(|| pick_handler_node(nodes))
+        else {
+            continue;
+        };
+        let args = split_top_level_commas(call.args);
+        let topic_arg = if args.len() >= 3 {
+            args.get(1)
+        } else {
+            args.first()
+        };
+        let Some(topic_arg) = topic_arg else {
+            continue;
+        };
+        for topic in string_literals(topic_arg) {
+            out.push(TopicDetection {
+                topic,
+                broker: "rabbitmq".into(),
+                kind: TopicEndpointKind::Producer,
+                node_id: node.aka_id.clone(),
+                strategy: "java-rabbit-template-routing-key".into(),
+            });
+        }
+    }
+    out
 }
 
 fn extract_call_topic_literals(

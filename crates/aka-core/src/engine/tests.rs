@@ -2357,6 +2357,102 @@ class OrderEvents {
 }
 
 #[test]
+fn synthesizes_spring_rabbit_topics_from_routing_keys() {
+    let repo = temp_repo("java-rabbit-topics");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/RabbitEvents.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.amqp.rabbit.annotation.QueueBinding;
+import org.springframework.amqp.rabbit.annotation.Queue;
+import org.springframework.amqp.rabbit.annotation.Exchange;
+
+class RabbitEvents {
+    @RabbitListener(queues = "orders.created")
+    public void consumeQueue(String payload) {}
+
+    @RabbitListener(bindings = @QueueBinding(
+        value = @Queue("orders.created"),
+        exchange = @Exchange("orders.exchange"),
+        key = "orders.shipped"))
+    public void consumeBinding(String payload) {}
+
+    public void publish(Object event) {
+        rabbitTemplate.convertAndSend("orders.exchange", "orders.created", event);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Method",
+        "consumeQueue",
+        "com.example.orders.RabbitEvents.consumeQueue",
+        file,
+        json!({
+            "decorators": ["@RabbitListener(queues = \"orders.created\")"],
+            "language": "java",
+        }),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Method",
+        "consumeBinding",
+        "com.example.orders.RabbitEvents.consumeBinding",
+        file,
+        json!({
+            "decorators": ["@RabbitListener(bindings = @QueueBinding(value = @Queue(\"orders.created\"), exchange = @Exchange(\"orders.exchange\"), key = \"orders.shipped\"))"],
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "publish",
+        "com.example.orders.RabbitEvents.publish",
+        file,
+        (17, 19),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let created = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders.created")
+        .expect("orders.created rabbit topic");
+    assert_eq!(created.broker, "rabbitmq");
+    assert_eq!(created.consumers.len(), 2);
+    assert_eq!(created.producers.len(), 1);
+    assert_eq!(
+        created.producers[0].node_id,
+        "cbm:3:com.example.orders.RabbitEvents.publish"
+    );
+    assert!(!synth
+        .topics
+        .iter()
+        .any(|topic| topic.name == "orders.exchange"));
+
+    let shipped = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders.shipped")
+        .expect("orders.shipped binding key topic");
+    assert_eq!(shipped.broker, "rabbitmq");
+    assert_eq!(shipped.consumers.len(), 1);
+}
+
+#[test]
 fn synthesizes_python_message_topics() {
     let repo = temp_repo("python-message-topics");
     std::fs::write(
