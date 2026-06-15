@@ -726,6 +726,9 @@ fn is_container_label(label: &str) -> bool {
 }
 
 fn node_search_text(node: &NodeRec) -> String {
+    if is_source_symbol_fallback(node) {
+        return source_symbol_search_text(node);
+    }
     if !matches!(
         node.label.as_str(),
         "Process"
@@ -798,6 +801,34 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_array(&mut parts, &node.properties, "errorKeys");
     push_prop_array(&mut parts, &node.properties, "middleware");
     push_prop_array(&mut parts, &node.properties, "consumerGroups");
+    parts.join(" ")
+}
+
+fn is_source_symbol_fallback(node: &NodeRec) -> bool {
+    matches!(
+        node.label.as_str(),
+        "Class" | "Interface" | "Function" | "Method"
+    ) && node
+        .properties
+        .get("source")
+        .and_then(|value| value.as_str())
+        == Some("aka-source-scan")
+}
+
+fn source_symbol_search_text(node: &NodeRec) -> String {
+    let mut parts = Vec::new();
+    parts.push(node.label.clone());
+    push_prop_str(&mut parts, &node.properties, "name");
+    push_prop_str(&mut parts, &node.properties, "qualifiedName");
+    push_prop_str(&mut parts, &node.properties, "filePath");
+    push_prop_str(&mut parts, &node.properties, "language");
+    push_prop_str(&mut parts, &node.properties, "strategy");
+    push_prop_str(&mut parts, &node.properties, "parentClass");
+    push_prop_str(&mut parts, &node.properties, "route_path");
+    push_prop_str(&mut parts, &node.properties, "routePath");
+    push_prop_str(&mut parts, &node.properties, "route_method");
+    push_prop_str(&mut parts, &node.properties, "routeMethod");
+    push_prop_array(&mut parts, &node.properties, "decorators");
     parts.join(" ")
 }
 
@@ -924,7 +955,7 @@ fn truncate_utf8(s: &str, limit: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{truncate_utf8, SearchIndex, SearchIndexWriter};
+    use super::{node_search_text, truncate_utf8, SearchIndex, SearchIndexWriter};
     use aka_core::types::NodeRec;
     use serde_json::{Map, Value};
 
@@ -1266,5 +1297,117 @@ mod tests {
         let graphql_hit = graphql_hits.first().expect("graphql search hit");
         assert_eq!(graphql_hit.node_id, "graphql:create-order");
         assert_eq!(graphql_hit.label, "GraphQL");
+    }
+
+    #[test]
+    fn indexes_source_scan_symbol_fallback_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut java_props = Map::new();
+        java_props.insert("name".into(), Value::String("getOrder".into()));
+        java_props.insert(
+            "qualifiedName".into(),
+            Value::String("com.example.orders.OrderController.getOrder".into()),
+        );
+        java_props.insert(
+            "filePath".into(),
+            Value::String("src/main/java/com/example/orders/OrderController.java".into()),
+        );
+        java_props.insert("language".into(), Value::String("java".into()));
+        java_props.insert("source".into(), Value::String("aka-source-scan".into()));
+        java_props.insert(
+            "strategy".into(),
+            Value::String("java-source-symbol-fallback".into()),
+        );
+        java_props.insert("routePath".into(), Value::String("/api/orders/{id}".into()));
+        java_props.insert("routeMethod".into(), Value::String("GET".into()));
+        java_props.insert(
+            "decorators".into(),
+            Value::Array(vec![Value::String("@GetMapping(\"/{id}\")".into())]),
+        );
+
+        let mut python_props = Map::new();
+        python_props.insert("name".into(), Value::String("get_order".into()));
+        python_props.insert(
+            "qualifiedName".into(),
+            Value::String("app.api.orders.get_order".into()),
+        );
+        python_props.insert("filePath".into(), Value::String("app/api/orders.py".into()));
+        python_props.insert("language".into(), Value::String("python".into()));
+        python_props.insert("source".into(), Value::String("aka-source-scan".into()));
+        python_props.insert(
+            "strategy".into(),
+            Value::String("python-source-symbol-fallback".into()),
+        );
+        python_props.insert(
+            "decorators".into(),
+            Value::Array(vec![Value::String(
+                "@router.get(\"/orders/{order_id}\")".into(),
+            )]),
+        );
+
+        let mut cbm_props = Map::new();
+        cbm_props.insert("name".into(), Value::String("internalHelper".into()));
+        cbm_props.insert(
+            "qualifiedName".into(),
+            Value::String("com.example.orders.internalHelper".into()),
+        );
+        cbm_props.insert(
+            "filePath".into(),
+            Value::String("src/main/java/Helper.java".into()),
+        );
+
+        let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+        writer
+            .add_nodes(
+                [
+                    NodeRec {
+                        id: "source:java:get-order".into(),
+                        label: "Method".into(),
+                        properties: java_props,
+                    },
+                    NodeRec {
+                        id: "source:python:get-order".into(),
+                        label: "Function".into(),
+                        properties: python_props,
+                    },
+                    NodeRec {
+                        id: "cbm:helper".into(),
+                        label: "Function".into(),
+                        properties: cbm_props.clone(),
+                    },
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+        writer.commit().unwrap();
+        drop(writer);
+
+        let index = SearchIndex::open(dir.path()).unwrap();
+        let java_hits = index
+            .search("OrderController getOrder api orders GetMapping", 5)
+            .unwrap();
+        let java_hit = java_hits.first().expect("java source symbol search hit");
+        assert_eq!(java_hit.node_id, "source:java:get-order");
+        assert_eq!(java_hit.label, "Method");
+
+        let python_hits = index
+            .search("app api orders get_order router get python fallback", 5)
+            .unwrap();
+        let python_hit = python_hits
+            .first()
+            .expect("python source symbol search hit");
+        assert_eq!(python_hit.node_id, "source:python:get-order");
+        assert_eq!(python_hit.label, "Function");
+
+        let cbm_node = NodeRec {
+            id: "cbm:helper".into(),
+            label: "Function".into(),
+            properties: cbm_props,
+        };
+        assert!(
+            node_search_text(&cbm_node).is_empty(),
+            "ordinary CBM function nodes should still rely on name/path fields and chunks, not fallback semantic text"
+        );
     }
 }
