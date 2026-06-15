@@ -2944,6 +2944,63 @@ def enqueue_orders(order_id):
 }
 
 #[test]
+fn synthesizes_python_huey_jobs() {
+    let repo = temp_repo("python-huey-jobs");
+    std::fs::write(
+        repo.join("huey_tasks.py"),
+        r#"from huey import RedisHuey
+
+huey = RedisHuey("orders")
+
+@huey.task(name="orders.rebuild")
+def rebuild_orders(order_id):
+    return order_id
+
+def enqueue_orders(order_id):
+    rebuild_orders.schedule(args=(order_id,), delay=60)
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "rebuild_orders",
+        "huey_tasks.rebuild_orders",
+        "huey_tasks.py",
+        (6, 7),
+        json!({
+            "decorators": ["@huey.task(name=\"orders.rebuild\")"],
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "enqueue_orders",
+        "huey_tasks.enqueue_orders",
+        "huey_tasks.py",
+        (9, 10),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let job = synth
+        .jobs
+        .iter()
+        .find(|job| job.name == "orders.rebuild")
+        .expect("huey task job");
+    assert_eq!(job.job_type, "huey-task");
+    assert_eq!(job.handler_id, "cbm:1:huey_tasks.rebuild_orders");
+    assert!(job.edge_recs().iter().any(|edge| {
+        edge.edge_type == "ENQUEUES_JOB" && edge.source_id == "cbm:2:huey_tasks.enqueue_orders"
+    }));
+}
+
+#[test]
 fn synthesizes_jvm_command_entrypoints() {
     let repo = temp_repo("jvm-commands");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();

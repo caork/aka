@@ -124,6 +124,7 @@ fn detect_named_job_dispatches(
         (".enqueue", "python-rq-enqueue"),
         (".send", "python-dramatiq-send"),
         (".send_with_options", "python-dramatiq-send-with-options"),
+        (".schedule", "python-huey-schedule"),
     ] {
         for call in find_call_args(text, callee) {
             let Some(source) = node_at_offset(text, nodes, call.start) else {
@@ -165,7 +166,7 @@ fn dispatch_names_for_call(text: &str, call_start: usize, args: &str, callee: &s
     let mut out = Vec::new();
     if matches!(
         callee,
-        ".delay" | ".apply_async" | ".send" | ".send_with_options"
+        ".delay" | ".apply_async" | ".send" | ".send_with_options" | ".schedule"
     ) {
         if let Some(receiver) = receiver_ident_before(text, call_start) {
             out.push(receiver);

@@ -68,6 +68,25 @@ fn detect_python_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobDetection>
     let mut out = Vec::new();
     for decorator in &node.decorators {
         let normalized = decorator.trim().trim_start_matches('@');
+        if is_huey_task_decorator(normalized) {
+            let schedule = normalized
+                .contains("periodic_task")
+                .then(|| python_schedule_summary(normalized))
+                .flatten();
+            out.push(JobDetection {
+                name: python_named_arg(normalized, "name")
+                    .or_else(|| schedule.clone())
+                    .unwrap_or_else(|| node.display_name().to_string()),
+                job_type: if normalized.contains("periodic_task") {
+                    "huey-periodic-task".into()
+                } else {
+                    "huey-task".into()
+                },
+                schedule,
+                strategy: "python-huey-task".into(),
+            });
+            continue;
+        }
         if is_celery_task_decorator(normalized) {
             out.push(JobDetection {
                 name: python_named_arg(normalized, "name")
@@ -135,6 +154,17 @@ fn is_dramatiq_actor_decorator(text: &str) -> bool {
         || text.starts_with("actor(")
         || text.ends_with(".actor")
         || text.contains(".actor(")
+}
+
+fn is_huey_task_decorator(text: &str) -> bool {
+    text == "task"
+        || text.starts_with("task(")
+        || text.ends_with(".task")
+        || text.contains(".task(")
+        || text == "periodic_task"
+        || text.starts_with("periodic_task(")
+        || text.ends_with(".periodic_task")
+        || text.contains(".periodic_task(")
 }
 
 fn scheduled_annotation_schedule(annotation: &str) -> Option<String> {
