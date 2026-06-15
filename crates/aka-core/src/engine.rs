@@ -25,6 +25,7 @@ use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTR
 
 mod cache_synth;
 mod command_synth;
+mod config_synth;
 mod event_synth;
 mod graphql_synth;
 mod job_synth;
@@ -40,6 +41,7 @@ mod topic_synth;
 mod transaction_synth;
 use cache_synth::{synthesize_caches_from_sources, SynthCache};
 use command_synth::{synthesize_commands_from_sources, SynthCommand};
+use config_synth::{synthesize_configs_from_sources, SynthConfig};
 use event_synth::{synthesize_events_from_sources, SynthEvent};
 use graphql_synth::{synthesize_graphql_from_sources, SynthGraphqlOperation};
 use job_synth::{synthesize_jobs_from_sources, SynthJob};
@@ -55,8 +57,9 @@ use route_shape::{
     route_occurrences,
 };
 use source_scan::{
-    find_call_args, find_matching_paren, is_ident_continue, is_noisy_source_path, node_at_offset,
-    nodes_by_file, pick_handler_node, read_repo_text, skip_ws, split_top_level_commas, stable_hash,
+    find_call_args, find_matching_paren, is_ident_continue, is_noisy_source_path,
+    is_project_test_source_path, node_at_offset, nodes_by_file, pick_handler_node, read_repo_text,
+    skip_ws, split_top_level_commas, stable_hash, ProjectSourceSet,
 };
 use tool_synth::{synthesize_tools_from_sources, SynthTool};
 use topic_synth::{synthesize_topics_from_sources, SynthTopic};
@@ -795,6 +798,12 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for config in &synth.configs {
+        let node = config.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     for job in &synth.jobs {
         let node = job.node_rec();
         serde_json::to_writer(&mut out, &node)?;
@@ -929,6 +938,7 @@ fn export_edges(
         .chain(synth.routes.iter().flat_map(SynthRoute::edge_recs))
         .chain(synth.tools.iter().flat_map(SynthTool::edge_recs))
         .chain(synth.commands.iter().flat_map(SynthCommand::edge_recs))
+        .chain(synth.configs.iter().flat_map(SynthConfig::edge_recs))
         .chain(synth.jobs.iter().flat_map(SynthJob::edge_recs))
         .chain(synth.topics.iter().flat_map(SynthTopic::edge_recs))
         .chain(synth.caches.iter().flat_map(SynthCache::edge_recs))
@@ -1203,6 +1213,7 @@ struct SynthGraph {
     routes: Vec<SynthRoute>,
     tools: Vec<SynthTool>,
     commands: Vec<SynthCommand>,
+    configs: Vec<SynthConfig>,
     jobs: Vec<SynthJob>,
     topics: Vec<SynthTopic>,
     caches: Vec<SynthCache>,
@@ -1542,9 +1553,11 @@ fn synthesize_graph_with_progress(
     let properties = synthesize_python_properties(conn, project, repo, &existing_node_ids)?;
     if nodes.is_empty() {
         let persistence = synthesize_persistence_from_sources(repo, &nodes);
+        let configs = synthesize_configs_from_sources(repo, &nodes);
         return Ok(SynthGraph {
             properties,
             persistence,
+            configs,
             ..SynthGraph::default()
         });
     }
@@ -1624,6 +1637,13 @@ fn synthesize_graph_with_progress(
     let commands = synthesize_commands_from_sources(repo, &nodes, &processes);
     emit_phase(
         on_event,
+        "codebase-memory:export-artifacts:synthesize:configs",
+        0,
+        0,
+    );
+    let configs = synthesize_configs_from_sources(repo, &nodes);
+    emit_phase(
+        on_event,
         "codebase-memory:export-artifacts:synthesize:jobs",
         0,
         0,
@@ -1692,6 +1712,7 @@ fn synthesize_graph_with_progress(
         routes,
         tools,
         commands,
+        configs,
         jobs,
         topics,
         caches,
@@ -4431,30 +4452,7 @@ fn framework_multiplier_from_path(path: &str) -> f64 {
 }
 
 fn is_test_file(path: &str) -> bool {
-    let p = path.replace('\\', "/").to_ascii_lowercase();
-    p.contains(".test.")
-        || p.contains(".spec.")
-        || p.contains("__tests__/")
-        || p.contains("__mocks__/")
-        || p.contains("/test/")
-        || p.contains("/tests/")
-        || p.contains("/testing/")
-        || p.ends_with("_test.py")
-        || p.contains("/test_")
-        || p.ends_with("_test.go")
-        || p.contains("/src/test/")
-        || p.ends_with("tests.swift")
-        || p.ends_with("test.swift")
-        || p.contains("uitests/")
-        || p.ends_with("tests.cs")
-        || p.ends_with("test.cs")
-        || p.contains(".tests/")
-        || p.contains(".test/")
-        || p.ends_with("test.php")
-        || p.ends_with("spec.php")
-        || p.ends_with("_spec.rb")
-        || p.ends_with("_test.rb")
-        || p.contains("/spec/")
+    is_project_test_source_path(path)
 }
 
 fn is_utility_file(path: &str) -> bool {

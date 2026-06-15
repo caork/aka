@@ -668,6 +668,7 @@ fn is_symbol_label(label: &str) -> bool {
             | "Route"
             | "Tool"
             | "Command"
+            | "Config"
             | "Job"
             | "Table"
             | "Repository"
@@ -694,6 +695,7 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Route"
             | "Tool"
             | "Command"
+            | "Config"
             | "Job"
             | "Table"
             | "Repository"
@@ -719,6 +721,7 @@ fn node_search_text(node: &NodeRec) -> String {
             | "Route"
             | "Tool"
             | "Command"
+            | "Config"
             | "Job"
             | "Table"
             | "Repository"
@@ -737,6 +740,10 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "summary");
     push_prop_str(&mut parts, &node.properties, "processType");
     push_prop_str(&mut parts, &node.properties, "commandType");
+    push_prop_str(&mut parts, &node.properties, "key");
+    push_prop_str(&mut parts, &node.properties, "configType");
+    push_prop_str(&mut parts, &node.properties, "configSource");
+    push_prop_str(&mut parts, &node.properties, "valueHint");
     push_prop_str(&mut parts, &node.properties, "jobType");
     push_prop_str(&mut parts, &node.properties, "schedule");
     push_prop_str(&mut parts, &node.properties, "handlerName");
@@ -761,6 +768,7 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "tool");
     push_prop_array(&mut parts, &node.properties, "trace");
     push_prop_array(&mut parts, &node.properties, "steps");
+    push_prop_array(&mut parts, &node.properties, "sources");
     push_prop_array(&mut parts, &node.properties, "columns");
     push_prop_array(&mut parts, &node.properties, "tables");
     push_prop_array(&mut parts, &node.properties, "operations");
@@ -939,6 +947,29 @@ mod tests {
             Value::String("orders/management/commands/orders_reindex.py".into()),
         );
 
+        let mut config_props = Map::new();
+        config_props.insert(
+            "name".into(),
+            Value::String("orders.retry.max-attempts".into()),
+        );
+        config_props.insert(
+            "key".into(),
+            Value::String("orders.retry.max-attempts".into()),
+        );
+        config_props.insert(
+            "configType".into(),
+            Value::String("spring-property".into()),
+        );
+        config_props.insert("valueHint".into(), Value::String("3".into()));
+        config_props.insert(
+            "sources".into(),
+            Value::Array(vec![Value::String("yaml-file".into())]),
+        );
+        config_props.insert(
+            "filePath".into(),
+            Value::String("src/main/resources/application.yml".into()),
+        );
+
         let mut table_props = Map::new();
         table_props.insert("name".into(), Value::String("orders".into()));
         table_props.insert("tableName".into(), Value::String("orders".into()));
@@ -1030,6 +1061,11 @@ mod tests {
                         properties: command_props,
                     },
                     NodeRec {
+                        id: "config:orders-retry".into(),
+                        label: "Config".into(),
+                        properties: config_props,
+                    },
+                    NodeRec {
                         id: "table:orders".into(),
                         label: "Table".into(),
                         properties: table_props,
@@ -1087,6 +1123,11 @@ mod tests {
         let command_hit = command_hits.first().expect("command search hit");
         assert_eq!(command_hit.node_id, "command:orders-reindex");
         assert_eq!(command_hit.label, "Command");
+
+        let config_hits = index.search("orders retry max attempts config", 5).unwrap();
+        let config_hit = config_hits.first().expect("config search hit");
+        assert_eq!(config_hit.node_id, "config:orders-retry");
+        assert_eq!(config_hit.label, "Config");
 
         let table_hits = index.search("orders status table", 5).unwrap();
         let table_hit = table_hits.first().expect("table search hit");

@@ -1,7 +1,69 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::process::Command as GitCommand;
 
 use super::SynthNode;
+
+#[derive(Debug, Clone)]
+pub(super) struct ProjectSourceSet {
+    files: BTreeSet<String>,
+    has_git_listing: bool,
+}
+
+impl ProjectSourceSet {
+    pub(super) fn discover(repo: &Path) -> Self {
+        let files = git_project_files(repo);
+        Self {
+            has_git_listing: !files.is_empty(),
+            files,
+        }
+    }
+
+    pub(super) fn contains_project_file(&self, repo: &Path, file_path: &str) -> bool {
+        let normalized = normalize_repo_path(file_path);
+        if normalized.is_empty()
+            || is_noisy_source_path(&normalized)
+            || is_project_test_source_path(&normalized)
+        {
+            return false;
+        }
+        if self.has_git_listing {
+            return self.files.contains(&normalized);
+        }
+        repo.join(&normalized).is_file()
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = &str> {
+        self.files.iter().map(String::as_str)
+    }
+
+    pub(super) fn has_git_listing(&self) -> bool {
+        self.has_git_listing
+    }
+}
+
+fn git_project_files(repo: &Path) -> BTreeSet<String> {
+    let Ok(output) = GitCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .arg("ls-files")
+        .arg("-z")
+        .arg("--cached")
+        .arg("--others")
+        .arg("--exclude-standard")
+        .output()
+    else {
+        return BTreeSet::new();
+    };
+    if !output.status.success() {
+        return BTreeSet::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .map(normalize_repo_path)
+        .filter(|path| !path.is_empty())
+        .collect()
+}
 
 pub(super) struct CallArgs<'a> {
     pub(super) start: usize,
@@ -176,6 +238,13 @@ pub(super) fn read_repo_text(repo: &Path, file_path: &str) -> Option<String> {
     std::fs::read_to_string(repo.join(file_path)).ok()
 }
 
+pub(super) fn normalize_repo_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_string()
+}
+
 pub(super) fn pick_handler_node<'a>(nodes: &'a [&'a SynthNode]) -> Option<&'a SynthNode> {
     nodes
         .iter()
@@ -240,6 +309,38 @@ pub(super) fn is_noisy_source_path(path: &str) -> bool {
                 | "third-party"
         )
     }) || path.ends_with(".min.js")
+}
+
+pub(super) fn is_project_test_source_path(path: &str) -> bool {
+    let path = path.replace('\\', "/").to_ascii_lowercase();
+    let name = path.rsplit('/').next().unwrap_or(path.as_str());
+    path.contains(".test.")
+        || path.contains(".spec.")
+        || path.contains("/src/test/")
+        || path.contains("/src/it/")
+        || path.contains("/src/integrationtest/")
+        || path.contains("/src/e2e/")
+        || path.contains("/test/")
+        || path.contains("/tests/")
+        || path.contains("/testing/")
+        || path.contains("/__tests__/")
+        || path.contains("/__mocks__/")
+        || path.contains("/spec/")
+        || path.contains(".tests/")
+        || path.contains(".test/")
+        || path.contains("uitests/")
+        || name.starts_with("test_")
+        || name == "conftest.py"
+        || name.ends_with("_test.py")
+        || name.ends_with("_test.go")
+        || name.ends_with("tests.swift")
+        || name.ends_with("test.swift")
+        || name.ends_with("tests.cs")
+        || name.ends_with("test.cs")
+        || name.ends_with("test.php")
+        || name.ends_with("spec.php")
+        || name.ends_with("_spec.rb")
+        || name.ends_with("_test.rb")
 }
 
 pub(super) fn stable_hash(s: &str) -> u64 {

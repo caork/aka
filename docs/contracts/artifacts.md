@@ -45,7 +45,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 {"id":"...","label":"Function","properties":{"name":"...","filePath":"...","startLine":1,"endLine":20}}
 ```
 
-`label` 取值来自 CBM graph，经 adapter 规范化为 aka 节点标签（Project/Package/Folder/File/Module/Class/Function/Method/Interface/Enum/Type/Route/GraphQL/Tool/Command/Table/Repository/Migration/Resource/Transaction/…）。`properties` 为开放对象，aka 侧只索引已知字段（name/filePath/startLine/endLine/…），其余落到 JSON 列存底。
+`label` 取值来自 CBM graph，经 adapter 规范化为 aka 节点标签（Project/Package/Folder/File/Module/Class/Function/Method/Interface/Enum/Type/Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Resource/Transaction/…）。`properties` 为开放对象，aka 侧只索引已知字段（name/filePath/startLine/endLine/…），其余落到 JSON 列存底。
 
 **行号语义**：工件中的 `startLine`/`endLine`（节点与 chunk 同）由 CBM/tree-sitter 坐标导出，合同内保持 **0-based row**。Rust 摄取层（aka-graph/aka-search）写索引时统一 **+1 转为 1-based 人类行号**（`NodeRec::start_line_1based`），因此 SQLite/tantivy 及一切下游（HTTP/MCP/桌面端）的行号都与编辑器、`/api/source` 对齐。`properties` JSON 列存底里保留的是工件原始 0-based 值。
 
@@ -54,6 +54,8 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 **合成 Process**：若 CBM SQLite 已经产出 `label = "Process"` 节点，adapter 原样透传，不重复合成；若没有，adapter 会基于 `CALLS` 边保守合成 `label = "Process"` 的调用链流程节点。合成流程使用 GitNexus-like 入口评分（调用比、导出/公开、入口命名、框架路径、测试/工具降权）、BFS trace、子链去重、入口-终点去重和动态流程上限。合成节点的 `id` 形如 `process:call-chain:<hash>`，`properties` 至少包含 `name`、`heuristicLabel`、`processType`、`communities`、`communityIds`、`communityLabels`、`trace`、`stepCount`、`entryPointId`、`terminalId`、`source = "aka-cbm-synth"`。其中 `processType` 取 `intra_community` 或 `cross_community`，分别表示流程步骤落在单个社区或跨多个社区；`communities` 为流程涉及的 Community 引用数组（元素至少包含 `id`、`label`）。这是合同内只增字段/节点类型，下游按普通节点摄取。
 
 **Route/GraphQL/Tool/Command 应用语义节点**：`label = "Route"` 表示可被路由工具消费的 API/HTTP route 节点；`properties.name` 通常为 route path，`filePath` 指向 route 定义或 handler 文件，`middleware`、`responseKeys`、`errorKeys` 为可选数组。`label = "GraphQL"` 表示 GraphQL query/mutation/subscription/field 入口；`properties.name`/`operationName` 为 operation 名，`operationType` 为 query/mutation/subscription/field，`handlerId` 指向 resolver/handler。`label = "Tool"` 表示 MCP/RPC/agent tool 定义节点；`properties.name` 为工具名，`filePath` 指向定义文件，`description` 为可选说明。`label = "Command"` 表示 CLI/management command 入口，例如 Spring `CommandLineRunner`/`ApplicationRunner`、picocli `@Command`、Django management command、Click/Typer/argparse；`properties.name` 为命令名，`commandType` 表示命令框架，`handlerId`/`handlerName` 指向处理符号。aka 不要求所有语言/框架都能产出这些节点；缺失时相关工具会返回空结果或显式提示。
+
+**Config 配置节点**：`label = "Config"` 表示 Spring `application.yml/properties`、`@Value`、`@ConfigurationProperties`、Python settings、Django settings、`os.getenv`/`os.environ` 等配置键；`properties.key` 为规范化 key，`configType` 表示 spring-property/env-var/python-setting 等类型，`valueHint`、`sources` 为可选摘要字段。配置文件即使没有 CBM symbol 节点也可由 adapter 直接扫描合成。
 
 **Transaction 事务边界节点**：`label = "Transaction"` 表示业务方法/函数上的事务边界，例如 Spring `@Transactional` 或 Django `transaction.atomic`；`properties.name` 为边界名，`manager` 表示事务管理器来源，`propagation`、`isolation`、`readOnly` 为可选属性。
 
@@ -65,7 +67,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 {"id":"...","sourceId":"...","targetId":"...","type":"CALLS","confidence":0.9,"reason":"...","step":1,"evidence":[{"kind":"...","weight":0.5}]}
 ```
 
-`type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/HTTP_CALLS/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/HAS_TRANSACTION_BOUNDARY/MAPS_TO_TABLE/REPOSITORY_FOR/MIGRATES_TABLE/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
+`type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/HTTP_CALLS/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/USES_CONFIG/HAS_TRANSACTION_BOUNDARY/MAPS_TO_TABLE/REPOSITORY_FOR/MIGRATES_TABLE/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
 
 应用语义相关边的当前消费语义：
 
@@ -74,6 +76,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 - `HANDLES_GRAPHQL`：resolver/handler 符号 → GraphQL operation。`graphql_map` 用它列 resolver handlers；query/context/impact 也会按普通定义节点和图边消费。
 - `HANDLES_TOOL`：handler 符号/文件 → Tool。`tool_map` 用它列工具处理函数。
 - `HANDLES_COMMAND`：handler 符号/类 → Command。query/context/impact 会按普通定义节点和图边消费，用于识别运维脚本、管理命令和 CLI 入口的业务影响面。
+- `USES_CONFIG`：业务方法/类/模块 → Config。query/context/impact 会按普通图边消费，用于定位配置键、环境变量和 settings 变更影响的代码。
 - `HAS_TRANSACTION_BOUNDARY`：业务方法/函数 → Transaction。context/impact 会按普通图边消费，用于识别 Spring/Django 等服务的事务边界。
 - `MIGRATES_TABLE`：Migration → Table。query/context/impact 会按普通图边消费，用于把 schema migration 变更映射到表、repository、entity 和业务流程风险面。
 

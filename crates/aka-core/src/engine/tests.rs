@@ -127,6 +127,16 @@ fn temp_repo(name: &str) -> PathBuf {
     dir
 }
 
+fn run_git(repo: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?} failed");
+}
+
 fn synthesize_graph_quiet(conn: &Connection, repo: &Path) -> Result<SynthGraph, EngineError> {
     synthesize_graph(conn, "demo", repo)
 }
@@ -2080,6 +2090,116 @@ class TestCommand implements CommandLineRunner {
 }
 
 #[test]
+fn command_synthesis_uses_project_sources_not_runner_names() {
+    let repo = temp_repo("git-project-command-sources");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
+    let tracked_file = "src/main/java/com/example/ops/StartupMaintenance.java";
+    let untracked_file = "src/main/java/com/example/ops/UntrackedMaintenance.java";
+    let test_file = "src/test/java/com/example/ops/TestMaintenance.java";
+    std::fs::write(
+        repo.join(tracked_file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+
+class StartupMaintenance implements ApplicationRunner {
+    public void run(ApplicationArguments args) {
+        warmCache();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(untracked_file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.CommandLineRunner;
+
+class UntrackedMaintenance implements CommandLineRunner {
+    public void run(String... args) {
+        repairOrders();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(test_file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+
+class TestMaintenance implements ApplicationRunner {
+    public void run(ApplicationArguments args) {
+        resetFixtures();
+    }
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", tracked_file, test_file]);
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "StartupMaintenance",
+            "com.example.ops.StartupMaintenance",
+            tracked_file,
+        ),
+        (6, 10),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Class",
+            "UntrackedMaintenance",
+            "com.example.ops.UntrackedMaintenance",
+            untracked_file,
+        ),
+        (5, 9),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Class",
+            "TestMaintenance",
+            "com.example.ops.TestMaintenance",
+            test_file,
+        ),
+        (6, 10),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let handlers: Vec<_> = synth
+        .commands
+        .iter()
+        .map(|command| command.handler_name.as_str())
+        .collect();
+    assert!(handlers.contains(&"StartupMaintenance"));
+    assert!(handlers.contains(&"UntrackedMaintenance"));
+    assert!(!handlers.contains(&"TestMaintenance"));
+}
+
+#[test]
 fn synthesizes_python_command_entrypoints() {
     let repo = temp_repo("python-commands");
     std::fs::create_dir_all(repo.join("orders/management/commands")).unwrap();
@@ -2193,6 +2313,210 @@ def main():
         .commands
         .iter()
         .any(|command| command.command_type == "argparse-command"));
+}
+
+#[test]
+fn synthesizes_spring_config_nodes_and_consumers() {
+    let repo = temp_repo("spring-configs");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    std::fs::create_dir_all(repo.join("src/main/resources")).unwrap();
+    std::fs::write(
+        repo.join("src/main/resources/application.yml"),
+        r#"orders:
+  retry:
+    max-attempts: 3
+  payments:
+    timeout: 30s
+server:
+  port: 8080
+"#,
+    )
+    .unwrap();
+    let file = "src/main/java/com/example/orders/OrderSettings.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+@ConfigurationProperties(prefix = "orders.retry")
+class OrderSettings {
+    @Value("${orders.payments.timeout:10s}")
+    String timeout;
+
+    void load(org.springframework.core.env.Environment env) {
+        env.getProperty("orders.retry.max-attempts");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderSettings",
+            "com.example.orders.OrderSettings",
+            file,
+        ),
+        (6, 14),
+        json!({
+            "language": "java",
+            "decorators": ["@ConfigurationProperties(prefix = \"orders.retry\")"],
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "load",
+            "com.example.orders.OrderSettings.load",
+            file,
+        ),
+        (11, 13),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.orders.OrderSettings",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let keys: BTreeSet<_> = synth
+        .configs
+        .iter()
+        .map(|config| config.key.as_str())
+        .collect();
+    assert!(keys.contains("orders.retry.max-attempts"));
+    assert!(keys.contains("orders.payments.timeout"));
+    assert!(keys.contains("server.port"));
+    assert!(keys.contains("orders.retry"));
+    let edge_types: Vec<_> = synth
+        .configs
+        .iter()
+        .flat_map(SynthConfig::edge_recs)
+        .map(|edge| edge.edge_type)
+        .collect();
+    assert!(edge_types.contains(&"USES_CONFIG".to_string()));
+}
+
+#[test]
+fn synthesizes_python_config_nodes_and_consumers() {
+    let repo = temp_repo("python-configs");
+    std::fs::write(
+        repo.join("settings.py"),
+        r#"PAYMENTS_TIMEOUT = "10s"
+ORDERS_RETRY_MAX_ATTEMPTS = 3
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("service.py"),
+        r#"import os
+from django.conf import settings
+
+def charge():
+    timeout = os.getenv("PAYMENTS_TIMEOUT", "5s")
+    api_key = os.environ["PAYMENTS_API_KEY"]
+    attempts = settings.ORDERS_RETRY_MAX_ATTEMPTS
+    return timeout, api_key, attempts
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "charge",
+        "service.charge",
+        "service.py",
+        (4, 8),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let keys: BTreeSet<_> = synth
+        .configs
+        .iter()
+        .map(|config| config.key.as_str())
+        .collect();
+    assert!(keys.contains("payments.timeout"));
+    assert!(keys.contains("orders.retry.max.attempts"));
+    assert!(keys.contains("payments.api.key"));
+    let edges: Vec<_> = synth
+        .configs
+        .iter()
+        .flat_map(SynthConfig::edge_recs)
+        .collect();
+    assert!(edges
+        .iter()
+        .any(|edge| edge.source_id == "cbm:1:service.charge"));
+}
+
+#[test]
+fn synthesizes_config_files_without_symbol_nodes() {
+    let repo = temp_repo("config-only");
+    std::fs::write(
+        repo.join("application.properties"),
+        "orders.retry.max-attempts=5\n",
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth
+        .configs
+        .iter()
+        .any(|config| config.key == "orders.retry.max-attempts"));
+}
+
+#[test]
+fn config_synthesis_uses_project_sources_and_excludes_tests() {
+    let repo = temp_repo("git-project-config-sources");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/resources")).unwrap();
+    std::fs::create_dir_all(repo.join("src/test/resources")).unwrap();
+    std::fs::write(
+        repo.join("src/main/resources/application.yml"),
+        r#"
+orders:
+  endpoint: https://orders.example.test
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/test/resources/application.yml"),
+        r#"
+fixtures:
+  endpoint: https://fixtures.example.test
+"#,
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        &[
+            "add",
+            "src/main/resources/application.yml",
+            "src/test/resources/application.yml",
+        ],
+    );
+
+    let conn = test_conn();
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let keys: Vec<_> = synth
+        .configs
+        .iter()
+        .map(|config| config.key.as_str())
+        .collect();
+    assert!(keys.contains(&"orders.endpoint"));
+    assert!(!keys.contains(&"fixtures.endpoint"));
 }
 
 #[test]

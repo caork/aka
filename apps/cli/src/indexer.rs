@@ -348,6 +348,7 @@ fn is_global_or_derived_label(label: &str) -> bool {
             | "GraphQL"
             | "Tool"
             | "Command"
+            | "Config"
             | "Migration"
             | "Transaction"
     )

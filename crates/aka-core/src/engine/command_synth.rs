@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::process::Command as GitCommand;
 
 use serde_json::{json, Map, Value};
 
 use super::{
-    find_call_args, nodes_by_file, process_ids_for_entry, read_repo_text, read_string_literal,
-    split_top_level_commas, stable_hash, EdgeRec, NodeRec, SynthNode, SynthProcess,
+    find_call_args, is_project_test_source_path, nodes_by_file, process_ids_for_entry,
+    read_repo_text, read_string_literal, split_top_level_commas, stable_hash, EdgeRec, NodeRec,
+    ProjectSourceSet, SynthNode, SynthProcess,
 };
 
 #[derive(Debug, Clone)]
@@ -88,8 +88,8 @@ pub(super) fn synthesize_commands_from_sources(
     nodes: &BTreeMap<String, SynthNode>,
     processes: &[SynthProcess],
 ) -> Vec<SynthCommand> {
-    let tracked_files = git_tracked_files(repo);
-    let by_file = command_nodes_by_file(repo, nodes, &tracked_files);
+    let project_sources = ProjectSourceSet::discover(repo);
+    let by_file = command_nodes_by_file(repo, nodes, &project_sources);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for (file_path, file_nodes) in by_file {
@@ -139,33 +139,13 @@ struct CommandDetection {
 fn command_nodes_by_file<'a>(
     repo: &Path,
     nodes: &'a BTreeMap<String, SynthNode>,
-    tracked_files: &HashSet<String>,
+    project_sources: &ProjectSourceSet,
 ) -> BTreeMap<String, Vec<&'a SynthNode>> {
     nodes_by_file(nodes)
         .into_iter()
         .filter(|(file_path, file_nodes)| {
-            is_project_command_source(repo, file_path, file_nodes, tracked_files)
+            is_project_command_source(repo, file_path, file_nodes, project_sources)
         })
-        .collect()
-}
-
-fn git_tracked_files(repo: &Path) -> HashSet<String> {
-    let Ok(output) = GitCommand::new("git")
-        .arg("-C")
-        .arg(repo)
-        .arg("ls-files")
-        .arg("-z")
-        .output()
-    else {
-        return HashSet::new();
-    };
-    if !output.status.success() {
-        return HashSet::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .split('\0')
-        .filter(|path| !path.is_empty())
-        .map(|path| path.replace('\\', "/"))
         .collect()
 }
 
@@ -173,9 +153,9 @@ fn is_project_command_source(
     repo: &Path,
     file_path: &str,
     file_nodes: &[&SynthNode],
-    tracked_files: &HashSet<String>,
+    project_sources: &ProjectSourceSet,
 ) -> bool {
-    if is_obvious_test_source_path(file_path) {
+    if is_project_test_source_path(file_path) {
         return false;
     }
     let source_like = is_command_source_path(file_path)
@@ -188,8 +168,7 @@ fn is_project_command_source(
     if !source_like {
         return false;
     }
-    let normalized = file_path.replace('\\', "/");
-    tracked_files.is_empty() || tracked_files.contains(&normalized) || repo.join(file_path).exists()
+    project_sources.contains_project_file(repo, file_path)
 }
 
 fn is_command_source_path(file_path: &str) -> bool {
@@ -199,22 +178,6 @@ fn is_command_source_path(file_path: &str) -> bool {
             .and_then(|ext| ext.to_str()),
         Some("java" | "kt" | "kts" | "scala" | "groovy" | "py")
     )
-}
-
-fn is_obvious_test_source_path(file_path: &str) -> bool {
-    let path = file_path.replace('\\', "/").to_ascii_lowercase();
-    path.contains("/src/test/")
-        || path.contains("/src/it/")
-        || path.contains("/src/integrationtest/")
-        || path.contains("/src/e2e/")
-        || path.contains("/test/")
-        || path.contains("/tests/")
-        || path.contains("/__tests__/")
-        || path.ends_with("_test.py")
-        || path
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| name.starts_with("test_") || name == "conftest.py")
 }
 
 fn detect_node_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDetection> {

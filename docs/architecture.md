@@ -30,7 +30,7 @@ Rust workspace 承担存储、搜索、服务、UI；CBM 作为 native C binary 
 ## 服务层（Rust）
 
 - MCP：rmcp（官方 SDK），stdio + Streamable HTTP。十五个工具：list_repos / query / search_code / context / find_definition / search_references / impact / detect_changes / route_map / tool_map / graphql_map / shape_check / api_impact / analyze / augment（cypher 已砍）。
-- GitNexus-like 能力：query/context/impact 会消费合成 Community/Process/Command/Migration/Transaction，新增 detect_changes/route_map/tool_map/graphql_map/shape_check/api_impact 消费 Route/GraphQL/Tool/Command/Table/Repository/Migration/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/MIGRATES_TABLE/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等索引语义，覆盖流程分组、改动到流程映射、API 路由/GraphQL operation/工具入口、CLI/management command、schema migration、事务边界和响应形状检查。它是面向 agent 工作流的保守兼容层，不提供完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义。
+- GitNexus-like 能力：query/context/impact 会消费合成 Community/Process/Command/Config/Migration/Transaction，新增 detect_changes/route_map/tool_map/graphql_map/shape_check/api_impact 消费 Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/USES_CONFIG/MIGRATES_TABLE/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等索引语义，覆盖流程分组、改动到流程映射、API 路由/GraphQL operation/工具入口、CLI/management command、配置/env/settings、schema migration、事务边界和响应形状检查。它是面向 agent 工作流的保守兼容层，不提供完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义。
 - HTTP：axum，承接 query/repos/graph-stream/search-code/detect-changes/route-map/tool-map/graphql-map/shape-check/api-impact REST 面，给远程模式和浏览器。
 - augmentation（编辑器 hook 增强）：BM25-only 路径，目标 <100ms。
 
