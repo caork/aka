@@ -667,6 +667,7 @@ fn is_symbol_label(label: &str) -> bool {
             | "Variable"
             | "Route"
             | "Tool"
+            | "Command"
             | "Job"
             | "Table"
             | "Repository"
@@ -691,6 +692,7 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Type"
             | "Route"
             | "Tool"
+            | "Command"
             | "Job"
             | "Table"
             | "Repository"
@@ -714,6 +716,7 @@ fn node_search_text(node: &NodeRec) -> String {
         "Process"
             | "Route"
             | "Tool"
+            | "Command"
             | "Job"
             | "Table"
             | "Repository"
@@ -731,6 +734,7 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "summary");
     push_prop_str(&mut parts, &node.properties, "description");
     push_prop_str(&mut parts, &node.properties, "processType");
+    push_prop_str(&mut parts, &node.properties, "commandType");
     push_prop_str(&mut parts, &node.properties, "jobType");
     push_prop_str(&mut parts, &node.properties, "schedule");
     push_prop_str(&mut parts, &node.properties, "handlerName");
@@ -912,6 +916,22 @@ mod tests {
         );
         job_props.insert("filePath".into(), Value::String("tasks.py".into()));
 
+        let mut command_props = Map::new();
+        command_props.insert("name".into(), Value::String("orders-reindex".into()));
+        command_props.insert(
+            "commandType".into(),
+            Value::String("django-management-command".into()),
+        );
+        command_props.insert("handlerName".into(), Value::String("handle".into()));
+        command_props.insert(
+            "strategy".into(),
+            Value::String("python-django-management-command".into()),
+        );
+        command_props.insert(
+            "filePath".into(),
+            Value::String("orders/management/commands/orders_reindex.py".into()),
+        );
+
         let mut table_props = Map::new();
         table_props.insert("name".into(), Value::String("orders".into()));
         table_props.insert("tableName".into(), Value::String("orders".into()));
@@ -978,6 +998,11 @@ mod tests {
                         properties: job_props,
                     },
                     NodeRec {
+                        id: "command:orders-reindex".into(),
+                        label: "Command".into(),
+                        properties: command_props,
+                    },
+                    NodeRec {
                         id: "table:orders".into(),
                         label: "Table".into(),
                         properties: table_props,
@@ -1025,6 +1050,11 @@ mod tests {
         assert_eq!(hit.node_id, "job:orders-cleanup");
         assert_eq!(hit.label, "Job");
         assert_eq!(hit.name, "orders.cleanup");
+
+        let command_hits = index.search("django command orders reindex", 5).unwrap();
+        let command_hit = command_hits.first().expect("command search hit");
+        assert_eq!(command_hit.node_id, "command:orders-reindex");
+        assert_eq!(command_hit.label, "Command");
 
         let table_hits = index.search("orders status table", 5).unwrap();
         let table_hit = table_hits.first().expect("table search hit");

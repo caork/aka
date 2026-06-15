@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 fn test_conn() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
@@ -1919,6 +1920,279 @@ def cleanup_orders():
         .schedule
         .as_deref()
         .is_some_and(|schedule| schedule.contains("trigger=cron") && schedule.contains("hour=3")));
+}
+
+#[test]
+fn synthesizes_jvm_command_entrypoints() {
+    let repo = temp_repo("jvm-commands");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    let file = "src/main/java/com/example/ops/ReindexCommand.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.stereotype.Component;
+import picocli.CommandLine.Command;
+
+@Component
+class ReindexOrders implements ApplicationRunner {
+    @Override
+    public void run(ApplicationArguments args) {
+        rebuildOrders();
+    }
+}
+
+class RunnerConfig {
+    @Bean
+    CommandLineRunner syncRunner() {
+        return args -> rebuildOrders();
+    }
+}
+
+@Command(name = "orders-reindex", aliases = {"orders-sync"})
+class ReindexCli implements Runnable {
+    public void run() {
+        rebuildOrders();
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "ReindexOrders",
+            "com.example.ops.ReindexOrders",
+            file,
+        ),
+        (8, 13),
+        json!({
+            "language": "java",
+            "decorators": ["@Component"],
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        ("Method", "run", "com.example.ops.ReindexOrders.run", file),
+        (10, 12),
+        json!({
+            "language": "java",
+            "decorators": ["@Override"],
+            "parent_class": "com.example.ops.ReindexOrders",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
+            "syncRunner",
+            "com.example.ops.RunnerConfig.syncRunner",
+            file,
+        ),
+        (17, 20),
+        json!({
+            "language": "java",
+            "decorators": ["@Bean"],
+            "parent_class": "com.example.ops.RunnerConfig",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        4,
+        ("Class", "ReindexCli", "com.example.ops.ReindexCli", file),
+        (23, 28),
+        json!({
+            "language": "java",
+            "decorators": ["@Command(name = \"orders-reindex\", aliases = {\"orders-sync\"})"],
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let spring = synth
+        .commands
+        .iter()
+        .find(|command| command.command_type == "spring-runner")
+        .expect("spring runner command");
+    assert_eq!(spring.handler_id, "cbm:1:com.example.ops.ReindexOrders");
+    assert_eq!(spring.strategy, "java-spring-runner-source-declaration");
+    let picocli = synth
+        .commands
+        .iter()
+        .find(|command| command.command_type == "picocli-command")
+        .expect("picocli command");
+    assert_eq!(picocli.name, "orders-reindex");
+    assert_eq!(picocli.handler_id, "cbm:4:com.example.ops.ReindexCli");
+    assert!(synth
+        .commands
+        .iter()
+        .any(|command| command.handler_id == "cbm:3:com.example.ops.RunnerConfig.syncRunner"));
+
+    let edge_types: Vec<_> = synth
+        .commands
+        .iter()
+        .flat_map(SynthCommand::edge_recs)
+        .map(|edge| edge.edge_type)
+        .collect();
+    assert!(edge_types.contains(&"HANDLES_COMMAND".to_string()));
+}
+
+#[test]
+fn ignores_test_source_command_entrypoints() {
+    let repo = temp_repo("test-source-commands");
+    std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
+    let file = "src/test/java/com/example/ops/TestCommand.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.CommandLineRunner;
+
+class TestCommand implements CommandLineRunner {
+    public void run(String... args) {
+        rebuildFixtures();
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "TestCommand", "com.example.ops.TestCommand", file),
+        (5, 9),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth.commands.is_empty());
+}
+
+#[test]
+fn synthesizes_python_command_entrypoints() {
+    let repo = temp_repo("python-commands");
+    std::fs::create_dir_all(repo.join("orders/management/commands")).unwrap();
+    std::fs::write(
+        repo.join("orders/management/commands/reindex_orders.py"),
+        r#"from django.core.management.base import BaseCommand
+
+class Command(BaseCommand):
+    def handle(self, *args, **options):
+        rebuild_orders()
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("cli.py"),
+        r#"import argparse
+import click
+import typer
+
+app = typer.Typer()
+
+@click.command(name="sync-orders")
+def sync_orders():
+    pass
+
+@app.command("ship-orders")
+def ship_orders():
+    pass
+
+def main():
+    parser = argparse.ArgumentParser(prog="orders-admin")
+    sub = parser.add_subparsers()
+    sub.add_parser("reindex")
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "handle",
+        "orders.management.commands.reindex_orders.Command.handle",
+        "orders/management/commands/reindex_orders.py",
+        (4, 5),
+        json!({
+            "language": "python",
+            "parent_class": "Command",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "sync_orders",
+        "cli.sync_orders",
+        "cli.py",
+        (8, 9),
+        json!({
+            "language": "python",
+            "decorators": ["@click.command(name=\"sync-orders\")"],
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "ship_orders",
+        "cli.ship_orders",
+        "cli.py",
+        (12, 13),
+        json!({
+            "language": "python",
+            "decorators": ["@app.command(\"ship-orders\")"],
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "main",
+        "cli.main",
+        "cli.py",
+        (15, 18),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let names: BTreeSet<_> = synth
+        .commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    assert!(names.contains("reindex_orders"));
+    assert!(names.contains("sync-orders"));
+    assert!(names.contains("ship-orders"));
+    assert!(names.contains("orders-admin"));
+    assert!(names.contains("reindex"));
+    assert!(synth
+        .commands
+        .iter()
+        .any(|command| command.command_type == "django-management-command"));
+    assert!(synth
+        .commands
+        .iter()
+        .any(|command| command.command_type == "click-command"));
+    assert!(synth
+        .commands
+        .iter()
+        .any(|command| command.command_type == "typer-command"));
+    assert!(synth
+        .commands
+        .iter()
+        .any(|command| command.command_type == "argparse-command"));
 }
 
 #[test]

@@ -342,7 +342,7 @@ fn is_safe_cross_file_endpoint(info: &NodeInfo) -> bool {
 fn is_global_or_derived_label(label: &str) -> bool {
     matches!(
         label,
-        "Community" | "Process" | "Route" | "GraphQL" | "Tool" | "Transaction"
+        "Community" | "Process" | "Route" | "GraphQL" | "Tool" | "Command" | "Transaction"
     )
 }
 

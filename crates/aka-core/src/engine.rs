@@ -24,6 +24,7 @@ use serde_json::{json, Map, Value};
 use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION};
 
 mod cache_synth;
+mod command_synth;
 mod event_synth;
 mod graphql_synth;
 mod job_synth;
@@ -37,6 +38,7 @@ mod tool_synth;
 mod topic_synth;
 mod transaction_synth;
 use cache_synth::{synthesize_caches_from_sources, SynthCache};
+use command_synth::{synthesize_commands_from_sources, SynthCommand};
 use event_synth::{synthesize_events_from_sources, SynthEvent};
 use graphql_synth::{synthesize_graphql_from_sources, SynthGraphqlOperation};
 use job_synth::{synthesize_jobs_from_sources, SynthJob};
@@ -786,6 +788,12 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for command in &synth.commands {
+        let node = command.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     for job in &synth.jobs {
         let node = job.node_rec();
         serde_json::to_writer(&mut out, &node)?;
@@ -919,6 +927,7 @@ fn export_edges(
         .chain(synth.processes.iter().flat_map(SynthProcess::edge_recs))
         .chain(synth.routes.iter().flat_map(SynthRoute::edge_recs))
         .chain(synth.tools.iter().flat_map(SynthTool::edge_recs))
+        .chain(synth.commands.iter().flat_map(SynthCommand::edge_recs))
         .chain(synth.jobs.iter().flat_map(SynthJob::edge_recs))
         .chain(synth.topics.iter().flat_map(SynthTopic::edge_recs))
         .chain(synth.caches.iter().flat_map(SynthCache::edge_recs))
@@ -1192,6 +1201,7 @@ struct SynthGraph {
     processes: Vec<SynthProcess>,
     routes: Vec<SynthRoute>,
     tools: Vec<SynthTool>,
+    commands: Vec<SynthCommand>,
     jobs: Vec<SynthJob>,
     topics: Vec<SynthTopic>,
     caches: Vec<SynthCache>,
@@ -1604,6 +1614,13 @@ fn synthesize_graph_with_progress(
     let tools = synthesize_tools_from_sources(repo, &nodes, &processes, &native_tools);
     emit_phase(
         on_event,
+        "codebase-memory:export-artifacts:synthesize:commands",
+        0,
+        0,
+    );
+    let commands = synthesize_commands_from_sources(repo, &nodes, &processes);
+    emit_phase(
+        on_event,
         "codebase-memory:export-artifacts:synthesize:jobs",
         0,
         0,
@@ -1671,6 +1688,7 @@ fn synthesize_graph_with_progress(
         processes,
         routes,
         tools,
+        commands,
         jobs,
         topics,
         caches,

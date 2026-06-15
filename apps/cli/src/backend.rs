@@ -55,6 +55,7 @@ const DEFINITION_LABELS: &[&str] = &[
     "Route",
     "GraphQL",
     "Tool",
+    "Command",
     "Job",
     "Table",
     "Repository",
