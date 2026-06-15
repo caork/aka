@@ -2453,6 +2453,65 @@ class RabbitEvents {
 }
 
 #[test]
+fn synthesizes_spring_jms_topics() {
+    let repo = temp_repo("java-jms-topics");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/JmsEvents.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.jms.annotation.JmsListener;
+
+class JmsEvents {
+    @JmsListener(destination = "orders.created")
+    public void consume(String payload) {}
+
+    public void publish(Object event) {
+        jmsTemplate.convertAndSend("orders.created", event);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Method",
+        "consume",
+        "com.example.orders.JmsEvents.consume",
+        file,
+        json!({
+            "decorators": ["@JmsListener(destination = \"orders.created\")"],
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "publish",
+        "com.example.orders.JmsEvents.publish",
+        file,
+        (9, 11),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let topic = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders.created")
+        .expect("orders.created jms topic");
+    assert_eq!(topic.broker, "jms");
+    assert_eq!(topic.consumers.len(), 1);
+    assert_eq!(topic.producers.len(), 1);
+}
+
+#[test]
 fn synthesizes_python_message_topics() {
     let repo = temp_repo("python-message-topics");
     std::fs::write(

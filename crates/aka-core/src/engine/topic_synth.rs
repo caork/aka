@@ -238,6 +238,20 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
                     });
                 }
             }
+            if decorator.contains("JmsListener") {
+                for topic in annotation_string_values(
+                    decorator,
+                    &["destination", "queue", "topic", "value"],
+                ) {
+                    out.push(TopicDetection {
+                        topic,
+                        broker: "jms".into(),
+                        kind: TopicEndpointKind::Consumer,
+                        node_id: node.aka_id.clone(),
+                        strategy: "java-jms-listener".into(),
+                    });
+                }
+            }
         }
     }
     out.extend(extract_call_topic_literals(
@@ -250,6 +264,15 @@ fn extract_jvm_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDe
         0,
     ));
     out.extend(extract_rabbit_template_topics(text, nodes));
+    out.extend(extract_call_topic_literals(
+        text,
+        nodes,
+        "jmsTemplate.convertAndSend",
+        "jms",
+        TopicEndpointKind::Producer,
+        "java-jms-template-send",
+        0,
+    ));
     out
 }
 
