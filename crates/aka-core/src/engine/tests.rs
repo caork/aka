@@ -1494,6 +1494,79 @@ def get_order(id: str):
 }
 
 #[test]
+fn synthesizes_django_urlconf_routes() {
+    let repo = temp_repo("django-urlconf-routes");
+    std::fs::create_dir_all(repo.join("orders")).unwrap();
+    std::fs::write(
+        repo.join("orders/urls.py"),
+        r#"from django.urls import path, re_path
+from . import views
+
+urlpatterns = [
+    path("orders/<int:id>/", views.get_order, name="order-detail"),
+    re_path(r"^legacy/orders/(?P<id>\d+)/$", views.legacy_order, name="legacy-order"),
+]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("orders/views.py"),
+        r#"def get_order(request, id):
+    return {"id": id}
+
+def legacy_order(request, id):
+    return {"id": id}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "get_order",
+        "orders.views.get_order",
+        "orders/views.py",
+        (1, 2),
+        json!({"language": "python"}),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "legacy_order",
+        "orders.views.legacy_order",
+        "orders/views.py",
+        (4, 5),
+        json!({"language": "python"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/orders/{id}")
+        .expect("django path route");
+    assert_eq!(
+        route.handler_id.as_deref(),
+        Some("cbm:1:orders.views.get_order")
+    );
+    assert!(route
+        .edge_recs()
+        .iter()
+        .any(|edge| edge.edge_type == "HANDLES_ROUTE"));
+
+    let legacy = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/legacy/orders/{id}")
+        .expect("django re_path route");
+    assert_eq!(
+        legacy.handler_id.as_deref(),
+        Some("cbm:2:orders.views.legacy_order")
+    );
+}
+
+#[test]
 fn synthesizes_fastapi_local_apirouter_prefixes() {
     let repo = temp_repo("fastapi-local-router");
     std::fs::create_dir_all(repo.join("api")).unwrap();
@@ -3094,6 +3167,7 @@ fn config_synthesis_uses_project_sources_and_excludes_tests() {
     run_git(&repo, &["init"]);
     std::fs::create_dir_all(repo.join("src/main/resources")).unwrap();
     std::fs::create_dir_all(repo.join("src/test/resources")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
     std::fs::write(
         repo.join("src/main/resources/application.yml"),
         r#"
@@ -3114,6 +3188,7 @@ fixtures:
         &repo,
         &[
             "add",
+            "pom.xml",
             "src/main/resources/application.yml",
             "src/test/resources/application.yml",
         ],
@@ -3649,7 +3724,7 @@ def archive_orders(session):
 }
 
 #[test]
-fn semantic_synthesis_excludes_git_tracked_test_sources() {
+fn semantic_synthesis_excludes_build_configured_test_sources() {
     let repo = temp_repo("git-project-semantic-test-sources");
     run_git(&repo, &["init"]);
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
@@ -3660,6 +3735,7 @@ fn semantic_synthesis_excludes_git_tracked_test_sources() {
     let test_file = "src/test/java/com/example/orders/OrderServiceTest.java";
     let migration_file = "src/main/resources/db/migration/V1__create_orders.sql";
     let test_migration_file = "src/test/resources/db/migration/V999__test_fixture.sql";
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
     std::fs::write(
         repo.join(service_file),
         r#"package com.example.orders;
@@ -3708,6 +3784,7 @@ class OrderServiceTest {
         &repo,
         &[
             "add",
+            "pom.xml",
             service_file,
             test_file,
             migration_file,

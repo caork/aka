@@ -38,6 +38,7 @@ mod policy_synth;
 mod property_synth;
 mod resource_synth;
 mod route_consumer_synth;
+mod route_django_synth;
 mod route_shape;
 mod source_scan;
 mod tool_synth;
@@ -57,6 +58,7 @@ use property_synth::extract_python_class_properties;
 use property_synth::{synthesize_python_properties, SynthProperty};
 use resource_synth::{synthesize_resources_from_sources, SynthResource};
 use route_consumer_synth::attach_route_consumers;
+use route_django_synth::{django_urlconf_routes, django_urlconf_routes_from_repo};
 use route_shape::{
     extract_error_keys, extract_middleware, extract_response_keys, literal_occurrences,
 };
@@ -1328,11 +1330,11 @@ pub(super) struct SynthRouteConsumer {
 }
 
 #[derive(Debug, Clone)]
-struct RouteCandidate {
-    route: String,
-    method: Option<String>,
-    handler_id: Option<String>,
-    handler_name: Option<String>,
+pub(super) struct RouteCandidate {
+    pub(super) route: String,
+    pub(super) method: Option<String>,
+    pub(super) handler_id: Option<String>,
+    pub(super) handler_name: Option<String>,
 }
 
 impl SynthRoute {
@@ -2449,9 +2451,11 @@ fn synthesize_routes_from_sources(
     processes: &[SynthProcess],
     native_routes: &[NativeAppNode],
 ) -> Vec<SynthRoute> {
-    let mut by_file = route_nodes_by_file(nodes);
+    let by_file = route_nodes_by_file(nodes);
+    let project_sources = ProjectSourceSet::discover(repo);
     let python_prefixes = python_router_prefixes_by_file(repo, by_file.keys().map(String::as_str));
     let java_interface_routes = java_interface_routes_by_method(repo, nodes);
+    let django_routes_by_file = django_urlconf_routes_from_repo(repo, &project_sources, &by_file);
     let mut routes: BTreeMap<(String, String), SynthRoute> = BTreeMap::new();
     for native in native_routes {
         let route = route_from_path(&native.file_path)
@@ -2474,7 +2478,7 @@ fn synthesize_routes_from_sources(
             },
         );
     }
-    for (file_path, file_nodes) in &mut by_file {
+    for (file_path, file_nodes) in &by_file {
         let Some(text) = read_repo_text(repo, file_path) else {
             continue;
         };
@@ -2503,6 +2507,7 @@ fn synthesize_routes_from_sources(
             python_prefixes.get(file_path),
             &java_interface_routes,
         ));
+        route_candidates.extend(django_urlconf_routes(file_path, &text, &by_file));
         dedup_route_candidates(&mut route_candidates);
         if route_candidates.is_empty() {
             continue;
@@ -2511,56 +2516,33 @@ fn synthesize_routes_from_sources(
         let error_keys = extract_error_keys(&response_keys, &text);
         let middleware = extract_middleware(&text);
         for candidate in route_candidates {
-            let route = candidate.route;
-            let key = (route.clone(), file_path.clone());
-            match routes.get_mut(&key) {
-                Some(existing) => {
-                    if existing.method.is_none() {
-                        existing.method = candidate.method.clone();
-                    }
-                    if existing.handler_id.is_none() {
-                        existing.handler_id = candidate.handler_id.clone();
-                        existing.handler_name = candidate.handler_name.clone();
-                    }
-                    merge_strings(&mut existing.middleware, &middleware);
-                    merge_strings(&mut existing.response_keys, &response_keys);
-                    merge_strings(&mut existing.error_keys, &error_keys);
-                    merge_strings(
-                        &mut existing.process_ids,
-                        &process_ids_for_entry(
-                            processes,
-                            file_path,
-                            candidate.handler_id.as_deref(),
-                        ),
-                    );
-                }
-                None => {
-                    routes.insert(
-                        key,
-                        SynthRoute {
-                            id: format!(
-                                "route:heuristic:{:016x}",
-                                stable_hash(&format!("{route}|{file_path}"))
-                            ),
-                            route,
-                            file_path: file_path.clone(),
-                            emit_node: true,
-                            method: candidate.method,
-                            handler_id: candidate.handler_id.clone(),
-                            handler_name: candidate.handler_name,
-                            middleware: middleware.clone(),
-                            response_keys: response_keys.clone(),
-                            error_keys: error_keys.clone(),
-                            consumers: Vec::new(),
-                            process_ids: process_ids_for_entry(
-                                processes,
-                                file_path,
-                                candidate.handler_id.as_deref(),
-                            ),
-                        },
-                    );
-                }
-            }
+            merge_route_candidate(
+                &mut routes,
+                processes,
+                file_path,
+                candidate,
+                &middleware,
+                &response_keys,
+                &error_keys,
+            );
+        }
+    }
+
+    for (file_path, route_candidates) in django_routes_by_file {
+        let text = read_repo_text(repo, &file_path).unwrap_or_default();
+        let response_keys = extract_response_keys(&text);
+        let error_keys = extract_error_keys(&response_keys, &text);
+        let middleware = extract_middleware(&text);
+        for candidate in route_candidates {
+            merge_route_candidate(
+                &mut routes,
+                processes,
+                &file_path,
+                candidate,
+                &middleware,
+                &response_keys,
+                &error_keys,
+            );
         }
     }
 
@@ -2573,6 +2555,63 @@ fn synthesize_routes_from_sources(
             .then_with(|| a.file_path.cmp(&b.file_path))
     });
     out
+}
+
+fn merge_route_candidate(
+    routes: &mut BTreeMap<(String, String), SynthRoute>,
+    processes: &[SynthProcess],
+    file_path: &str,
+    candidate: RouteCandidate,
+    middleware: &[String],
+    response_keys: &[String],
+    error_keys: &[String],
+) {
+    let route = candidate.route;
+    let key = (route.clone(), file_path.to_string());
+    match routes.get_mut(&key) {
+        Some(existing) => {
+            if existing.method.is_none() {
+                existing.method = candidate.method.clone();
+            }
+            if existing.handler_id.is_none() {
+                existing.handler_id = candidate.handler_id.clone();
+                existing.handler_name = candidate.handler_name.clone();
+            }
+            merge_strings(&mut existing.middleware, middleware);
+            merge_strings(&mut existing.response_keys, response_keys);
+            merge_strings(&mut existing.error_keys, error_keys);
+            merge_strings(
+                &mut existing.process_ids,
+                &process_ids_for_entry(processes, file_path, candidate.handler_id.as_deref()),
+            );
+        }
+        None => {
+            routes.insert(
+                key,
+                SynthRoute {
+                    id: format!(
+                        "route:heuristic:{:016x}",
+                        stable_hash(&format!("{route}|{file_path}"))
+                    ),
+                    route,
+                    file_path: file_path.to_string(),
+                    emit_node: true,
+                    method: candidate.method,
+                    handler_id: candidate.handler_id.clone(),
+                    handler_name: candidate.handler_name,
+                    middleware: middleware.to_vec(),
+                    response_keys: response_keys.to_vec(),
+                    error_keys: error_keys.to_vec(),
+                    consumers: Vec::new(),
+                    process_ids: process_ids_for_entry(
+                        processes,
+                        file_path,
+                        candidate.handler_id.as_deref(),
+                    ),
+                },
+            );
+        }
+    }
 }
 
 fn string_literals(text: &str) -> Vec<String> {
