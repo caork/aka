@@ -165,6 +165,20 @@ pub(super) fn command_entry_hints_from_sources(
             }
         }
     }
+    for (file_path, file_nodes) in by_file {
+        let text = read_repo_text(repo, &file_path);
+        for node in file_nodes
+            .iter()
+            .copied()
+            .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+        {
+            for detection in detect_python_commands(text.as_deref(), node) {
+                out.entry(node.aka_id.clone()).or_insert(CommandEntryHint {
+                    strategy: detection.strategy,
+                });
+            }
+        }
+    }
     out
 }
 
