@@ -269,6 +269,153 @@ class AuditHandler {
 }
 
 #[test]
+fn java_process_synthesis_uses_project_sources_and_excludes_tests() {
+    let repo = temp_repo("java-process-project-sources");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    let main_file = "src/main/java/com/example/ops/Maintenance.java";
+    let test_file = "src/test/java/com/example/ops/MaintenanceTest.java";
+    std::fs::write(
+        repo.join(main_file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.annotation.Bean;
+
+class MaintenanceConfig {
+    @Bean
+    ApplicationRunner ingestOrders(OrderService orders) {
+        return args -> orders.loadOrders();
+    }
+}
+
+class OrderService {
+    void loadOrders() {
+        persistOrders();
+    }
+
+    void persistOrders() {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(test_file),
+        r#"package com.example.ops;
+
+import org.springframework.scheduling.annotation.Scheduled;
+
+class MaintenanceTest {
+    @Scheduled(fixedRate = 1000)
+    void resetFixtures() {
+        deleteFixtures();
+    }
+
+    void deleteFixtures() {}
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", main_file, test_file]);
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Method",
+            "ingestOrders",
+            "com.example.ops.MaintenanceConfig.ingestOrders",
+            main_file,
+        ),
+        (8, 10),
+        json!({
+            "language": "java",
+            "decorators": ["@Bean"],
+            "parent_class": "com.example.ops.MaintenanceConfig",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "loadOrders",
+            "com.example.ops.OrderService.loadOrders",
+            main_file,
+        ),
+        (14, 16),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.ops.OrderService",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
+            "persistOrders",
+            "com.example.ops.OrderService.persistOrders",
+            main_file,
+        ),
+        (18, 18),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.ops.OrderService",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        4,
+        (
+            "Method",
+            "resetFixtures",
+            "com.example.ops.MaintenanceTest.resetFixtures",
+            test_file,
+        ),
+        (7, 9),
+        json!({
+            "language": "java",
+            "decorators": ["@Scheduled(fixedRate = 1000)"],
+            "parent_class": "com.example.ops.MaintenanceTest",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        5,
+        (
+            "Method",
+            "deleteFixtures",
+            "com.example.ops.MaintenanceTest.deleteFixtures",
+            test_file,
+        ),
+        (11, 11),
+        json!({
+            "parent_class": "com.example.ops.MaintenanceTest",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "CALLS");
+    insert_edge(&conn, 2, 2, 3, "CALLS");
+    insert_edge(&conn, 3, 4, 5, "CALLS");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let process_names: Vec<_> = synth
+        .processes
+        .iter()
+        .map(|process| process.name.as_str())
+        .collect();
+
+    assert!(process_names.contains(&"ingestOrders → persistOrders"));
+    assert!(
+        !process_names.contains(&"resetFixtures → deleteFixtures"),
+        "tracked Java test sources from build-configured roots must not seed business processes"
+    );
+}
+
+#[test]
 fn java_call_chains_without_source_entry_facts_do_not_fallback_to_name_only_processes() {
     let repo = temp_repo("java-no-name-only-process-fallback");
     run_git(&repo, &["init"]);

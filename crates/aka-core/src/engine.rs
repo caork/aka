@@ -81,9 +81,10 @@ use route_shape::{
 };
 use route_spring_functional_synth::spring_functional_routes_from_repo;
 use source_scan::{
-    find_call_args, find_matching_paren, is_ident_continue, is_noisy_source_path, node_at_offset,
-    nodes_by_file, pick_handler_node, project_code_nodes_by_file, read_repo_text, skip_ws,
-    split_top_level_commas, stable_hash, ProjectSourceSet,
+    find_call_args, find_matching_paren, is_business_language, is_ident_continue,
+    is_noisy_source_path, is_project_code_source_path, node_at_offset, nodes_by_file,
+    pick_handler_node, project_code_nodes_by_file, read_repo_text, skip_ws, split_top_level_commas,
+    stable_hash, ProjectSourceSet,
 };
 use source_symbol_synth::{synthesize_source_symbols_from_sources, SynthSourceSymbol};
 use tool_synth::{synthesize_tools_from_sources, SynthTool};
@@ -1657,6 +1658,9 @@ fn synthesize_graph_with_progress(
     let synthetic_edges =
         synthesize_dependency_edges_from_sources(repo, &nodes, &existing_call_pairs);
     let calls = load_call_graph(conn, project, &nodes, &synthetic_edges)?;
+    let project_sources = ProjectSourceSet::discover(repo);
+    let process_nodes = project_process_nodes(repo, &nodes, &project_sources);
+    let process_calls = calls.project_subgraph(&process_nodes);
     let mut command_entry_hints = command_entry_hints_from_sources(repo, &nodes);
     for (handler_id, strategy) in job_entry_hints_from_sources(repo, &nodes) {
         command_entry_hints
@@ -1673,7 +1677,7 @@ fn synthesize_graph_with_progress(
     let communities = if native_communities {
         Vec::new()
     } else {
-        synthesize_communities(&nodes, &calls.edges)
+        synthesize_communities(&process_nodes, &process_calls.edges)
     };
     emit_phase(
         on_event,
@@ -1697,9 +1701,9 @@ fn synthesize_graph_with_progress(
     } else {
         let symbol_count = count_process_symbol_basis(conn, project)?;
         synthesize_processes_from_calls(
-            &nodes,
-            &calls.adjacency,
-            &calls.indegree,
+            &process_nodes,
+            &process_calls.adjacency,
+            &process_calls.indegree,
             &community_memberships,
             &command_entry_hints,
             symbol_count,
@@ -2002,6 +2006,27 @@ struct CallGraph {
     edges: Vec<(String, String)>,
 }
 
+impl CallGraph {
+    fn project_subgraph(&self, nodes: &BTreeMap<String, SynthNode>) -> Self {
+        let mut graph = CallGraph::default();
+        for (source, target) in &self.edges {
+            if !nodes.contains_key(source) || !nodes.contains_key(target) || source == target {
+                continue;
+            }
+            let inserted = graph
+                .adjacency
+                .entry(source.clone())
+                .or_default()
+                .insert(target.clone());
+            if inserted {
+                *graph.indegree.entry(target.clone()).or_default() += 1;
+                graph.edges.push((source.clone(), target.clone()));
+            }
+        }
+        graph
+    }
+}
+
 fn load_call_graph(
     conn: &Connection,
     project: &str,
@@ -2151,6 +2176,24 @@ fn load_native_community_memberships(
         .into_iter()
         .map(|(id, refs)| (id, refs.into_iter().collect()))
         .collect())
+}
+
+fn project_process_nodes(
+    repo: &Path,
+    nodes: &BTreeMap<String, SynthNode>,
+    project_sources: &ProjectSourceSet,
+) -> BTreeMap<String, SynthNode> {
+    nodes
+        .iter()
+        .filter(|(_, node)| {
+            let project_code = is_business_language(&node.language)
+                || is_project_code_source_path(&node.file_path);
+            node.file_path.is_empty()
+                || !project_code
+                || project_sources.contains_project_file(repo, &node.file_path)
+        })
+        .map(|(id, node)| (id.clone(), node.clone()))
+        .collect()
 }
 
 fn synthesize_communities(
