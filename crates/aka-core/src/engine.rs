@@ -3962,11 +3962,7 @@ fn language_entry_name(lower_name: &str, language: &str) -> bool {
     match language {
         "python" => lower_name == "__main__" || lower_name.starts_with("view_"),
         "go" => lower_name == "init" || lower_name == "servehttp",
-        "java" | "kotlin" | "csharp" => {
-            lower_name == "main"
-                || lower_name.ends_with("controller")
-                || lower_name.ends_with("handler")
-        }
+        "java" | "kotlin" | "csharp" => lower_name == "main",
         "rust" => lower_name == "main" || lower_name.starts_with("run_"),
         _ => false,
     }

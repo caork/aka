@@ -132,3 +132,138 @@ class OrderService {
         .iter()
         .any(|process| process.name.starts_with("run ")));
 }
+
+#[test]
+fn java_handler_names_do_not_override_source_fact_process_entries() {
+    let repo = temp_repo("java-handler-name-not-entry");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    let file = "src/main/java/com/example/ops/Maintenance.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.annotation.Bean;
+
+class MaintenanceConfig {
+    @Bean
+    ApplicationRunner ingestOrders(OrderService orders) {
+        return args -> orders.loadOrders();
+    }
+}
+
+class OrderService {
+    void loadOrders() {
+        persistOrders();
+    }
+
+    void persistOrders() {}
+}
+
+class AuditHandler {
+    void dispatchHandler() {
+        enrichAudit();
+    }
+
+    void enrichAudit() {}
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", file]);
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Method",
+            "ingestOrders",
+            "com.example.ops.MaintenanceConfig.ingestOrders",
+            file,
+        ),
+        (8, 10),
+        json!({
+            "language": "java",
+            "decorators": ["@Bean"],
+            "parent_class": "com.example.ops.MaintenanceConfig",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "loadOrders",
+            "com.example.ops.OrderService.loadOrders",
+            file,
+        ),
+        (14, 16),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.ops.OrderService",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
+            "persistOrders",
+            "com.example.ops.OrderService.persistOrders",
+            file,
+        ),
+        (18, 18),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.ops.OrderService",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        4,
+        (
+            "Method",
+            "dispatchHandler",
+            "com.example.ops.AuditHandler.dispatchHandler",
+            file,
+        ),
+        (22, 24),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.ops.AuditHandler",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        5,
+        (
+            "Method",
+            "enrichAudit",
+            "com.example.ops.AuditHandler.enrichAudit",
+            file,
+        ),
+        (26, 26),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.ops.AuditHandler",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "CALLS");
+    insert_edge(&conn, 2, 2, 3, "CALLS");
+    insert_edge(&conn, 3, 4, 5, "CALLS");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let process_names: Vec<_> = synth
+        .processes
+        .iter()
+        .map(|process| process.name.as_str())
+        .collect();
+    assert!(process_names.contains(&"ingestOrders → persistOrders"));
+    assert!(
+        !process_names.contains(&"dispatchHandler → enrichAudit"),
+        "Java Handler suffixes are name-only hints and must not outrank source-fact entries"
+    );
+}

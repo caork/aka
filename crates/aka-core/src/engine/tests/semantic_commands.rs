@@ -487,6 +487,48 @@ class TestMaintenance implements ApplicationRunner {
 }
 
 #[test]
+fn spring_runner_detection_ignores_runner_names_without_source_facts() {
+    let repo = temp_repo("spring-runner-name-only");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    let file = "src/main/java/com/example/ops/InventoryRunner.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.ops;
+
+class InventoryRunner {
+    void execute() {
+        rebuildInventory();
+    }
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", file]);
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "InventoryRunner",
+            "com.example.ops.InventoryRunner",
+            file,
+        ),
+        (3, 7),
+        json!({"language": "java"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(
+        synth.commands.is_empty(),
+        "Spring runner commands require implements/@Bean source facts, not Runner name suffixes"
+    );
+}
+
+#[test]
 fn command_synthesis_excludes_gitignored_source_files() {
     let repo = temp_repo("gitignored-command-sources");
     run_git(&repo, &["init"]);

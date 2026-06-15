@@ -47,8 +47,9 @@ impl ProjectSourceSet {
             return false;
         }
         if self.has_git_listing {
-            return self.tracked_files.contains(&normalized)
-                || self.untracked_files.contains(&normalized);
+            return repo.join(&normalized).is_file()
+                && (self.tracked_files.contains(&normalized)
+                    || self.untracked_files.contains(&normalized));
         }
         repo.join(&normalized).is_file()
     }
@@ -519,5 +520,23 @@ mod tests {
         assert!(sources.contains_project_file(&repo, untracked));
         assert!(!sources.contains_project_file(&repo, test));
         assert!(!sources.contains_project_file(&repo, ignored));
+    }
+
+    #[test]
+    fn project_source_set_ignores_deleted_tracked_files() {
+        let repo = temp_repo("git-deleted-tracked");
+        run_git(&repo, &["init"]);
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+        std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+        let deleted = "src/main/java/com/example/ops/DeletedMaintenance.java";
+        std::fs::write(repo.join(deleted), "class DeletedMaintenance {}\n").unwrap();
+        run_git(&repo, &["add", "pom.xml", deleted]);
+        std::fs::remove_file(repo.join(deleted)).unwrap();
+
+        let sources = ProjectSourceSet::discover(&repo);
+
+        assert!(sources.has_git_listing());
+        assert!(sources.is_git_tracked_file(deleted));
+        assert!(!sources.contains_project_file(&repo, deleted));
     }
 }
