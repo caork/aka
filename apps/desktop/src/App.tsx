@@ -1,6 +1,10 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  consumeClientIntegrationSyncAfterRestart,
+  syncClientIntegrations,
+} from "./client-integration-api";
 import CodeWorkspace from "./components/CodeWorkspace";
 import { isDesktopRuntime } from "./desktop-api";
 import DetailPanel from "./components/DetailPanel";
@@ -22,6 +26,13 @@ export default function App() {
     media.addEventListener("change", syncSystemTheme);
     return () => media.removeEventListener("change", syncSystemTheme);
   }, [syncSystemTheme]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime() || !consumeClientIntegrationSyncAfterRestart()) return;
+    void syncClientIntegrations({ runCli: true }).catch((e) => {
+      console.warn("aka client integration sync after update failed", e);
+    });
+  }, []);
 
   const startWindowDrag = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !isDesktopRuntime()) return;

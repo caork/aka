@@ -308,12 +308,58 @@ assert_zip_has_engine() {
   return 1
 }
 
+assert_zip_has_client_integrations() {
+  local zip_path prefix listing
+  zip_path="$1"
+  prefix="$2"
+  [[ -f "${zip_path}" ]] || { echo "error: 找不到 zip: ${zip_path}" >&2; return 1; }
+  listing="$(unzip -Z1 "${zip_path}")"
+  assert_listing_has_client_integrations "${listing}" "${prefix}" "${zip_path}"
+}
+
+assert_targz_has_client_integrations() {
+  local tar_path prefix listing
+  tar_path="$1"
+  prefix="$2"
+  [[ -f "${tar_path}" ]] || { echo "error: 找不到 tar.gz: ${tar_path}" >&2; return 1; }
+  listing="$(tar -tzf "${tar_path}")"
+  assert_listing_has_client_integrations "${listing}" "${prefix}" "${tar_path}"
+}
+
+assert_listing_has_client_integrations() {
+  local listing prefix archive base install marketplace
+  listing="$1"
+  prefix="$2"
+  archive="$3"
+  for base in "client-integrations" "resources/client-integrations"; do
+    install="${prefix:+${prefix}/}${base}/clients/install.sh"
+    marketplace="${prefix:+${prefix}/}${base}/.claude-plugin/marketplace.json"
+    if grep -qxF "${install}" <<< "${listing}" && grep -qxF "${marketplace}" <<< "${listing}"; then
+      echo "==> 校验包内客户端集成资源: ${install}, ${marketplace}"
+      return 0
+    fi
+  done
+  echo "error: 包内缺少客户端集成资源: ${archive}" >&2
+  return 1
+}
+
 prepare_desktop_resources() {
   local triple platform
   triple="$1"
   platform="$(platform_from_triple "${triple}")"
   echo "==> 准备桌面内置资源 (${platform})"
   copy_engine_resource "${platform}"
+  copy_client_integration_resources
+}
+
+copy_client_integration_resources() {
+  local dst
+  dst="${TAURI_RESOURCES_DIR}/client-integrations"
+  rm -rf "${dst}"
+  mkdir -p "${dst}"
+  cp -R "${REPO_ROOT}/clients" "${dst}/clients"
+  cp -R "${REPO_ROOT}/.claude-plugin" "${dst}/.claude-plugin"
+  echo "==> 准备桌面客户端集成资源: ${dst}"
 }
 
 macos_notarization_credentials_present() {
@@ -505,6 +551,9 @@ NODE
 }
 
 package_clients() {
+  node -e 'const fs=require("fs"); const plugin=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const version=process.argv[2]; if (plugin.version !== version) { console.error(`error: Claude plugin version ${plugin.version} != release version ${version}`); process.exit(1); } if (plugin.license !== "MIT") { console.error(`error: Claude plugin license must be MIT, got ${plugin.license}`); process.exit(1); }' \
+    "${REPO_ROOT}/clients/claude-code/.claude-plugin/plugin.json" "${VERSION}"
+
   PLUGIN_ZIP="${DIST_DIR}/aka-claude-code-plugin-${VERSION}.zip"
   rm -f "${PLUGIN_ZIP}"
   (
@@ -622,6 +671,7 @@ package_desktop() {
       rm -f "${desktop_zip}"
       COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "${app_path}" "${desktop_zip}"
       assert_zip_has_engine "${desktop_zip}" "${desktop_platform}" "AKA.app/Contents/Resources"
+      assert_zip_has_client_integrations "${desktop_zip}" "AKA.app/Contents/Resources"
       echo "==> ${desktop_zip}"
 
       tauri_macos_bundle_dir="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/macos"
@@ -631,6 +681,7 @@ package_desktop() {
           desktop_updater="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.app.tar.gz"
           rm -f "${desktop_updater}" "${desktop_updater}.sig" "${desktop_updater}.signature"
           cp "${tauri_updater}" "${desktop_updater}"
+          assert_targz_has_client_integrations "${desktop_updater}" "AKA.app/Contents/Resources"
           copy_signature_sidecars "${tauri_updater}" "${desktop_updater}"
           echo "==> ${desktop_updater}"
         elif tauri_updater_signing_configured; then
@@ -715,7 +766,9 @@ package_windows_desktop() {
   rm -f "${portable_zip}"
   stage="$(mktemp -d)"
   cp "${exe_path}" "${stage}/AKA.exe"
-  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe)
+  cp -R "${TAURI_RESOURCES_DIR}/client-integrations" "${stage}/client-integrations"
+  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe client-integrations)
+  assert_zip_has_client_integrations "${portable_zip}" ""
   rm -rf "${stage}"
   echo "==> ${portable_zip}"
 }

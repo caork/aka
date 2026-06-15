@@ -1,7 +1,7 @@
 //! aka desktop shell with an embedded Rust backend.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -17,10 +17,26 @@ type BackendState = Arc<AkaBackend>;
 
 const AKA_HOME_DIR_NAME: &str = "aka-home";
 const APP_DATA_DIR_NAME: &str = "com.aka.desktop";
+const CLIENT_INTEGRATIONS_DIR_NAME: &str = "client-integrations";
 const DESKTOP_MCP_ADDR: &str = "127.0.0.1:4112";
+const DESKTOP_MCP_URL: &str = "http://127.0.0.1:4112/mcp";
 
 struct DesktopMcpRuntime {
     _rt: tokio::runtime::Runtime,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientIntegrationSyncOut {
+    synced: Vec<ClientIntegrationAction>,
+    skipped: Vec<ClientIntegrationAction>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientIntegrationAction {
+    client: &'static str,
+    detail: String,
 }
 
 #[cfg(target_os = "windows")]
@@ -52,7 +68,6 @@ fn fallback_app_data_dir() -> PathBuf {
     std::env::temp_dir().join(APP_DATA_DIR_NAME)
 }
 
-#[cfg(not(target_os = "windows"))]
 fn fallback_resource_dir() -> PathBuf {
     let Ok(exe) = std::env::current_exe() else {
         return std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
@@ -96,6 +111,328 @@ fn bundled_engine_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
     .find(|dir| has_native_engine(dir))
 }
 
+fn bundled_client_integrations_dir(resource_dir: &Path) -> Option<PathBuf> {
+    [
+        resource_dir.join(CLIENT_INTEGRATIONS_DIR_NAME),
+        resource_dir
+            .join("resources")
+            .join(CLIENT_INTEGRATIONS_DIR_NAME),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."),
+    ]
+    .into_iter()
+    .find(|dir| {
+        dir.join("clients").is_dir()
+            && dir
+                .join(".claude-plugin")
+                .join("marketplace.json")
+                .is_file()
+    })
+}
+
+fn desktop_home_dir() -> anyhow::Result<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))
+}
+
+fn copy_file_if_present(src: &Path, dst: &Path) -> anyhow::Result<bool> {
+    if !src.is_file() {
+        return Ok(false);
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dst)?;
+    Ok(true)
+}
+
+fn copy_dir_replace(src: &Path, dst: &Path) -> anyhow::Result<bool> {
+    if !src.is_dir() {
+        return Ok(false);
+    }
+    if dst.exists() {
+        std::fs::remove_dir_all(dst)?;
+    }
+    std::fs::create_dir_all(dst)?;
+    copy_dir_recursive(src, dst)?;
+    Ok(true)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            copy_dir_recursive(&path, &target)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_command(name: &str) -> Option<PathBuf> {
+    let direct = Path::new(name);
+    if direct.components().count() > 1 {
+        return executable_file(direct).then(|| direct.to_path_buf());
+    }
+
+    let dirs = command_search_dirs();
+    command_candidates(name)
+        .into_iter()
+        .flat_map(|candidate| dirs.iter().map(move |dir| dir.join(&candidate)))
+        .find(|path| executable_file(path))
+}
+
+fn command_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        push_command_dir(&mut dirs, "/opt/homebrew/bin");
+        push_command_dir(&mut dirs, "/usr/local/bin");
+        push_command_dir(&mut dirs, "/usr/bin");
+        push_command_dir(&mut dirs, "/bin");
+        if let Ok(home) = desktop_home_dir() {
+            push_command_dir(&mut dirs, home.join(".local").join("bin"));
+            push_command_dir(&mut dirs, home.join(".npm-global").join("bin"));
+        }
+    }
+
+    dirs
+}
+
+fn push_command_dir(dirs: &mut Vec<PathBuf>, dir: impl Into<PathBuf>) {
+    let dir = dir.into();
+    if !dirs.iter().any(|existing| existing == &dir) {
+        dirs.push(dir);
+    }
+}
+
+fn command_candidates(name: &str) -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        if Path::new(name).extension().is_some() {
+            return vec![name.to_string()];
+        }
+        let exts = std::env::var_os("PATHEXT")
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .split(';')
+                    .filter(|ext| !ext.is_empty())
+                    .map(|ext| ext.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec![".exe".into(), ".cmd".into(), ".bat".into()]);
+        let mut out = vec![name.to_string()];
+        out.extend(exts.into_iter().map(|ext| format!("{name}{ext}")));
+        out
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![name.to_string()]
+    }
+}
+
+fn executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn desktop_cli_command(program: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    if let Ok(path) = std::env::join_paths(command_search_dirs()) {
+        command.env("PATH", path);
+    }
+    command
+}
+
+fn claude_plugin_installed(claude: &Path) -> bool {
+    let Ok(output) = desktop_cli_command(claude)
+        .args(["plugin", "list"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout).contains("aka@aka")
+}
+
+fn sync_claude_plugin(
+    resources: &Path,
+    out: &mut ClientIntegrationSyncOut,
+    run_cli: bool,
+) -> anyhow::Result<()> {
+    let Some(claude) = resolve_command("claude") else {
+        out.skipped.push(ClientIntegrationAction {
+            client: "claude-code",
+            detail: "Claude CLI not found".into(),
+        });
+        return Ok(());
+    };
+
+    let marketplace = resources.join(".claude-plugin").join("marketplace.json");
+    if !marketplace.is_file() {
+        out.skipped.push(ClientIntegrationAction {
+            client: "claude-code",
+            detail: "bundled marketplace metadata not found".into(),
+        });
+        return Ok(());
+    }
+
+    if !claude_plugin_installed(&claude) {
+        out.skipped.push(ClientIntegrationAction {
+            client: "claude-code",
+            detail: "aka@aka plugin is not installed".into(),
+        });
+        return Ok(());
+    }
+
+    if !run_cli {
+        out.skipped.push(ClientIntegrationAction {
+            client: "claude-code",
+            detail: "Claude plugin update needs a manual sync from Settings".into(),
+        });
+        return Ok(());
+    }
+
+    let _ = desktop_cli_command(&claude)
+        .args(["plugin", "marketplace", "add"])
+        .arg(resources)
+        .status();
+    let status = desktop_cli_command(&claude)
+        .args(["plugin", "update", "aka@aka"])
+        .status()?;
+    if status.success() {
+        out.synced.push(ClientIntegrationAction {
+            client: "claude-code",
+            detail: "updated aka@aka plugin via Claude CLI".into(),
+        });
+    } else {
+        out.skipped.push(ClientIntegrationAction {
+            client: "claude-code",
+            detail: format!("claude plugin update exited with {status}"),
+        });
+    }
+    Ok(())
+}
+
+fn sync_opencode_integration(
+    resources: &Path,
+    out: &mut ClientIntegrationSyncOut,
+    create_missing: bool,
+) -> anyhow::Result<()> {
+    let home = desktop_home_dir()?;
+    let src = resources.join("clients").join("opencode");
+    let plugin_src = src.join("plugins").join("aka.js");
+    let skill_src = src.join("skills").join("aka-code-graph");
+    let plugin_dst = home
+        .join(".config")
+        .join("opencode")
+        .join("plugins")
+        .join("aka.js");
+    let skill_dst = home
+        .join(".config")
+        .join("opencode")
+        .join("skills")
+        .join("aka-code-graph");
+
+    let plugin_installed = plugin_dst.is_file();
+    let skill_installed = skill_dst.join("SKILL.md").is_file();
+    if !create_missing && !plugin_installed && !skill_installed {
+        out.skipped.push(ClientIntegrationAction {
+            client: "opencode",
+            detail: "OpenCode integration is not installed".into(),
+        });
+        return Ok(());
+    }
+
+    let mut changed = Vec::new();
+    if (create_missing || plugin_installed) && copy_file_if_present(&plugin_src, &plugin_dst)? {
+        changed.push(format!("plugin -> {}", plugin_dst.display()));
+    }
+    if (create_missing || skill_installed) && copy_dir_replace(&skill_src, &skill_dst)? {
+        changed.push(format!("skill -> {}", skill_dst.display()));
+    }
+
+    if changed.is_empty() {
+        out.skipped.push(ClientIntegrationAction {
+            client: "opencode",
+            detail: "bundled OpenCode plugin or skill not found".into(),
+        });
+    } else {
+        out.synced.push(ClientIntegrationAction {
+            client: "opencode",
+            detail: changed.join("; "),
+        });
+    }
+    Ok(())
+}
+
+fn sync_codex_integration(out: &mut ClientIntegrationSyncOut) -> anyhow::Result<()> {
+    let cfg = desktop_home_dir()?.join(".codex").join("config.toml");
+    if cfg.is_file() {
+        let text = std::fs::read_to_string(&cfg).unwrap_or_default();
+        if text.contains("[mcp_servers.aka]") {
+            if text.contains(DESKTOP_MCP_URL) {
+                out.synced.push(ClientIntegrationAction {
+                    client: "codex",
+                    detail: "existing mcp_servers.aka config uses the desktop MCP server".into(),
+                });
+            } else {
+                out.skipped.push(ClientIntegrationAction {
+                    client: "codex",
+                    detail: "aka MCP config is not the desktop HTTP URL; no client file changed"
+                        .into(),
+                });
+            }
+            return Ok(());
+        }
+    }
+    out.skipped.push(ClientIntegrationAction {
+        client: "codex",
+        detail: "no aka MCP config found; run clients/install.sh --client codex once".into(),
+    });
+    Ok(())
+}
+
+fn sync_client_integrations_from_resources(
+    resources: &Path,
+    run_cli: bool,
+    create_missing: bool,
+) -> anyhow::Result<ClientIntegrationSyncOut> {
+    let mut out = ClientIntegrationSyncOut {
+        synced: Vec::new(),
+        skipped: Vec::new(),
+    };
+    sync_claude_plugin(resources, &mut out, run_cli)?;
+    sync_opencode_integration(resources, &mut out, create_missing)?;
+    sync_codex_integration(&mut out)?;
+    Ok(out)
+}
+
 #[cfg(target_os = "windows")]
 fn ensure_embedded_engine_dir(app_data_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
     let engine_dir = app_data_dir.join("engine");
@@ -135,6 +472,15 @@ struct RepoSettingsRequest {
     embeddings_enabled: bool,
     #[serde(default)]
     render_max_nodes: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientIntegrationSyncRequest {
+    #[serde(default)]
+    run_cli: bool,
+    #[serde(default)]
+    create_missing: bool,
 }
 
 async fn run_backend<T, F>(backend: State<'_, BackendState>, f: F) -> Result<T, String>
@@ -494,6 +840,35 @@ async fn app_version() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn sync_client_integrations(
+    app: tauri::AppHandle,
+    request: Option<ClientIntegrationSyncRequest>,
+) -> Result<ClientIntegrationSyncOut, String> {
+    let request = request.unwrap_or(ClientIntegrationSyncRequest {
+        run_cli: false,
+        create_missing: false,
+    });
+    let run_cli = request.run_cli;
+    let create_missing = request.create_missing;
+    tauri::async_runtime::spawn_blocking(move || {
+        let resource_dir = app
+            .path()
+            .resource_dir()
+            .unwrap_or_else(|_| fallback_resource_dir());
+        let resources = bundled_client_integrations_dir(&resource_dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "bundled client integrations not found in {}",
+                resource_dir.display()
+            )
+        })?;
+        sync_client_integrations_from_resources(&resources, run_cli, create_missing)
+    })
+    .await
+    .map_err(|e| format!("client integration sync failed: {e}"))?
+    .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
 async fn open_url(url: String) -> Result<serde_json::Value, String> {
     let url = validate_external_url(&url)?.to_string();
     spawn_url_opener(&url).map_err(|e| format!("open url failed: {e}"))?;
@@ -605,6 +980,7 @@ pub fn run() {
             delete_repo,
             clear_app_data,
             app_version,
+            sync_client_integrations,
             open_url,
             open_editor_url,
         ])

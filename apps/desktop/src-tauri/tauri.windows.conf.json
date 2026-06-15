@@ -1,5 +1,7 @@
 {
   "bundle": {
-    "resources": {}
+    "resources": {
+      "resources/client-integrations": "client-integrations"
+    }
   }
 }

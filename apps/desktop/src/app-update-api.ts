@@ -1,5 +1,6 @@
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
+import { markClientIntegrationSyncAfterRestart } from "./client-integration-api";
 import { isDesktopRuntime } from "./desktop-api";
 import { CURRENT_APP_VERSION } from "./release-api";
 
@@ -96,6 +97,7 @@ export async function installNativeAppUpdate(
       }
     });
     onProgress({ phase: "installed", downloadedBytes, totalBytes });
+    markClientIntegrationSyncAfterRestart();
     await relaunch();
   } catch (e) {
     throw normalizeNativeUpdaterError(e);

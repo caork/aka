@@ -77,6 +77,7 @@ stdio fallback: agent ─spawn─▶ AKA mcp ──读写同一 app data aka-hom
 
 - **MCP 工具面即合同**：工具的名称、参数、输出字段视同 `docs/contracts/artifacts.md` 的同级合同——**只增不改不删**。新能力 = 新工具或新可选参数；废弃工具先在 description 标注 deprecated 一个版本周期再移除。三个客户端都直接消费工具 schema，没有中间适配层可以吸收破坏性变更。
 - **插件版本**：`plugin.json` 的 `version` 跟随 aka 二进制的 minor 版本手动 bump（不 bump 用户就不会收到更新）；插件只含 HTTP MCP 配置和 markdown，与二进制弱耦合，硬依赖是「AKA 桌面端提供 `127.0.0.1:4112/mcp`」。
+- **桌面自动更新**：Tauri updater 会更新 AKA 桌面端本体，因此内置 HTTP MCP server 的工具实现会一起更新。Claude Code / OpenCode 已安装到用户目录里的插件/skill 是外部副本；桌面包内置最新版 `clients/`，更新重启后会尝试同步已安装副本，Settings → Client integrations 可手动补齐/同步。Codex 默认只保存 MCP URL，通常无需随版本改文件。
 - **客户端版本下限**：Claude Code 用到的特性（plugin.json + .mcp.json + skills + marketplace）为 2025 年底已稳定的核心集，刻意不用新版才有的字段（`displayName` 需 ≥2.1.143、`defaultEnabled` 需 ≥2.1.154、`userConfig` 等），保证老版本可装。Codex/OpenCode 片段同样只用各自文档标注的稳定字段。
 - **格式漂移的防线**：三家配置格式仍在演进，`clients/` 各 README 标注「2026-06 核实」与来源 URL；install.sh 优先走官方 CLI（`claude mcp add`、`codex mcp add`），格式变更由官方 CLI 吸收，手写文件仅作 fallback（OpenCode MCP 配置用 jq 合并而非整文件覆盖，本地 plugin 用发现目录安装）。
 

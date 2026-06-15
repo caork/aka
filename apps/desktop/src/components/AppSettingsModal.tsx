@@ -7,6 +7,10 @@ import {
   type InstallProgress,
   type NativeUpdateInfo,
 } from "../app-update-api";
+import {
+  syncClientIntegrations,
+  type ClientIntegrationSyncResult,
+} from "../client-integration-api";
 import { isDesktopRuntime } from "../desktop-api";
 import {
   checkForAppUpdate,
@@ -41,9 +45,11 @@ export default function AppSettingsModal({
   const [busy, setBusy] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [syncingClients, setSyncingClients] = useState(false);
   const [openingUrl, setOpeningUrl] = useState<string | null>(null);
   const [nativeUpdate, setNativeUpdate] = useState<NativeUpdateInfo | null>(null);
   const [installProgress, setInstallProgress] = useState<InstallProgress | null>(null);
+  const [clientSync, setClientSync] = useState<ClientIntegrationSyncResult | null>(null);
   const [release, setRelease] = useState<ReleaseInfo | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +125,30 @@ export default function AppSettingsModal({
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setOpeningUrl(null);
+    }
+  };
+
+  const syncClients = async () => {
+    if (syncingClients) return;
+    setSyncingClients(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const result = await syncClientIntegrations({
+        runCli: true,
+        createMissing: true,
+      });
+      setClientSync(result);
+      const count = result.synced.length;
+      setNotice(
+        count > 0
+          ? `已同步 ${count} 个客户端集成`
+          : "没有检测到可同步的已安装客户端集成",
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSyncingClients(false);
     }
   };
 
@@ -352,6 +382,49 @@ export default function AppSettingsModal({
       </div>
 
       <div className="themed-divider mt-5 border-t pt-4">
+        <div className="mb-3 flex items-start gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-medium text-ink">
+              Client integrations
+            </div>
+            <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
+              Sync Claude Code, Codex, and OpenCode integration files
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={syncingClients || !isDesktopRuntime()}
+            onClick={() => void syncClients()}
+            className="focus-ring rounded-[10px] px-3 py-2 text-[12px] font-semibold transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-55"
+            style={{
+              color: "var(--accent-ink)",
+              background: "var(--accent-fill)",
+              boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)",
+            }}
+            data-testid="sync-client-integrations"
+          >
+            {syncingClients ? "Syncing..." : "Sync clients"}
+          </button>
+        </div>
+
+        {clientSync && (
+          <div
+            className="rounded-[10px] p-3 text-[12px]"
+            style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
+            data-testid="client-integration-sync-result"
+          >
+            <ClientSyncRows label="Synced" rows={clientSync.synced} />
+            <ClientSyncRows
+              label="Skipped"
+              rows={clientSync.skipped}
+              muted
+              className={clientSync.synced.length > 0 ? "mt-2" : undefined}
+            />
+          </div>
+        )}
+      </div>
+
+      <div className="themed-divider mt-5 border-t pt-4">
         <div className="mb-3">
           <div className="text-[13px] font-medium text-ink">Local data</div>
           <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
@@ -444,6 +517,37 @@ function ReleaseAssetRow({
       >
         {opening ? "Opening..." : "Download"}
       </button>
+    </div>
+  );
+}
+
+function ClientSyncRows({
+  label,
+  rows,
+  muted = false,
+  className = "",
+}: {
+  label: string;
+  rows: ClientIntegrationSyncResult["synced"];
+  muted?: boolean;
+  className?: string;
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <div className={className}>
+      <div className="mb-1 text-[10.5px] font-semibold uppercase text-ink-3">
+        {label}
+      </div>
+      <div className="space-y-1">
+        {rows.map((row, index) => (
+          <div
+            key={`${row.client}-${index}`}
+            className={muted ? "text-ink-3" : "text-ink-2"}
+          >
+            <span className="font-medium text-ink">{row.client}</span>: {row.detail}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -145,6 +145,12 @@ release 使用 `AKA_TAURI_UPDATER=required` 和 `--require-updater true`，缺 s
 默认 updater 端点为 `https://github.com/caork/aka/releases/latest/download/latest.json`；如需切到 CDN 或
 hawkingrad mirror，可在 CI/本地打包时设置 `AKA_UPDATER_ENDPOINT` 覆盖。
 
+桌面端自动更新会同时更新内置 HTTP MCP server 的工具实现；Claude Code / Codex / OpenCode 已安装到各自
+用户目录里的插件、skill、配置片段是外部客户端副本，不会被 Tauri updater 原生替换。桌面包会内置最新版
+`clients/` 与 `.claude-plugin/`，安装更新重启后会尝试通过 Claude CLI 更新已安装的 `aka@aka` 插件，并
+刷新已安装的 OpenCode 文件类集成；Settings → Client integrations 里的 `Sync clients` 可手动补齐/同步
+客户端副本。Codex 默认只引用本地 HTTP MCP URL，工具能力随桌面端更新，通常不需要改配置。
+
 桌面包必须内置 native `codebase-memory-mcp` engine。`scripts/package-release.sh` 会在准备 Tauri 资源、
 生成 macOS `.app.zip`、生成 Windows portable zip 前后校验 `engine/codebase-memory-mcp` 或
 `engine/codebase-memory-mcp.exe`，避免把旧的 JS/node engine 目录打进包里却没有 native binary。
