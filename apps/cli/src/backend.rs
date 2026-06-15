@@ -1243,7 +1243,7 @@ fn find_code_line_matches(
         let matched = if let Some(re) = re {
             re.is_match(line)
         } else {
-            line.to_ascii_lowercase().contains(needle)
+            line_matches_literal_or_terms(line, needle)
         };
         if !matched {
             continue;
@@ -1272,6 +1272,57 @@ fn find_code_line_matches(
         raw_count,
         first_line,
     }
+}
+
+fn line_matches_literal_or_terms(line: &str, needle: &str) -> bool {
+    let line_lower = line.to_ascii_lowercase();
+    if line_lower.contains(needle) {
+        return true;
+    }
+    let query_terms = code_search_terms(needle);
+    if query_terms.is_empty() {
+        return false;
+    }
+    let line_terms = code_search_terms(line);
+    query_terms
+        .iter()
+        .all(|term| line_terms.iter().any(|line_term| line_term == term))
+}
+
+fn code_search_terms(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    let mut prev: Option<char> = None;
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if let Some(prev) = prev {
+                if should_split_identifier(prev, ch) && !current.is_empty() {
+                    terms.push(current.to_ascii_lowercase());
+                    current.clear();
+                }
+            }
+            current.push(ch);
+            prev = Some(ch);
+        } else {
+            if !current.is_empty() {
+                terms.push(current.to_ascii_lowercase());
+                current.clear();
+            }
+            prev = None;
+        }
+    }
+    if !current.is_empty() {
+        terms.push(current.to_ascii_lowercase());
+    }
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn should_split_identifier(prev: char, ch: char) -> bool {
+    (prev.is_ascii_lowercase() && ch.is_ascii_uppercase())
+        || (prev.is_ascii_alphabetic() && ch.is_ascii_digit())
+        || (prev.is_ascii_digit() && ch.is_ascii_alphabetic())
 }
 
 fn run_git_diff(repo: &Path, scope: &str, base_ref: Option<&str>) -> Result<String> {
@@ -3164,6 +3215,26 @@ mod tests {
         assert_eq!(v["start"], 10);
         assert_eq!(v["end"], 10);
         assert_eq!(v["lines"][0], "line10");
+    }
+
+    #[test]
+    fn code_search_matches_identifier_terms() {
+        assert!(line_matches_literal_or_terms(
+            "class OrderService { void reserveInventory() {} }",
+            "order service"
+        ));
+        assert!(line_matches_literal_or_terms(
+            "def parse_config(path): return load_yaml(path)",
+            "parse config"
+        ));
+        assert!(line_matches_literal_or_terms(
+            "class Http2RouteConsumer {}",
+            "http 2 route"
+        ));
+        assert!(!line_matches_literal_or_terms(
+            "class OrderRepository {}",
+            "order service"
+        ));
     }
 
     #[test]
