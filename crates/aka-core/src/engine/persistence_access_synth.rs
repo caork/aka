@@ -223,6 +223,7 @@ fn detect_orm_table_accesses(
         }
     }
     out.extend(detect_python_instance_table_accesses(text, nodes, entities));
+    out.extend(detect_python_session_table_accesses(text, nodes, entities));
     out.extend(detect_java_repository_table_accesses(
         text,
         nodes,
@@ -435,6 +436,62 @@ fn detect_python_instance_table_accesses(
     out
 }
 
+fn detect_python_session_table_accesses(
+    text: &str,
+    nodes: &[&SynthNode],
+    entities: &BTreeMap<String, TableAccessEntity>,
+) -> Vec<TableAccessDetection> {
+    let mut out = Vec::new();
+    for node in nodes
+        .iter()
+        .copied()
+        .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+    {
+        let Some(body) = node_text_window(text, node) else {
+            continue;
+        };
+        let vars = python_entity_variables(body, entities);
+        for callee in [".add", ".merge", ".delete"] {
+            for call in find_call_args(body, callee) {
+                if !python_is_session_receiver(body, call.start) {
+                    continue;
+                }
+                let Some(entity) = python_session_write_entity(call.args, &vars, entities) else {
+                    continue;
+                };
+                out.push(TableAccessDetection {
+                    table: TableAccessRef {
+                        table_id: entity.table_id,
+                        table_name: entity.table_name,
+                    },
+                    node_id: node.aka_id.clone(),
+                    kind: TableAccessKind::Write,
+                    strategy: "python-sqlalchemy-session-write".into(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn python_session_write_entity(
+    args: &str,
+    vars: &BTreeMap<String, TableAccessEntity>,
+    entities: &BTreeMap<String, TableAccessEntity>,
+) -> Option<TableAccessEntity> {
+    let first = split_top_level_commas(args).into_iter().next()?;
+    let first = first
+        .trim()
+        .trim_start_matches("await ")
+        .trim_start_matches('*')
+        .trim();
+    if let Some(entity) = first_type_token(first).and_then(|name| entities.get(&name).cloned()) {
+        return Some(entity);
+    }
+    let var = first.split(['.', '[', '(', '#']).next()?.trim();
+    vars.get(var).cloned()
+}
+
 fn python_entity_variables(
     body: &str,
     entities: &BTreeMap<String, TableAccessEntity>,
@@ -479,6 +536,23 @@ fn python_rhs_constructs_entity(rhs: &str, entity_name: &str) -> bool {
     rhs.starts_with(&format!("{entity_name}("))
         || rhs.starts_with(&format!("{entity_name}.objects."))
         || rhs.starts_with(&format!("{entity_name}.query."))
+        || python_rhs_loads_entity(rhs, entity_name)
+}
+
+fn python_rhs_loads_entity(rhs: &str, entity_name: &str) -> bool {
+    for callee in [".get", ".merge"] {
+        for call in find_call_args(rhs, callee) {
+            if split_top_level_commas(call.args)
+                .first()
+                .and_then(|arg| first_type_token(arg))
+                .as_deref()
+                == Some(entity_name)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn python_instance_write_call(body: &str, var: &str) -> bool {
@@ -507,6 +581,34 @@ fn python_contains_var_method_call(body: &str, var: &str, method: &str) -> bool 
 
 fn is_python_ident_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn python_is_session_receiver(text: &str, dot_start: usize) -> bool {
+    let Some(receiver) = python_receiver_before_dot(text, dot_start) else {
+        return false;
+    };
+    let tail = receiver.rsplit('.').next().unwrap_or(receiver);
+    matches!(
+        tail.to_ascii_lowercase().as_str(),
+        "session" | "db" | "db_session" | "async_session"
+    )
+}
+
+fn python_receiver_before_dot(text: &str, dot_start: usize) -> Option<&str> {
+    if text.as_bytes().get(dot_start) != Some(&b'.') {
+        return None;
+    }
+    let mut start = dot_start;
+    while start > 0 {
+        let ch = text[..start].chars().next_back()?;
+        if is_python_ident_continue(ch) || ch == '.' {
+            start -= ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let receiver = text[start..dot_start].trim_matches('.');
+    (!receiver.is_empty()).then_some(receiver)
 }
 
 fn orm_manager_access_kind(text: &str, start: usize) -> (TableAccessKind, &'static str) {

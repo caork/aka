@@ -827,6 +827,115 @@ def archive_orders(session):
 }
 
 #[test]
+fn synthesizes_python_sqlalchemy_session_write_table_access_edges() {
+    let repo = temp_repo("python-sqlalchemy-session-writes");
+    std::fs::write(
+        repo.join("models.py"),
+        r#"from sqlalchemy import Column, Integer
+
+class Order(Base):
+    __tablename__ = "orders"
+    id = Column(Integer, primary_key=True)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("services.py"),
+        r#"from models import Order
+
+def create_order(session, payload):
+    session.add(Order(**payload))
+
+async def upsert_order(session, payload):
+    order = Order(**payload)
+    await session.merge(order)
+
+def purge_order(session, order_id):
+    order = session.get(Order, order_id)
+    session.delete(order)
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "Order", "models.Order", "models.py"),
+        (3, 5),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "create_order",
+        "services.create_order",
+        "services.py",
+        (3, 4),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "upsert_order",
+        "services.upsert_order",
+        "services.py",
+        (6, 8),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "purge_order",
+        "services.purge_order",
+        "services.py",
+        (10, 12),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let table_id = synth
+        .persistence
+        .node_recs()
+        .into_iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+        })
+        .expect("orders table")
+        .id;
+    let edges = synth.persistence.edge_recs();
+    for writer in [
+        "cbm:2:services.create_order",
+        "cbm:3:services.upsert_order",
+        "cbm:4:services.purge_order",
+    ] {
+        assert!(
+            edges.iter().any(|edge| {
+                edge.edge_type == "WRITES_TABLE"
+                    && edge.source_id == writer
+                    && edge.target_id == table_id
+                    && edge
+                        .evidence
+                        .as_ref()
+                        .and_then(|v| v.get("strategy"))
+                        .and_then(Value::as_str)
+                        == Some("python-sqlalchemy-session-write")
+            }),
+            "expected {writer} to write orders through SQLAlchemy session"
+        );
+    }
+}
+
+#[test]
 fn synthesizes_python_django_orm_write_table_access_edges() {
     let repo = temp_repo("python-django-orm-table-access");
     std::fs::write(
