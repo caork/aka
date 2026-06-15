@@ -1752,6 +1752,30 @@ urlpatterns = router.urls
         (1, 6),
         json!({"language": "python"}),
     );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "list",
+        "orders.views.OrderViewSet.list",
+        "orders/views.py",
+        (2, 3),
+        json!({
+            "language": "python",
+            "parent_class": "OrderViewSet",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "retrieve",
+        "orders.views.OrderViewSet.retrieve",
+        "orders/views.py",
+        (5, 6),
+        json!({
+            "language": "python",
+            "parent_class": "OrderViewSet",
+        }),
+    );
 
     let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
     let collection = synth
@@ -1761,7 +1785,7 @@ urlpatterns = router.urls
         .expect("drf router collection route");
     assert_eq!(
         collection.handler_id.as_deref(),
-        Some("cbm:1:orders.views.OrderViewSet")
+        Some("cbm:2:orders.views.OrderViewSet.list")
     );
     let detail = synth
         .routes
@@ -1770,7 +1794,7 @@ urlpatterns = router.urls
         .expect("drf router detail route");
     assert_eq!(
         detail.handler_id.as_deref(),
-        Some("cbm:1:orders.views.OrderViewSet")
+        Some("cbm:3:orders.views.OrderViewSet.retrieve")
     );
 }
 

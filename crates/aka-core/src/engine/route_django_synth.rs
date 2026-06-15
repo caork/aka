@@ -106,19 +106,25 @@ fn drf_router_routes_with_handlers(
             let Some((prefix, viewset_expr)) = drf_router_register(call.args) else {
                 continue;
             };
-            let handler = handlers.find(&viewset_expr);
+            let viewset_handler = handlers.find(&viewset_expr);
+            let collection_handler = handlers
+                .find_method(&viewset_expr, "list")
+                .or(viewset_handler);
+            let detail_handler = handlers
+                .find_method(&viewset_expr, "retrieve")
+                .or(viewset_handler);
             let collection = normalize_django_path_route(&prefix);
             out.push(RouteCandidate {
                 route: collection.clone(),
                 method: None,
-                handler_id: handler.map(|node| node.aka_id.clone()),
-                handler_name: handler.map(|node| node.display_name().to_string()),
+                handler_id: collection_handler.map(|node| node.aka_id.clone()),
+                handler_name: collection_handler.map(|node| node.display_name().to_string()),
             });
             out.push(RouteCandidate {
                 route: join_django_routes(&collection, "{id}"),
                 method: None,
-                handler_id: handler.map(|node| node.aka_id.clone()),
-                handler_name: handler.map(|node| node.display_name().to_string()),
+                handler_id: detail_handler.map(|node| node.aka_id.clone()),
+                handler_name: detail_handler.map(|node| node.display_name().to_string()),
             });
         }
     }
@@ -657,12 +663,14 @@ fn dedup_candidates(candidates: &mut Vec<RouteCandidate>) {
 struct PythonHandlerIndex<'a> {
     by_module_member: HashMap<String, &'a SynthNode>,
     by_member: HashMap<String, &'a SynthNode>,
+    by_owner_method: HashMap<String, &'a SynthNode>,
 }
 
 impl<'a> PythonHandlerIndex<'a> {
     fn new(by_file: &'a BTreeMap<String, Vec<&'a SynthNode>>) -> Self {
         let mut by_module_member = HashMap::new();
         let mut by_member = HashMap::new();
+        let mut by_owner_method = HashMap::new();
         for (file_path, nodes) in by_file {
             if !file_path.to_ascii_lowercase().ends_with(".py") {
                 continue;
@@ -680,11 +688,17 @@ impl<'a> PythonHandlerIndex<'a> {
                             .or_insert(*node);
                     }
                 }
+                if matches!(node.label.as_str(), "Function" | "Method") {
+                    for key in node_method_keys(node) {
+                        by_owner_method.entry(key).or_insert(*node);
+                    }
+                }
             }
         }
         Self {
             by_module_member,
             by_member,
+            by_owner_method,
         }
     }
 
@@ -697,6 +711,16 @@ impl<'a> PythonHandlerIndex<'a> {
                 expr.rsplit_once('.')
                     .and_then(|(_, member)| self.by_member.get(member).copied())
             })
+    }
+
+    fn find_method(&self, owner_expr: &str, method_name: &str) -> Option<&'a SynthNode> {
+        let mut keys = Vec::new();
+        keys.push(format!("{owner_expr}.{method_name}"));
+        if let Some((_, owner)) = owner_expr.rsplit_once('.') {
+            keys.push(format!("{owner}.{method_name}"));
+        }
+        keys.into_iter()
+            .find_map(|key| self.by_owner_method.get(&key).copied())
     }
 }
 
@@ -732,6 +756,26 @@ fn node_handler_keys(node: &SynthNode) -> Vec<String> {
     keys.insert(stripped.to_string());
     if let Some((_, member)) = stripped.rsplit_once('.') {
         keys.insert(member.to_string());
+    }
+    keys.into_iter().collect()
+}
+
+fn node_method_keys(node: &SynthNode) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    let stripped = strip_node_prefix(&node.qn);
+    keys.insert(stripped.to_string());
+    if let Some(parent) = node.parent_class.as_ref() {
+        let parent = strip_node_prefix(parent);
+        keys.insert(format!("{parent}.{}", node.name));
+        if let Some((_, short_parent)) = parent.rsplit_once('.') {
+            keys.insert(format!("{short_parent}.{}", node.name));
+        }
+    }
+    if let Some((owner, method)) = stripped.rsplit_once('.') {
+        keys.insert(format!("{owner}.{method}"));
+        if let Some((_, short_owner)) = owner.rsplit_once('.') {
+            keys.insert(format!("{short_owner}.{method}"));
+        }
     }
     keys.into_iter().collect()
 }
