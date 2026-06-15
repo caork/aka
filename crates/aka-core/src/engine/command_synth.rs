@@ -768,6 +768,15 @@ fn detect_python_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDe
             });
             continue;
         }
+        if is_flask_command_decorator(normalized) {
+            out.push(CommandDetection {
+                name: command_name_from_python_decorator(normalized)
+                    .unwrap_or_else(|| node.display_name().replace('_', "-")),
+                command_type: "flask-command".into(),
+                strategy: "python-flask-command".into(),
+            });
+            continue;
+        }
         if is_typer_command_decorator(normalized) {
             out.push(CommandDetection {
                 name: command_name_from_python_decorator(normalized)
@@ -800,6 +809,13 @@ fn is_click_command_decorator(text: &str) -> bool {
         || text.starts_with("click.command(")
         || text.ends_with(".command")
         || text.contains(".command(") && text.contains("click")
+}
+
+fn is_flask_command_decorator(text: &str) -> bool {
+    text.ends_with(".cli.command")
+        || text.contains(".cli.command(")
+        || text.ends_with(".app.cli.command")
+        || text.contains(".app.cli.command(")
 }
 
 fn is_typer_command_decorator(text: &str) -> bool {

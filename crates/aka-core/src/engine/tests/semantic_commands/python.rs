@@ -201,6 +201,90 @@ def persist_orders():
 }
 
 #[test]
+fn flask_cli_commands_seed_processes() {
+    let repo = temp_repo("flask-cli-command-process-entry");
+    let file = "orders/app.py";
+    std::fs::create_dir_all(repo.join("orders")).unwrap();
+    std::fs::write(
+        repo.join(file),
+        r#"from flask import Flask
+
+app = Flask(__name__)
+
+@app.cli.command("sync-orders")
+def sync_orders():
+    load_orders()
+
+def load_orders():
+    persist_orders()
+
+def persist_orders():
+    pass
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "sync_orders",
+        "orders.app.sync_orders",
+        file,
+        (6, 7),
+        json!({
+            "language": "python",
+            "decorators": ["@app.cli.command(\"sync-orders\")"],
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "load_orders",
+        "orders.app.load_orders",
+        file,
+        (9, 10),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "persist_orders",
+        "orders.app.persist_orders",
+        file,
+        (12, 13),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "CALLS");
+    insert_edge(&conn, 2, 2, 3, "CALLS");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let process = synth
+        .processes
+        .iter()
+        .find(|process| process.name == "sync_orders → persist_orders")
+        .expect("Flask CLI command should seed process entry");
+    assert_eq!(
+        process.node_rec().properties["entryReason"],
+        "python-flask-command"
+    );
+    let command = synth
+        .commands
+        .iter()
+        .find(|command| command.name == "sync-orders")
+        .expect("Flask CLI command");
+    assert_eq!(command.command_type, "flask-command");
+    assert!(
+        command.process_ids.contains(&process.id),
+        "Flask command should link to seeded process"
+    );
+}
+
+#[test]
 fn command_synthesis_excludes_python_configured_test_roots() {
     let repo = temp_repo("python-configured-test-commands");
     run_git(&repo, &["init"]);
