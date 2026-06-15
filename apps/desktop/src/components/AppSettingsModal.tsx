@@ -1,6 +1,14 @@
 import { motion } from "framer-motion";
 import { useState } from "react";
 import {
+  checkForNativeAppUpdate,
+  installNativeAppUpdate,
+  NativeUpdaterUnavailableError,
+  type InstallProgress,
+  type NativeUpdateInfo,
+} from "../app-update-api";
+import { isDesktopRuntime } from "../desktop-api";
+import {
   checkForAppUpdate,
   CURRENT_APP_VERSION,
   formatAssetSize,
@@ -32,7 +40,10 @@ export default function AppSettingsModal({
   const [confirmClear, setConfirmClear] = useState(false);
   const [busy, setBusy] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
   const [openingUrl, setOpeningUrl] = useState<string | null>(null);
+  const [nativeUpdate, setNativeUpdate] = useState<NativeUpdateInfo | null>(null);
+  const [installProgress, setInstallProgress] = useState<InstallProgress | null>(null);
   const [release, setRelease] = useState<ReleaseInfo | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +53,28 @@ export default function AppSettingsModal({
     setCheckingUpdate(true);
     setNotice(null);
     setError(null);
+    setInstallProgress(null);
+    setNativeUpdate(null);
+    setRelease(null);
     try {
+      if (isDesktopRuntime()) {
+        try {
+          const native = await checkForNativeAppUpdate();
+          setNativeUpdate(native);
+          setNotice(
+            native.available
+              ? `发现新版本 ${native.latestVersion}`
+              : `已是最新版本 ${native.currentVersion}`,
+          );
+          return;
+        } catch (e) {
+          if (!(e instanceof NativeUpdaterUnavailableError)) {
+            throw e;
+          }
+          setNotice("自动安装更新尚未配置，已切换到下载清单");
+        }
+      }
+
       const next = await checkForAppUpdate();
       setRelease(next);
       setNotice(
@@ -54,6 +86,26 @@ export default function AppSettingsModal({
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setCheckingUpdate(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    if (installingUpdate || !nativeUpdate?.available) return;
+    setInstallingUpdate(true);
+    setNotice(null);
+    setError(null);
+    setInstallProgress({
+      phase: "downloading",
+      downloadedBytes: 0,
+      totalBytes: undefined,
+    });
+    try {
+      await installNativeAppUpdate(setInstallProgress);
+      setNotice("更新已安装，正在重启");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setInstallingUpdate(false);
     }
   };
 
@@ -152,7 +204,7 @@ export default function AppSettingsModal({
           <div className="min-w-0 flex-1">
             <div className="text-[13px] font-medium text-ink">Updates</div>
             <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
-              hawkingrad release manifest
+              GitHub release manifest
             </div>
           </div>
           <button
@@ -172,9 +224,74 @@ export default function AppSettingsModal({
         </div>
 
         <div className="grid grid-cols-2 gap-2">
-          <VersionTile label="Current" value={release?.currentVersion ?? CURRENT_APP_VERSION} />
-          <VersionTile label="Latest" value={release?.latestVersion ?? "Not checked"} />
+          <VersionTile
+            label="Current"
+            value={
+              nativeUpdate?.currentVersion ??
+              release?.currentVersion ??
+              CURRENT_APP_VERSION
+            }
+          />
+          <VersionTile
+            label="Latest"
+            value={nativeUpdate?.latestVersion ?? release?.latestVersion ?? "Not checked"}
+          />
         </div>
+
+        {nativeUpdate && (
+          <div
+            className="mt-3 rounded-[10px] p-3 text-[12px]"
+            style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
+            data-testid="native-app-update-result"
+          >
+            <div className="mb-2 flex items-center gap-2">
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{
+                  background: nativeUpdate.available
+                    ? "var(--beacon)"
+                    : "var(--success)",
+                }}
+              />
+              <span className="font-medium text-ink">
+                {nativeUpdate.available ? "Update ready to install" : "Up to date"}
+              </span>
+              {nativeUpdate.date && (
+                <span className="ml-auto text-[11px] text-ink-3">
+                  {formatDate(nativeUpdate.date)}
+                </span>
+              )}
+            </div>
+
+            {nativeUpdate.notes && (
+              <div className="mb-2 line-clamp-3 text-[11.5px] leading-relaxed text-ink-3">
+                {nativeUpdate.notes}
+              </div>
+            )}
+
+            {nativeUpdate.available && (
+              <>
+                {installProgress && (
+                  <UpdateProgressBar progress={installProgress} />
+                )}
+                <button
+                  type="button"
+                  disabled={installingUpdate}
+                  onClick={() => void installUpdate()}
+                  className="focus-ring mt-2 w-full rounded-[9px] px-3 py-1.5 text-[12px] font-semibold transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-55"
+                  style={{
+                    color: "var(--accent-ink)",
+                    background: "var(--accent-fill)",
+                    boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)",
+                  }}
+                  data-testid="install-app-update"
+                >
+                  {installingUpdate ? "Installing..." : "Install and restart"}
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
         {release && (
           <div
@@ -329,6 +446,47 @@ function ReleaseAssetRow({
       </button>
     </div>
   );
+}
+
+function UpdateProgressBar({ progress }: { progress: InstallProgress }) {
+  const percent =
+    progress.totalBytes && progress.totalBytes > 0
+      ? Math.min(100, Math.round((progress.downloadedBytes / progress.totalBytes) * 100))
+      : null;
+  const label =
+    progress.phase === "installing"
+      ? "Installing"
+      : progress.phase === "installed"
+        ? "Installed"
+        : percent === null
+          ? "Downloading"
+          : `Downloading ${percent}%`;
+  return (
+    <div className="mt-2">
+      <div className="mb-1 flex items-center justify-between text-[11px] text-ink-3">
+        <span>{label}</span>
+        {percent !== null && <span>{formatBytes(progress.downloadedBytes)}</span>}
+      </div>
+      <div
+        className="h-1.5 overflow-hidden rounded-full"
+        style={{ background: "var(--subtle-fill)" }}
+      >
+        <div
+          className="h-full rounded-full transition-[width] duration-150 ease-out"
+          style={{
+            width: `${percent ?? 18}%`,
+            background: "var(--accent)",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function formatDate(value: string): string {

@@ -2,7 +2,7 @@ import desktopPackage from "../package.json";
 import { asDesktopError, invokeDesktop, isDesktopRuntime } from "./desktop-api";
 
 export const RELEASE_MANIFEST_URL =
-  "https://aka.hawkingrad.com/releases/latest.json";
+  "https://github.com/caork/aka/releases/latest/download/latest.json";
 
 export const CURRENT_APP_VERSION =
   typeof desktopPackage.version === "string" ? desktopPackage.version : "0.0.0";

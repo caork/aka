@@ -107,22 +107,43 @@ docker load -i aka-0.1.0-linux-amd64.docker.tar.gz       # 走 release 资产（
 
 - `aka-desktop-<版本>-aarch64-apple-darwin.dmg` — macOS GUI 安装镜像（桌面端更新检查优先展示）
 - `aka-desktop-<版本>-aarch64-apple-darwin.app.zip` — macOS GUI（zip 内是 `aka.app`）
+- `aka-desktop-<版本>-aarch64-apple-darwin.app.tar.gz` — macOS Tauri updater 包（有 updater 签名密钥时生成）
+- `aka-desktop-<版本>-aarch64-apple-darwin.app.tar.gz.sig` — macOS Tauri updater 签名旁路文件
 - `aka-desktop-<版本>-macos-open.sh` — macOS 无 Apple Developer ID/无公证包打开助手
 - `aka-desktop-<版本>-x86_64-pc-windows-msvc-setup.exe` — Windows GUI 安装包
+- `aka-desktop-<版本>-x86_64-pc-windows-msvc-setup.exe.sig` — Windows Tauri updater 签名旁路文件
 - `aka-desktop-<版本>-x86_64-pc-windows-msvc-portable.zip` — Windows GUI 免安装包
 - `aka-claude-code-plugin-<版本>.zip` — Claude Code 插件包
 - `aka-opencode-plugin-<版本>.zip` — OpenCode 本地 plugin + MCP/skill 配置包
 - `aka-clients-<版本>.tar.gz` — 全量客户端接入文件
 - `aka-<版本>-linux-amd64.docker.tar.gz` — Docker 镜像离线包
 - `SHA256SUMS` — 发布资产校验和
-- `latest.json` — 桌面端更新清单，可同步到 `https://aka.hawkingrad.com/releases/latest.json`
+- `latest.json` — 桌面端更新清单（默认发布到 GitHub Release 的 `latest/download/latest.json`）
 
-桌面端 Settings → Updates 会读取 hawkingrad 的 `latest.json`。CI 在 tag release 的 checksums 阶段通过
+桌面端 Settings → Updates 优先走 Tauri 原生 updater 自动下载安装；若当前构建没有 updater 配置，则回退为读取
+GitHub Release 的 `latest.json` 并打开下载链接。CI 在 tag release 的 checksums 阶段通过
 `scripts/release-manifest.mjs` 生成该文件，至少包含 `schemaVersion`、`version`/`latestVersion`、
-`releaseUrl`、`publishedAt`/`pub_date`、`downloads` 与 `assets[]`。`downloads` 按
-`downloads.macos.dmg`、`downloads.windows.exe` 组织，`assets[]` 保留扁平列表兼容旧客户端；每个资产包含
-`platform`、`kind`、`name`、`url`/`downloadUrl`、`size` 与可选 `sha256`。`SHA256SUMS` 只覆盖发布资产，
-不包含 `SHA256SUMS` 自身和 `latest.json`。
+`releaseUrl`、`publishedAt`/`pub_date`、`notes`、`platforms`、`downloads` 与 `assets[]`。
+
+`platforms` 按 Tauri v2 updater 静态 JSON 约定生成，键为 `OS-ARCH`（例如
+`darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`），每项只放 updater 所需的
+`signature` 与 `url`。`signature` 是同目录旁路签名文件（`.sig`，兼容 `.signature`）的文件内容，不是
+签名文件 URL；`url` 指向实际更新包（macOS 为 `.app.tar.gz`，Windows 为 NSIS `setup.exe`）。没有签名旁路
+文件的资产不会进入 `platforms`，避免生成 Tauri 无法验证的自动更新项。
+
+`downloads` 与 `assets[]` 保留给现有下载 UI/旧客户端：`downloads` 仍按 `downloads.macos.dmg`、
+`downloads.windows.exe` 组织，`assets[]` 保留扁平列表；每个资产包含 `platform`、`kind`、`name`、
+`url`/`downloadUrl`、`size`、可选 `sha256`，有签名时还会带 `signatureName`/`signatureUrl`。
+`SHA256SUMS` 只覆盖发布资产，不包含 `SHA256SUMS` 自身和 `latest.json`。
+
+Updater 公钥/签名私钥只允许通过 CI secret / 本地环境变量传给 Tauri CLI（`TAURI_UPDATER_PUBKEY`、
+`TAURI_SIGNING_PRIVATE_KEY` 与可选 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`），不要写入仓库、dist 文件或文档。
+`scripts/package-release.sh` 会在检测到公钥和私钥时临时传入 updater 配置与
+`bundle.createUpdaterArtifacts=true`，从 Tauri 产物目录复制 `.app.tar.gz`/`.sig` 或 `setup.exe.sig` 到
+`dist/`；没有这些环境变量时仍正常发布手动下载包，只是 `latest.json.platforms` 为空并给出 warning。tag
+release 使用 `AKA_TAURI_UPDATER=required` 和 `--require-updater true`，缺 secret 或缺签名平台会直接失败。
+默认 updater 端点为 `https://github.com/caork/aka/releases/latest/download/latest.json`；如需切到 CDN 或
+hawkingrad mirror，可在 CI/本地打包时设置 `AKA_UPDATER_ENDPOINT` 覆盖。
 
 桌面包必须内置 native `codebase-memory-mcp` engine。`scripts/package-release.sh` 会在准备 Tauri 资源、
 生成 macOS `.app.zip`、生成 Windows portable zip 前后校验 `engine/codebase-memory-mcp` 或

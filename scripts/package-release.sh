@@ -15,9 +15,13 @@
 #                                             macOS Tauri GUI app DMG
 #   dist/aka-desktop-<ver>-<host-triple>.app.zip
 #                                             macOS Tauri GUI app（zip 内 AKA.app）
+#   dist/aka-desktop-<ver>-<host-triple>.app.tar.gz[.sig]
+#                                             macOS Tauri updater 包（存在签名密钥时生成）
 #   dist/aka-desktop-<ver>-macos-open.sh      macOS 无公证包打开助手（去 quarantine）
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe
 #                                             Windows Tauri GUI NSIS installer
+#   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe.sig
+#                                             Windows Tauri updater 签名（存在签名密钥时生成）
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-portable.zip
 #                                             Windows Tauri GUI portable exe（engine 内嵌）
 #
@@ -402,6 +406,104 @@ find_tauri_dmg() {
   find "${dmg_dir}" -maxdepth 1 -type f -name '*.dmg' | sort | tail -n 1
 }
 
+find_tauri_updater_archive() {
+  local archive_dir
+  archive_dir="$1"
+  [[ -d "${archive_dir}" ]] || return 0
+  find "${archive_dir}" -maxdepth 1 -type f -name '*.app.tar.gz' | sort | tail -n 1
+}
+
+clear_tauri_updater_archives() {
+  local archive_dir
+  archive_dir="$1"
+  [[ -d "${archive_dir}" ]] || return 0
+  find "${archive_dir}" -maxdepth 1 -type f \
+    \( -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' -o -name '*.app.tar.gz.signature' \) \
+    -delete
+}
+
+has_signature_sidecar() {
+  local src
+  src="$1"
+  [[ -f "${src}.sig" ]] || [[ -f "${src}.signature" ]]
+}
+
+copy_signature_sidecars() {
+  local src dst sidecar
+  src="$1"
+  dst="$2"
+  for suffix in sig signature; do
+    sidecar="${src}.${suffix}"
+    if [[ -f "${sidecar}" ]]; then
+      cp "${sidecar}" "${dst}.${suffix}"
+      echo "==> ${dst}.${suffix}"
+    fi
+  done
+}
+
+tauri_updater_signing_configured() {
+  case "${AKA_TAURI_UPDATER:-auto}" in
+    0|false|FALSE|no|NO|never) return 1 ;;
+  esac
+  [[ "${AKA_TAURI_UPDATER:-auto}" != "never" ]] &&
+    [[ -n "${TAURI_UPDATER_PUBKEY:-}" ]] &&
+    [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" || -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]
+}
+
+tauri_updater_config_args() {
+  local mode endpoint install_mode config
+  mode="${AKA_TAURI_UPDATER:-auto}"
+  case "${mode}" in
+    1|true|TRUE|yes|YES|required) mode="required" ;;
+    0|false|FALSE|no|NO|never) mode="never" ;;
+    auto|"") mode="auto" ;;
+    *)
+      echo "error: AKA_TAURI_UPDATER 只能是 auto/required/never/true/false，当前为 ${AKA_TAURI_UPDATER}" >&2
+      return 1
+      ;;
+  esac
+
+  if [[ "${mode}" = "never" ]]; then
+    return 0
+  fi
+
+  if [[ -z "${TAURI_UPDATER_PUBKEY:-}" || ( -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ) ]]; then
+    if [[ "${mode}" = "required" ]]; then
+      echo "error: 自动更新 release 需要 TAURI_UPDATER_PUBKEY 和 TAURI_SIGNING_PRIVATE_KEY/TAURI_SIGNING_PRIVATE_KEY_PATH。" >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  endpoint="${AKA_UPDATER_ENDPOINT:-https://github.com/caork/aka/releases/latest/download/latest.json}"
+  install_mode="${AKA_UPDATER_WINDOWS_INSTALL_MODE:-passive}"
+  config="$(TAURI_UPDATER_PUBKEY="${TAURI_UPDATER_PUBKEY}" \
+    AKA_UPDATER_ENDPOINT="${endpoint}" \
+    AKA_UPDATER_WINDOWS_INSTALL_MODE="${install_mode}" \
+    node <<'NODE'
+const pubkey = process.env.TAURI_UPDATER_PUBKEY;
+const endpoint = process.env.AKA_UPDATER_ENDPOINT;
+const installMode = process.env.AKA_UPDATER_WINDOWS_INSTALL_MODE;
+process.stdout.write(JSON.stringify({
+  bundle: {
+    createUpdaterArtifacts: true
+  },
+  plugins: {
+    updater: {
+      pubkey,
+      endpoints: [endpoint],
+      windows: {
+        installMode
+      }
+    }
+  }
+}));
+NODE
+  )"
+  echo "==> Tauri updater artifacts enabled: ${endpoint}" >&2
+  printf '%s\n' --config "${config}"
+}
+
 package_clients() {
   PLUGIN_ZIP="${DIST_DIR}/aka-claude-code-plugin-${VERSION}.zip"
   rm -f "${PLUGIN_ZIP}"
@@ -450,7 +552,7 @@ package_clients() {
 }
 
 package_desktop() {
-  local host_os host_arch desktop_triple desktop_platform app_path desktop_dmg desktop_zip helper_script signed_release tauri_dmg
+  local host_os host_arch desktop_triple desktop_platform app_path desktop_dmg desktop_zip desktop_updater helper_script signed_release tauri_dmg tauri_updater tauri_macos_bundle_dir
   host_os="$(uname -s)"
   host_arch="$(uname -m)"
 
@@ -470,12 +572,30 @@ package_desktop() {
 
       if [[ "${SKIP_BUILD}" -eq 0 ]]; then
         prepare_desktop_resources "${desktop_triple}"
+        tauri_macos_bundle_dir="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/macos"
+        clear_tauri_updater_archives "${tauri_macos_bundle_dir}"
         if [[ "${signed_release}" -eq 1 ]]; then
-          echo "==> npm run tauri -- build --bundles app,dmg --ci"
-          (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- build --bundles app,dmg --ci)
+          local tauri_args=(build --bundles app,dmg --ci)
+          local updater_config_args
+          updater_config_args="$(tauri_updater_config_args)" || return 1
+          if [[ -n "${updater_config_args}" ]]; then
+            while IFS= read -r arg; do
+              tauri_args+=("${arg}")
+            done <<< "${updater_config_args}"
+          fi
+          echo "==> npm run tauri -- ${tauri_args[*]}"
+          (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
         else
-          echo "==> npm run tauri -- build --bundles app --ci --no-sign"
-          (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- build --bundles app --ci --no-sign)
+          local tauri_args=(build --bundles app --ci --no-sign)
+          local updater_config_args
+          updater_config_args="$(tauri_updater_config_args)" || return 1
+          if [[ -n "${updater_config_args}" ]]; then
+            while IFS= read -r arg; do
+              tauri_args+=("${arg}")
+            done <<< "${updater_config_args}"
+          fi
+          echo "==> npm run tauri -- ${tauri_args[*]}"
+          (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
         fi
       fi
 
@@ -503,6 +623,26 @@ package_desktop() {
       COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "${app_path}" "${desktop_zip}"
       assert_zip_has_engine "${desktop_zip}" "${desktop_platform}" "AKA.app/Contents/Resources"
       echo "==> ${desktop_zip}"
+
+      tauri_macos_bundle_dir="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/macos"
+      tauri_updater="$(find_tauri_updater_archive "${tauri_macos_bundle_dir}" || true)"
+      if [[ -n "${tauri_updater}" ]]; then
+        if has_signature_sidecar "${tauri_updater}"; then
+          desktop_updater="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.app.tar.gz"
+          rm -f "${desktop_updater}" "${desktop_updater}.sig" "${desktop_updater}.signature"
+          cp "${tauri_updater}" "${desktop_updater}"
+          copy_signature_sidecars "${tauri_updater}" "${desktop_updater}"
+          echo "==> ${desktop_updater}"
+        elif tauri_updater_signing_configured; then
+          echo "error: Tauri updater archive 缺少签名: ${tauri_updater}.sig" >&2
+          return 1
+        else
+          echo "warning: 忽略未签名的 Tauri updater 包: ${tauri_updater}" >&2
+        fi
+      elif tauri_updater_signing_configured; then
+        echo "error: Tauri 未产出 macOS updater 包: ${tauri_macos_bundle_dir}/*.app.tar.gz" >&2
+        return 1
+      fi
 
       helper_script="${DIST_DIR}/aka-desktop-${VERSION}-macos-open.sh"
       cp "${REPO_ROOT}/scripts/open-macos-dmg.sh" "${helper_script}"
@@ -539,6 +679,13 @@ package_windows_desktop() {
     if command -v cargo-xwin >/dev/null 2>&1 && [[ "$(uname -s)" = "Darwin" ]]; then
       tauri_args=(build --runner cargo-xwin --target "${win_triple}" --bundles nsis --ci)
     fi
+    local updater_config_args
+    updater_config_args="$(tauri_updater_config_args)" || return 1
+    if [[ -n "${updater_config_args}" ]]; then
+      while IFS= read -r arg; do
+        tauri_args+=("${arg}")
+      done <<< "${updater_config_args}"
+    fi
     echo "==> npm run tauri -- ${tauri_args[*]}"
     (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
   fi
@@ -555,6 +702,13 @@ package_windows_desktop() {
   setup_exe="${DIST_DIR}/aka-desktop-${VERSION}-${win_triple}-setup.exe"
   rm -f "${setup_exe}"
   cp "${setup_src}" "${setup_exe}"
+  copy_signature_sidecars "${setup_src}" "${setup_exe}"
+  if tauri_updater_signing_configured; then
+    [[ -f "${setup_exe}.sig" || -f "${setup_exe}.signature" ]] || {
+      echo "error: Tauri Windows updater installer 缺少签名: ${setup_src}.sig" >&2
+      return 1
+    }
+  fi
   echo "==> ${setup_exe}"
 
   portable_zip="${DIST_DIR}/aka-desktop-${VERSION}-${win_triple}-portable.zip"

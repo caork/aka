@@ -20,6 +20,9 @@ const releaseUrl = args.get("release-url") ?? `https://github.com/${repo}/releas
 const baseUrl =
   args.get("base-url") ??
   `https://github.com/${repo}/releases/download/${encodeURIComponent(tag)}`;
+const requireUpdater = isTruthy(
+  args.get("require-updater") ?? process.env.AKA_REQUIRE_UPDATER,
+);
 
 const files = fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
 const checksums = readChecksums(path.join(dir, "SHA256SUMS"));
@@ -31,6 +34,7 @@ for (const name of files) {
   const info = assetInfo(name);
   if (!info) continue;
   const url = `${baseUrl}/${encodeURIComponent(name)}`;
+  const signature = readSignature(dir, name, baseUrl);
   assets.push({
     ...info,
     name,
@@ -39,6 +43,7 @@ for (const name of files) {
     browserDownloadUrl: url,
     size: fs.statSync(fullPath).size,
     sha256: checksums.get(name),
+    ...(signature ?? {}),
   });
 }
 
@@ -48,6 +53,7 @@ if (assets.length === 0) {
 }
 
 const downloads = groupedDownloads(assets);
+const platforms = updaterPlatforms(assets);
 const manifest = {
   schemaVersion: 1,
   version,
@@ -58,9 +64,18 @@ const manifest = {
   pub_date: publishedAt,
   notes: `AKA ${version}`,
   downloads,
-  platforms: downloads,
+  platforms,
   assets,
 };
+
+if (Object.keys(platforms).length === 0) {
+  const message = `no Tauri updater platforms were generated; add .sig or .signature sidecars next to desktop updater assets in ${dir}`;
+  if (requireUpdater) {
+    console.error(`error: ${message}`);
+    process.exit(1);
+  }
+  console.warn(`warning: ${message}`);
+}
 
 fs.mkdirSync(path.dirname(out), { recursive: true });
 fs.writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -79,6 +94,10 @@ function cleanVersion(value) {
   return value.trim().replace(/^aka-desktop-/i, "").replace(/^v/i, "");
 }
 
+function isTruthy(value) {
+  return /^(1|true|yes|required)$/i.test(String(value ?? "").trim());
+}
+
 function assetInfo(name) {
   const mac = name.match(/aka-desktop-.+-(aarch64|x86_64)-apple-darwin\.dmg$/);
   if (mac) {
@@ -91,12 +110,40 @@ function assetInfo(name) {
       label: arch === "arm64" ? "macOS DMG (Apple Silicon)" : "macOS DMG (Intel)",
     };
   }
+  const macUpdater = name.match(
+    /aka-desktop-.+-(aarch64|x86_64|universal)-apple-darwin\.app\.tar\.gz$/,
+  );
+  if (macUpdater) {
+    const arch =
+      macUpdater[1] === "aarch64"
+        ? "arm64"
+        : macUpdater[1] === "x86_64"
+          ? "x64"
+          : "universal";
+    return {
+      platform: "macos",
+      kind: "updater",
+      arch,
+      target: `${macUpdater[1]}-apple-darwin`,
+      updaterTarget:
+        macUpdater[1] === "universal" ? "darwin-universal" : `darwin-${macUpdater[1]}`,
+      updaterPriority: 10,
+      label:
+        arch === "arm64"
+          ? "macOS Updater (Apple Silicon)"
+          : arch === "x64"
+            ? "macOS Updater (Intel)"
+            : "macOS Updater (Universal)",
+    };
+  }
   if (/aka-desktop-.+-x86_64-pc-windows-msvc-setup\.exe$/.test(name)) {
     return {
       platform: "windows",
       kind: "exe",
       arch: "x64",
       target: "x86_64-pc-windows-msvc",
+      updaterTarget: "windows-x86_64",
+      updaterPriority: 10,
       label: "Windows Setup EXE",
     };
   }
@@ -117,6 +164,46 @@ function groupedDownloads(assets) {
     }
   }
   return out;
+}
+
+function updaterPlatforms(assets) {
+  const selected = new Map();
+  for (const asset of assets) {
+    if (!asset.updaterTarget || !asset.signature) continue;
+    const existing = selected.get(asset.updaterTarget);
+    if (!existing || (asset.updaterPriority ?? 100) < (existing.updaterPriority ?? 100)) {
+      selected.set(asset.updaterTarget, asset);
+    }
+  }
+
+  const out = {};
+  for (const [target, asset] of [...selected.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    out[target] = {
+      signature: asset.signature,
+      url: asset.url,
+    };
+  }
+  return out;
+}
+
+function readSignature(dir, name, baseUrl) {
+  for (const suffix of ["sig", "signature"]) {
+    const signatureName = `${name}.${suffix}`;
+    const signaturePath = path.join(dir, signatureName);
+    if (!fs.existsSync(signaturePath) || !fs.statSync(signaturePath).isFile()) continue;
+    const signature = fs.readFileSync(signaturePath, "utf8").trim();
+    if (!signature) {
+      console.warn(`warning: ignoring empty updater signature ${signaturePath}`);
+      continue;
+    }
+    const signatureUrl = `${baseUrl}/${encodeURIComponent(signatureName)}`;
+    return {
+      signature,
+      signatureName,
+      signatureUrl,
+    };
+  }
+  return null;
 }
 
 function readChecksums(file) {

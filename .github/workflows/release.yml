@@ -52,6 +52,8 @@ jobs:
       - name: Package macOS desktop GUI
         env:
           AKA_MACOS_SIGN: auto
+          AKA_TAURI_UPDATER: ${{ github.ref_type == 'tag' && 'required' || 'auto' }}
+          AKA_UPDATER_ENDPOINT: https://github.com/caork/aka/releases/latest/download/latest.json
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -61,6 +63,9 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: scripts/package-release.sh --version "${{ steps.ver.outputs.version }}" --desktop-only
 
       - name: Upload to release
@@ -68,10 +73,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          shopt -s nullglob
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || \
             gh release view "$GITHUB_REF_NAME" >/dev/null
-          gh release upload "$GITHUB_REF_NAME" dist/aka-desktop-*.dmg dist/aka-desktop-*.app.zip dist/aka-desktop-*-macos-open.sh --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/aka-desktop-*.dmg dist/aka-desktop-*.app.zip dist/aka-desktop-*.app.tar.gz dist/aka-desktop-*.sig dist/aka-desktop-*.signature dist/aka-desktop-*-macos-open.sh --clobber
 
       - uses: actions/upload-artifact@v4
         if: github.ref_type != 'tag'
@@ -80,6 +86,9 @@ jobs:
           path: |
             dist/aka-desktop-*.dmg
             dist/aka-desktop-*.app.zip
+            dist/aka-desktop-*.app.tar.gz
+            dist/aka-desktop-*.sig
+            dist/aka-desktop-*.signature
             dist/aka-desktop-*-macos-open.sh
 
   windows-desktop:
@@ -108,6 +117,12 @@ jobs:
       - name: Build Windows desktop GUI
         id: pkg
         shell: bash
+        env:
+          AKA_TAURI_UPDATER: ${{ github.ref_type == 'tag' && 'required' || 'auto' }}
+          AKA_UPDATER_ENDPOINT: https://github.com/caork/aka/releases/latest/download/latest.json
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euxo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
@@ -137,7 +152,13 @@ jobs:
               gh release view "$env:GITHUB_REF_NAME" *> $null
             }
           }
-          gh release upload "$env:GITHUB_REF_NAME" "dist/${{ steps.pkg.outputs.setup_name }}" "dist/${{ steps.pkg.outputs.portable_name }}" --clobber
+          $assets = @(
+            "dist/${{ steps.pkg.outputs.setup_name }}",
+            "dist/${{ steps.pkg.outputs.setup_name }}.sig",
+            "dist/${{ steps.pkg.outputs.setup_name }}.signature",
+            "dist/${{ steps.pkg.outputs.portable_name }}"
+          ) | Where-Object { Test-Path $_ }
+          gh release upload "$env:GITHUB_REF_NAME" @assets --clobber
 
       - uses: actions/upload-artifact@v4
         if: github.ref_type != 'tag'
@@ -145,6 +166,8 @@ jobs:
           name: windows-desktop
           path: |
             dist/aka-desktop-*-setup.exe
+            dist/aka-desktop-*-setup.exe.sig
+            dist/aka-desktop-*-setup.exe.signature
             dist/aka-desktop-*-portable.zip
 
   client-packages:
@@ -267,5 +290,6 @@ jobs:
             --tag "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --dir dist \
+            --require-updater true \
             --out dist/latest.json
           gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS dist/latest.json --clobber

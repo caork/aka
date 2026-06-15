@@ -567,6 +567,8 @@ fn spawn_url_opener(url: &str) -> std::io::Result<()> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let backend = configure_desktop_runtime(app).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("configure desktop runtime: {e:#}"))
