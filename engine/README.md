@@ -10,12 +10,11 @@ CBM CLI、读取它的 SQLite 图谱，再导出 aka 工件。
 scripts/sync-engine.sh
 ```
 
-脚本会 clone / build `DeusData/codebase-memory-mcp` 到被 git 忽略的
-`engine/codebase-memory-mcp-src/`，复制可执行文件到 `engine/codebase-memory-mcp`，
-并把来源 commit 写入 `engine/ENGINE_SHA`。
+脚本默认使用 aka 维护的 fork `caork/codebase-memory-mcp`，并构建被 git 忽略的
+`engine/codebase-memory-mcp-src/` 当前 checkout，复制可执行文件到
+`engine/codebase-memory-mcp`，并把当前 engine commit 写入 `engine/ENGINE_SHA`。
 
-aka 侧需要临时补齐但尚未进入 CBM 上游的修复，放在
-`engine/patches/codebase-memory-mcp/*.patch`。同步脚本会在构建前按文件名顺序
-应用这些补丁；`engine/ENGINE_SHA` 始终保持为官方 CBM base commit。需要本地调
-parser 时，请在 CBM 上游或本地 checkout 中改动后再重新运行同步脚本，不要把
-大体积源码塞进本仓库。
+解析能力改动直接在 `engine/codebase-memory-mcp-src/` 里做，并提交到
+`caork/codebase-memory-mcp`。日常不要维护 aka 仓库内的 patch 堆；只有月度或显式
+上游同步时，才用 `scripts/sync-engine.sh --refresh-upstream` 或手工 merge/rebase
+选择性吸收上游 feature。不要把大体积源码或构建产物塞进本仓库。
