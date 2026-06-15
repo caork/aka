@@ -2766,6 +2766,66 @@ def enqueue_orders():
 }
 
 #[test]
+fn synthesizes_python_dramatiq_jobs() {
+    let repo = temp_repo("python-dramatiq-jobs");
+    std::fs::write(
+        repo.join("actors.py"),
+        r#"import dramatiq
+
+@dramatiq.actor(actor_name="orders.rebuild", queue_name="orders")
+def rebuild_orders(order_id):
+    return order_id
+
+def enqueue_orders(order_id):
+    rebuild_orders.send(order_id)
+    rebuild_orders.send_with_options(args=(order_id,), delay=1000)
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "rebuild_orders",
+        "actors.rebuild_orders",
+        "actors.py",
+        (4, 5),
+        json!({
+            "decorators": ["@dramatiq.actor(actor_name=\"orders.rebuild\", queue_name=\"orders\")"],
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "enqueue_orders",
+        "actors.enqueue_orders",
+        "actors.py",
+        (7, 9),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let job = synth
+        .jobs
+        .iter()
+        .find(|job| job.name == "orders.rebuild")
+        .expect("dramatiq actor job");
+    assert_eq!(job.job_type, "dramatiq-actor");
+    assert_eq!(job.handler_id, "cbm:1:actors.rebuild_orders");
+    let edges = job.edge_recs();
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "HANDLES_JOB" && edge.source_id == "cbm:1:actors.rebuild_orders"
+    }));
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "ENQUEUES_JOB" && edge.source_id == "cbm:2:actors.enqueue_orders"
+    }));
+}
+
+#[test]
 fn synthesizes_jvm_command_entrypoints() {
     let repo = temp_repo("jvm-commands");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();

@@ -90,6 +90,17 @@ fn detect_python_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobDetection>
             });
             continue;
         }
+        if is_dramatiq_actor_decorator(normalized) {
+            out.push(JobDetection {
+                name: python_named_arg(normalized, "actor_name")
+                    .or_else(|| python_named_arg(normalized, "queue_name"))
+                    .unwrap_or_else(|| node.display_name().to_string()),
+                job_type: "dramatiq-actor".into(),
+                schedule: None,
+                strategy: "python-dramatiq-actor".into(),
+            });
+            continue;
+        }
         if normalized.contains("scheduled_job") {
             let schedule = python_schedule_summary(normalized);
             out.push(JobDetection {
@@ -117,6 +128,13 @@ fn is_celery_task_decorator(text: &str) -> bool {
 
 fn is_rq_job_decorator(text: &str) -> bool {
     text == "job" || text.starts_with("job(") || text.ends_with(".job") || text.contains(".job(")
+}
+
+fn is_dramatiq_actor_decorator(text: &str) -> bool {
+    text == "actor"
+        || text.starts_with("actor(")
+        || text.ends_with(".actor")
+        || text.contains(".actor(")
 }
 
 fn scheduled_annotation_schedule(annotation: &str) -> Option<String> {

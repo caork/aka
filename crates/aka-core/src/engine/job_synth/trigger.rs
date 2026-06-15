@@ -122,6 +122,8 @@ fn detect_named_job_dispatches(
         (".delay", "python-celery-delay"),
         (".apply_async", "python-celery-apply-async"),
         (".enqueue", "python-rq-enqueue"),
+        (".send", "python-dramatiq-send"),
+        (".send_with_options", "python-dramatiq-send-with-options"),
     ] {
         for call in find_call_args(text, callee) {
             let Some(source) = node_at_offset(text, nodes, call.start) else {
@@ -161,7 +163,10 @@ fn detect_named_job_dispatches(
 
 fn dispatch_names_for_call(text: &str, call_start: usize, args: &str, callee: &str) -> Vec<String> {
     let mut out = Vec::new();
-    if matches!(callee, ".delay" | ".apply_async") {
+    if matches!(
+        callee,
+        ".delay" | ".apply_async" | ".send" | ".send_with_options"
+    ) {
         if let Some(receiver) = receiver_ident_before(text, call_start) {
             out.push(receiver);
         }
