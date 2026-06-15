@@ -34,7 +34,7 @@ fn keys(v: &Value) -> Vec<&str> {
 
 #[tokio::test]
 async fn list_repos_shape() {
-    let res = server().list_repos().await.unwrap();
+    let res = server().list_repos_without_roots().await.unwrap();
     let v = text_json(&res);
     let repos = v["repos"].as_array().unwrap();
     assert_eq!(repos.len(), 2);

@@ -4,11 +4,12 @@
 //! Backend 执行错误走 in-band tool error（`is_error: true`），LLM 可见可重试；
 //! 只有序列化/运行时故障才上报协议级 `ErrorData`。
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, Content},
+    service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
 };
 use schemars::JsonSchema;
@@ -50,10 +51,75 @@ impl AkaMcpServer {
             ))])),
         }
     }
+
+    async fn queue_client_roots(&self, ctx: RequestContext<RoleServer>) {
+        let Ok(Ok(result)) =
+            tokio::time::timeout(Duration::from_millis(750), ctx.peer.list_roots()).await
+        else {
+            return;
+        };
+        let roots: Vec<PathBuf> = result
+            .roots
+            .into_iter()
+            .filter_map(|root| file_uri_to_path(&root.uri))
+            .collect();
+        if roots.is_empty() {
+            return;
+        }
+        let backend = Arc::clone(&self.backend);
+        let _ = tokio::task::spawn_blocking(move || backend.queue_workspaces(&roots)).await;
+    }
+
+    pub async fn list_repos_without_roots(&self) -> Result<CallToolResult, McpError> {
+        self.run(ops::list_repos).await
+    }
 }
 
 fn clamp_limit(limit: Option<usize>, default: usize) -> usize {
     limit.unwrap_or(default).clamp(1, ops::MAX_QUERY_LIMIT)
+}
+
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    if rest.is_empty() {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        let raw = rest.strip_prefix('/').unwrap_or(rest);
+        Some(PathBuf::from(percent_decode(raw).replace('/', "\\")))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(PathBuf::from(percent_decode(rest)))
+    }
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 // ---- 工具参数 ----
@@ -271,10 +337,14 @@ impl ImpactParams {
 #[tool_router]
 impl AkaMcpServer {
     #[tool(
-        description = "List indexed repositories with node/edge counts and index status. Call this first. In stdio MCP sessions, aka auto-queues the current workspace on startup and tool calls if it was not indexed yet; wait while status is indexing, or use analyze for an explicit absolute path."
+        description = "List indexed repositories with node/edge counts and index status. Call this first. aka tries to auto-queue MCP workspace roots (HTTP/stdio) and, in stdio fallback, the current process workspace; wait while status is indexing, or use analyze for an explicit absolute path."
     )]
-    pub async fn list_repos(&self) -> Result<CallToolResult, McpError> {
-        self.run(ops::list_repos).await
+    pub async fn list_repos(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.queue_client_roots(ctx).await;
+        self.list_repos_without_roots().await
     }
 
     #[tool(
@@ -467,6 +537,6 @@ impl AkaMcpServer {
 
 #[tool_handler(
     name = "aka-mcp",
-    instructions = "Code knowledge graph for repositories. Start with list_repos; aka stdio MCP auto-queues the current workspace on startup and tool calls when it is not indexed yet. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
+    instructions = "Code knowledge graph for repositories. Start with list_repos; aka auto-queues MCP workspace roots when clients expose them, and stdio fallback also auto-detects its process workspace. Use analyze with an explicit absolute path if the target repo is not listed. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
 )]
 impl ServerHandler for AkaMcpServer {}

@@ -342,6 +342,17 @@ pub struct RepoSettingsUpdate {
 
 /// 数据层抽象。所有工具（MCP 九工具 + HTTP API）只依赖这个 trait。
 pub trait Backend: Send + Sync + 'static {
+    /// Queue one or more workspace roots for background indexing when supported.
+    ///
+    /// This lets Streamable HTTP MCP clients share the desktop backend while still
+    /// giving aka a way to discover the agent's current project roots via MCP
+    /// `roots/list`. Implementations should silently ignore already registered or
+    /// already queued roots and return the names of newly queued repositories.
+    fn queue_workspaces(&self, roots: &[std::path::PathBuf]) -> anyhow::Result<Vec<String>> {
+        let _ = roots;
+        Ok(Vec::new())
+    }
+
     fn list_repos(&self) -> anyhow::Result<Vec<RepoInfo>>;
 
     /// 关键词 / 语义混合检索。

@@ -17,9 +17,9 @@ AGENTS-aka.md                      ② 备选载体：常驻指令（instruction
 http://127.0.0.1:4112/mcp
 ```
 
-OpenCode 通过这个本地 endpoint 调用 aka 工具；不需要用户单独安装或启动 CLI 版 `aka.exe`。如果 OpenCode 提示 MCP 连接失败，先确认 AKA 桌面端正在运行。
+OpenCode 通过这个本地 endpoint 调用 aka 工具；不需要用户单独安装或启动 CLI 版 `aka.exe`。AI 索引/查询结果会进入同一份 GUI 可见知识库。如果 OpenCode 提示 MCP 连接失败，先确认 AKA 桌面端正在运行。
 
-如果你把 OpenCode 配成 stdio 方式直接运行 `AKA mcp`，aka 会像 Claude Code / Codex 一样自动发现当前工作区，并在缺索引时后台排队分析。默认 remote 方式复用桌面端的全局仓库列表。
+默认 remote 方式会尝试通过 MCP roots 读取当前 OpenCode workspace 并自动排队索引；如果客户端未暴露 roots，agent 会用 `analyze` 显式传当前仓库绝对路径。把 OpenCode 配成 stdio 方式直接运行 `AKA mcp` 时，aka 也会自动发现当前工作区，并且和桌面 GUI 共用同一份数据。
 
 ## ② MCP 配置
 

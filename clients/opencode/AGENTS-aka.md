@@ -13,10 +13,10 @@ Route/Tool/FETCHES/HANDLES_ROUTE/HANDLES_TOOL/ENTRY_POINT_OF/STEP_IN_PROCESS 等
 
 ## 第一步：永远先 list_repos
 
-调用任何检索工具前先 `list_repos`。stdio MCP 会在工具调用时自动发现当前工作区，缺索引时后台排队分析；确认目标仓库已索引且 `status: "ready"` 后再做检索：
+调用任何检索工具前先 `list_repos`。HTTP MCP 会连接 AKA 桌面端本地服务，并尝试通过 MCP roots 读取当前客户端 workspace 自动排队索引；stdio fallback 会在工具调用时自动发现当前工作区。确认目标仓库已索引且 `status: "ready"` 后再做检索：
 
 - `status: "indexing"` → 稍后重试；`"failed"` → 看 `detail` 字段，必要时用 `analyze` 重建。
-- 目标仓库不在列表里 → 当前工作区可能不是 MCP 进程 cwd；用 `analyze`（参数 `repo_path` 必须是**绝对路径**）触发索引，索引需要时间，先做别的事再回来。
+- 目标仓库不在列表里 → 用 `analyze`（参数 `repo_path` 必须是**绝对路径**，优先传当前项目根目录）触发索引；HTTP 客户端未暴露 roots 时这是正常 fallback。索引需要时间，先做别的事再回来。
 - 多仓库时，后续所有工具都带 `repo` 参数（用 list_repos 返回的 `name`）锁定范围，避免跨库噪音。
 
 ## 选哪个工具：决策表

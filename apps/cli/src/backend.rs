@@ -2227,6 +2227,19 @@ impl Backend for AkaBackend {
         Ok(summary)
     }
 
+    fn queue_workspaces(&self, roots: &[PathBuf]) -> Result<Vec<String>> {
+        let mut queued = Vec::new();
+        for root in roots {
+            let Some(repo) = discover_workspace_root(root)? else {
+                continue;
+            };
+            if let Some(name) = self.auto_index_workspace(repo)? {
+                queued.push(name);
+            }
+        }
+        Ok(queued)
+    }
+
     fn detect_changes(
         &self,
         repo: Option<&str>,
