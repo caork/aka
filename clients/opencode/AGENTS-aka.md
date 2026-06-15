@@ -13,10 +13,10 @@ Route/Tool/FETCHES/HANDLES_ROUTE/HANDLES_TOOL/ENTRY_POINT_OF/STEP_IN_PROCESS 等
 
 ## 第一步：永远先 list_repos
 
-调用任何检索工具前先 `list_repos`，确认目标仓库已索引且 `status: "ready"`：
+调用任何检索工具前先 `list_repos`。stdio MCP 会在工具调用时自动发现当前工作区，缺索引时后台排队分析；确认目标仓库已索引且 `status: "ready"` 后再做检索：
 
 - `status: "indexing"` → 稍后重试；`"failed"` → 看 `detail` 字段，必要时用 `analyze` 重建。
-- 目标仓库不在列表里 → 用 `analyze`（参数 `repo_path` 必须是**绝对路径**）触发索引，索引需要时间，先做别的事再回来。
+- 目标仓库不在列表里 → 当前工作区可能不是 MCP 进程 cwd；用 `analyze`（参数 `repo_path` 必须是**绝对路径**）触发索引，索引需要时间，先做别的事再回来。
 - 多仓库时，后续所有工具都带 `repo` 参数（用 list_repos 返回的 `name`）锁定范围，避免跨库噪音。
 
 ## 选哪个工具：决策表
@@ -61,7 +61,7 @@ Route/Tool/FETCHES/HANDLES_ROUTE/HANDLES_TOOL/ENTRY_POINT_OF/STEP_IN_PROCESS 等
 
 ## 反模式
 
-- ❌ 不先 list_repos 就 query（撞上未索引仓库白白报错）。
+- ❌ 不先 list_repos 就 query（可能正处于自动索引中，先看 status/progress）。
 - ❌ 用 query 找确切符号名（用 find_definition）。
 - ❌ 用自然语言长句喂 query（用代码里会出现的关键词）。
 - ❌ 重构只看 search_references 一跳就动手（用 impact）。

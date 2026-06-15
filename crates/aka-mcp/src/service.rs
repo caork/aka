@@ -271,7 +271,7 @@ impl ImpactParams {
 #[tool_router]
 impl AkaMcpServer {
     #[tool(
-        description = "List indexed repositories with node/edge counts and index status. Call this first. In stdio MCP sessions, aka auto-queues the current workspace if it was not indexed yet; wait while status is indexing, or use analyze for an explicit absolute path."
+        description = "List indexed repositories with node/edge counts and index status. Call this first. In stdio MCP sessions, aka auto-queues the current workspace on startup and tool calls if it was not indexed yet; wait while status is indexing, or use analyze for an explicit absolute path."
     )]
     pub async fn list_repos(&self) -> Result<CallToolResult, McpError> {
         self.run(ops::list_repos).await
@@ -467,6 +467,6 @@ impl AkaMcpServer {
 
 #[tool_handler(
     name = "aka-mcp",
-    instructions = "Code knowledge graph for repositories. Start with list_repos; aka stdio MCP auto-queues the current workspace when it is not indexed yet. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
+    instructions = "Code knowledge graph for repositories. Start with list_repos; aka stdio MCP auto-queues the current workspace on startup and tool calls when it is not indexed yet. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
 )]
 impl ServerHandler for AkaMcpServer {}

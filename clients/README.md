@@ -31,7 +31,7 @@ clients/install.sh --client claude-code --plugin # 插件方式（含 skill）
 ## 通用前置
 
 1. OpenCode 默认复用已经运行的 AKA 桌面端本地 MCP server：`http://127.0.0.1:4112/mcp`。
-2. Claude Code / Codex 的 stdio MCP server 由客户端按需拉起，`--bin` 指向桌面包里的 `AKA` 可执行文件即可；`AKA mcp` 会自动发现当前工作区，缺索引时后台排队分析。
+2. Claude Code / Codex 的 stdio MCP server 由客户端按需拉起，`--bin` 指向桌面包里的 `AKA` 可执行文件即可；`AKA mcp` 会在启动和工具调用时自动发现当前工作区，缺索引时后台排队分析。
 3. agent 会先调 `list_repos`：`status: "indexing"` 表示自动索引正在跑，稍后重试；要索引非当前工作区，仍可显式调用 `analyze` 并传绝对路径。
 
 源码开发时仍可 `cargo build --release -p aka-cli`，脚本也会自动探测 `target/{release,debug}/aka` 和 PATH 上的 `aka`，方便本地调试。

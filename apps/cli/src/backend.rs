@@ -729,6 +729,7 @@ pub struct AkaBackend {
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     auto_indexer: Arc<AutoIndexer>,
     engine_dir: Option<PathBuf>,
+    auto_discover_workspace: bool,
 }
 
 struct AutoIndexer {
@@ -1461,6 +1462,7 @@ impl AkaBackend {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             auto_indexer: Arc::new(AutoIndexer::new()),
             engine_dir: None,
+            auto_discover_workspace: false,
         }
     }
 
@@ -1489,7 +1491,13 @@ impl AkaBackend {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             auto_indexer: Arc::new(AutoIndexer::new()),
             engine_dir: Some(engine_dir),
+            auto_discover_workspace: false,
         }
+    }
+
+    pub fn with_workspace_auto_index(mut self) -> Self {
+        self.auto_discover_workspace = true;
+        self
     }
 
     fn engine_dir(&self) -> Option<PathBuf> {
@@ -1528,6 +1536,13 @@ impl AkaBackend {
             return Ok(None);
         };
         self.auto_index_workspace(repo)
+    }
+
+    fn ensure_current_workspace_queued(&self) -> Result<Option<String>> {
+        if !self.auto_discover_workspace {
+            return Ok(None);
+        }
+        self.auto_index_current_workspace()
     }
 
     fn auto_index_workspace(&self, repo: PathBuf) -> Result<Option<String>> {
@@ -1632,6 +1647,9 @@ impl AkaBackend {
 
     /// 解析 repo 参数（名字或路径；None = 全部已索引仓库）。
     fn targets(&self, repo: Option<&str>) -> Result<Vec<Arc<RepoHandle>>> {
+        if repo.is_none() {
+            let _ = self.ensure_current_workspace_queued();
+        }
         let registry = Registry::load()?;
         let jobs = self.jobs.lock().expect("jobs lock").clone();
         let entries: Vec<RepoEntry> = match repo {
@@ -1659,7 +1677,11 @@ impl AkaBackend {
             None => registry.repos.clone(),
         };
         if entries.is_empty() {
-            bail!("没有已注册的仓库——先 `aka analyze <path>`");
+            let pending = jobs.values().any(|job| job.status == "indexing");
+            if pending {
+                bail!("当前工作区正在自动索引中，请稍后重试或先调用 list_repos 查看进度");
+            }
+            bail!("没有已注册的仓库——MCP 会自动尝试索引当前工作区；也可显式调用 analyze 传入仓库绝对路径");
         }
 
         let mut cache = self.handles.lock().expect("handles lock");
@@ -1682,7 +1704,7 @@ impl AkaBackend {
             out.push(handle);
         }
         if out.is_empty() {
-            bail!("没有已就绪的仓库——请等待索引完成");
+            bail!("没有已就绪的仓库——请等待索引完成，或调用 list_repos 查看进度");
         }
         Ok(out)
     }
@@ -1761,6 +1783,7 @@ impl Default for AkaBackend {
 
 impl Backend for AkaBackend {
     fn list_repos(&self) -> Result<Vec<RepoInfo>> {
+        let _ = self.ensure_current_workspace_queued();
         let registry = Registry::load()?;
         let jobs = self.jobs.lock().expect("jobs lock").clone();
         let mut out: Vec<RepoInfo> = registry
@@ -2792,6 +2815,40 @@ impl Backend for AkaBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex as TestMutex, OnceLock};
+
+    struct EnvRestore {
+        cwd: PathBuf,
+        aka_home: Option<OsString>,
+    }
+
+    impl EnvRestore {
+        fn capture() -> Self {
+            Self {
+                cwd: std::env::current_dir().expect("current dir"),
+                aka_home: std::env::var_os("AKA_HOME"),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.cwd);
+            if let Some(value) = &self.aka_home {
+                std::env::set_var("AKA_HOME", value);
+            } else {
+                std::env::remove_var("AKA_HOME");
+            }
+        }
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<TestMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| TestMutex::new(()))
+            .lock()
+            .expect("test env lock")
+    }
 
     /// 每个测试用独立临时仓库目录，互不串扰。
     fn temp_repo(tag: &str) -> PathBuf {
@@ -2933,6 +2990,29 @@ mod tests {
 
         assert_ne!(name, existing_name);
         assert_eq!(name, repo_dir_name(&repo));
+    }
+
+    #[test]
+    fn list_repos_auto_queues_workspace_only_when_enabled() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let repo = temp_repo("workspace-auto-list");
+        let home = temp_repo("workspace-auto-home");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
+        std::fs::write(repo.join("src/app.py"), "def main(): pass\n").unwrap();
+        std::env::set_var("AKA_HOME", &home);
+        std::env::set_current_dir(&repo).unwrap();
+
+        let plain = AkaBackend::new();
+        assert!(plain.list_repos().unwrap().is_empty());
+
+        let auto = AkaBackend::new().with_workspace_auto_index();
+        let repos = auto.list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, derive_local_name(&repo));
+        assert_eq!(repos[0].status, "indexing");
+        assert!(repos[0].progress.is_some());
     }
 
     #[test]

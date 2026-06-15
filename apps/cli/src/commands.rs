@@ -120,7 +120,7 @@ where
             out,
         } => run_lod(repo, max_nodes, out),
         Cmd::Mcp => tokio_rt()?.block_on(async {
-            let backend = AkaBackend::new();
+            let backend = AkaBackend::new().with_workspace_auto_index();
             match backend.auto_index_current_workspace() {
                 Ok(Some(name)) => {
                     eprintln!("aka ▸ MCP detected current workspace; indexing queued as {name}");
