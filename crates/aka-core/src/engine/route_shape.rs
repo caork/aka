@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use super::route_shape_java::extract_java_map_response_keys;
-use super::route_shape_python::extract_python_response_model_keys;
+use super::route_shape_python::{
+    extract_python_response_model_keys, extract_python_response_model_keys_for_file,
+};
 use super::{clamp_char_boundary, is_ident_continue, is_ident_start, read_string_literal, skip_ws};
 
 pub(super) fn fetch_literal_windows(text: &str) -> Vec<(usize, &str)> {
@@ -235,7 +238,18 @@ fn is_common_property(key: &str) -> bool {
     )
 }
 
-pub(super) fn extract_response_keys(text: &str) -> Vec<String> {
+pub(super) fn extract_response_keys_for_file(
+    repo: &Path,
+    file_path: &str,
+    text: &str,
+) -> Vec<String> {
+    extract_response_keys_with_extra(
+        text,
+        extract_python_response_model_keys_for_file(repo, file_path, text),
+    )
+}
+
+fn extract_response_keys_with_extra(text: &str, extra_keys: Vec<String>) -> Vec<String> {
     let mut keys = BTreeSet::new();
     for marker in [".json(", "json(", "return "] {
         let mut offset = 0usize;
@@ -252,6 +266,7 @@ pub(super) fn extract_response_keys(text: &str) -> Vec<String> {
     }
     keys.extend(extract_java_map_response_keys(text));
     keys.extend(extract_python_response_model_keys(text));
+    keys.extend(extra_keys);
     keys.into_iter().take(32).collect()
 }
 

@@ -1,9 +1,39 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
-use super::{find_call_args, split_top_level_commas};
+use super::{find_call_args, read_repo_text, split_top_level_commas};
 
 pub(super) fn extract_python_response_model_keys(text: &str) -> Vec<String> {
-    let models = python_class_fields(text);
+    extract_python_response_model_keys_from_models(text, python_class_fields(text))
+}
+
+pub(super) fn extract_python_response_model_keys_for_file(
+    repo: &Path,
+    file_path: &str,
+    text: &str,
+) -> Vec<String> {
+    let mut models = python_class_fields(text);
+    for import in python_response_model_imports(text) {
+        let Some(import_file) = resolve_python_import_file(repo, file_path, &import.module) else {
+            continue;
+        };
+        let Some(import_text) = read_repo_text(repo, &import_file) else {
+            continue;
+        };
+        let imported_models = python_class_fields(&import_text);
+        if let Some(fields) = imported_models.get(&import.name) {
+            models
+                .entry(import.alias_or_name())
+                .or_insert_with(|| fields.clone());
+        }
+    }
+    extract_python_response_model_keys_from_models(text, models)
+}
+
+fn extract_python_response_model_keys_from_models(
+    text: &str,
+    models: BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
     if models.is_empty() {
         return Vec::new();
     }
@@ -22,6 +52,98 @@ pub(super) fn extract_python_response_model_keys(text: &str) -> Vec<String> {
         }
     }
     keys.into_iter().collect()
+}
+
+#[derive(Debug)]
+struct PythonModelImport {
+    module: String,
+    name: String,
+    alias: Option<String>,
+}
+
+impl PythonModelImport {
+    fn alias_or_name(&self) -> String {
+        self.alias.clone().unwrap_or_else(|| self.name.clone())
+    }
+}
+
+fn python_response_model_imports(text: &str) -> Vec<PythonModelImport> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("from ") else {
+            continue;
+        };
+        let Some((module, names)) = rest.split_once(" import ") else {
+            continue;
+        };
+        for raw in names.split(',') {
+            let raw = raw.trim().trim_matches(['(', ')']);
+            if raw.is_empty() || raw == "*" {
+                continue;
+            }
+            let (name, alias) = split_python_import_alias(raw);
+            if is_python_ident(name) && alias.is_none_or(is_python_ident) {
+                out.push(PythonModelImport {
+                    module: module.trim().to_string(),
+                    name: name.to_string(),
+                    alias: alias.map(str::to_string),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn split_python_import_alias(raw: &str) -> (&str, Option<&str>) {
+    let parts: Vec<&str> = raw.split_whitespace().collect();
+    match parts.as_slice() {
+        [name, "as", alias] => (name, Some(alias)),
+        [name] => (name, None),
+        _ => (raw, None),
+    }
+}
+
+fn resolve_python_import_file(repo: &Path, file_path: &str, module: &str) -> Option<String> {
+    let rel = if module.starts_with('.') {
+        relative_python_module_path(file_path, module)
+    } else {
+        module.replace('.', "/")
+    };
+    let candidates = [
+        format!("{rel}.py"),
+        format!("{rel}/__init__.py"),
+        strip_first_module_segment(&rel)
+            .map(|v| format!("{v}.py"))
+            .unwrap_or_default(),
+        strip_first_module_segment(&rel)
+            .map(|v| format!("{v}/__init__.py"))
+            .unwrap_or_default(),
+    ];
+    candidates
+        .into_iter()
+        .filter(|candidate| !candidate.is_empty())
+        .find(|candidate| repo.join(candidate).is_file())
+}
+
+fn relative_python_module_path(file_path: &str, module: &str) -> String {
+    let dots = module.chars().take_while(|ch| *ch == '.').count();
+    let tail = module.trim_start_matches('.');
+    let mut base = PathBuf::from(file_path.replace('\\', "/"));
+    base.pop();
+    for _ in 1..dots {
+        base.pop();
+    }
+    if !tail.is_empty() {
+        for segment in tail.split('.') {
+            base.push(segment);
+        }
+    }
+    base.to_string_lossy().replace('\\', "/")
+}
+
+fn strip_first_module_segment(path: &str) -> Option<String> {
+    path.split_once('/').map(|(_, rest)| rest.to_string())
 }
 
 fn python_response_model_arg(args: &str) -> Option<String> {

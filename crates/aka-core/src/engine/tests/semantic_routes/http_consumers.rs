@@ -279,6 +279,90 @@ async def sync_order(order_id: str):
 }
 
 #[test]
+fn extracts_fastapi_imported_response_model_shape_keys() {
+    let repo = temp_repo("python-fastapi-imported-response-model-shapes");
+    std::fs::create_dir_all(repo.join("api")).unwrap();
+    std::fs::create_dir_all(repo.join("workers")).unwrap();
+    std::fs::write(
+        repo.join("api/schemas.py"),
+        r#"from pydantic import BaseModel
+
+class OrderResponse(BaseModel):
+    id: str
+    status: str
+    total: int
+    error: str | None = None
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("api/orders.py"),
+        r#"from fastapi import APIRouter
+from api.schemas import OrderResponse
+
+router = APIRouter(prefix="/api/orders")
+
+@router.get("/{id}", response_model=OrderResponse)
+def get_order(id: str):
+    return load_order(id)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("workers/sync.py"),
+        r#"import requests
+
+def sync_order(order_id: str):
+    response = requests.get(f"http://orders.internal/api/orders/{order_id}")
+    data = response.json()
+    return data["status"] + data["missing"]
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Function",
+        "get_order",
+        "api.orders.get_order",
+        "api/orders.py",
+        json!({
+            "decorators": ["@router.get(\"/{id}\", response_model=OrderResponse)"],
+            "language": "python",
+            "route_method": "GET",
+            "route_path": "/{id}",
+        }),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Function",
+        "sync_order",
+        "workers.sync.sync_order",
+        "workers/sync.py",
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}")
+        .expect("FastAPI route with imported Pydantic response model");
+    assert!(route.response_keys.contains(&"id".to_string()));
+    assert!(route.response_keys.contains(&"status".to_string()));
+    assert!(route.response_keys.contains(&"total".to_string()));
+    assert!(route.error_keys.contains(&"error".to_string()));
+    assert_eq!(route.consumers.len(), 1);
+    assert!(route.consumers[0].keys.contains(&"status".to_string()));
+    assert!(route.consumers[0].keys.contains(&"missing".to_string()));
+}
+
+#[test]
 fn links_python_aiohttp_client_consumers_to_routes() {
     let repo = temp_repo("python-aiohttp-route-consumers");
     std::fs::create_dir_all(repo.join("api")).unwrap();

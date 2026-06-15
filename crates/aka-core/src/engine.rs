@@ -69,7 +69,7 @@ use route_consumer_synth::attach_route_consumers;
 use route_django_synth::django_urlconf_routes_from_repo;
 use route_realtime_synth::realtime_routes_by_file;
 use route_shape::{
-    extract_error_keys, extract_middleware, extract_response_keys, literal_occurrences,
+    extract_error_keys, extract_middleware, extract_response_keys_for_file, literal_occurrences,
 };
 use route_spring_functional_synth::spring_functional_routes_from_repo;
 use source_scan::{
@@ -2581,7 +2581,7 @@ fn synthesize_routes_from_sources(
         if route_candidates.is_empty() {
             continue;
         }
-        let response_keys = extract_response_keys(&text);
+        let response_keys = extract_response_keys_for_file(repo, file_path, &text);
         let error_keys = extract_error_keys(&response_keys, &text);
         let middleware = extract_middleware(&text);
         for candidate in route_candidates {
@@ -2599,7 +2599,7 @@ fn synthesize_routes_from_sources(
 
     for (file_path, route_candidates) in django_routes_by_file {
         let text = read_repo_text(repo, &file_path).unwrap_or_default();
-        let response_keys = extract_response_keys(&text);
+        let response_keys = extract_response_keys_for_file(repo, &file_path, &text);
         let error_keys = extract_error_keys(&response_keys, &text);
         let middleware = extract_middleware(&text);
         for candidate in route_candidates {
@@ -2617,7 +2617,7 @@ fn synthesize_routes_from_sources(
 
     for (file_path, route_candidates) in spring_functional_routes_by_file {
         let text = read_repo_text(repo, &file_path).unwrap_or_default();
-        let response_keys = extract_response_keys(&text);
+        let response_keys = extract_response_keys_for_file(repo, &file_path, &text);
         let error_keys = extract_error_keys(&response_keys, &text);
         let middleware = extract_middleware(&text);
         for candidate in route_candidates {
@@ -2635,7 +2635,7 @@ fn synthesize_routes_from_sources(
 
     for (file_path, route_candidates) in realtime_routes_by_file {
         let text = read_repo_text(repo, &file_path).unwrap_or_default();
-        let response_keys = extract_response_keys(&text);
+        let response_keys = extract_response_keys_for_file(repo, &file_path, &text);
         let error_keys = extract_error_keys(&response_keys, &text);
         let middleware = extract_middleware(&text);
         for candidate in route_candidates {
