@@ -23,10 +23,12 @@ use serde_json::{json, Map, Value};
 
 use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION};
 
+mod cache_synth;
 mod job_synth;
 mod persistence_synth;
 mod property_synth;
 mod topic_synth;
+use cache_synth::{synthesize_caches_from_sources, SynthCache};
 use job_synth::{synthesize_jobs_from_sources, SynthJob};
 use persistence_synth::{synthesize_persistence_from_sources, SynthPersistenceGraph};
 #[cfg(test)]
@@ -773,6 +775,12 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for cache in &synth.caches {
+        let node = cache.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     for node in synth.persistence.node_recs() {
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
@@ -860,6 +868,7 @@ fn export_edges(
         .chain(synth.tools.iter().flat_map(SynthTool::edge_recs))
         .chain(synth.jobs.iter().flat_map(SynthJob::edge_recs))
         .chain(synth.topics.iter().flat_map(SynthTopic::edge_recs))
+        .chain(synth.caches.iter().flat_map(SynthCache::edge_recs))
         .chain(synth.persistence.edge_recs())
         .chain(synth.edges.iter().cloned())
     {
@@ -1117,6 +1126,7 @@ struct SynthGraph {
     tools: Vec<SynthTool>,
     jobs: Vec<SynthJob>,
     topics: Vec<SynthTopic>,
+    caches: Vec<SynthCache>,
     persistence: SynthPersistenceGraph,
     properties: Vec<SynthProperty>,
     edges: Vec<EdgeRec>,
@@ -1607,6 +1617,13 @@ fn synthesize_graph_with_progress(
     let topics = synthesize_topics_from_sources(repo, &nodes);
     emit_phase(
         on_event,
+        "codebase-memory:export-artifacts:synthesize:caches",
+        0,
+        0,
+    );
+    let caches = synthesize_caches_from_sources(repo, &nodes);
+    emit_phase(
+        on_event,
         "codebase-memory:export-artifacts:synthesize:persistence",
         0,
         0,
@@ -1620,6 +1637,7 @@ fn synthesize_graph_with_progress(
         tools,
         jobs,
         topics,
+        caches,
         persistence,
         properties,
         edges: synthetic_edges,
@@ -7688,6 +7706,151 @@ class OrderRepository:
         assert!(edge_types.contains(&"MAPS_TO_TABLE".to_string()));
         assert!(edge_types.contains(&"MANAGES_ENTITY".to_string()));
         assert!(edge_types.contains(&"HAS_RELATION".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_java_cache_nodes() {
+        let repo = temp_repo("java-cache");
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/cache")).unwrap();
+        let file = "src/main/java/com/example/cache/OrderCache.java";
+        std::fs::write(
+            repo.join(file),
+            r#"package com.example.cache;
+
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+
+class OrderCache {
+    @Cacheable(cacheNames = "orders")
+    public OrderDto loadOrder(String id) {
+        return redisTemplate.opsForValue().get("orders:" + id);
+    }
+
+    @CacheEvict(value = "orders")
+    public void evictOrder(String id) {
+        redisTemplate.delete("orders:" + id);
+    }
+}"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "loadOrder",
+            "com.example.cache.OrderCache.loadOrder",
+            file,
+            (7, 9),
+            json!({
+                "decorators": ["@Cacheable(cacheNames = \"orders\")"],
+                "language": "java",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            2,
+            "evictOrder",
+            "com.example.cache.OrderCache.evictOrder",
+            file,
+            (12, 14),
+            json!({
+                "decorators": ["@CacheEvict(value = \"orders\")"],
+                "language": "java",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let cache = synth
+            .caches
+            .iter()
+            .find(|cache| cache.name == "orders" && cache.backend == "spring-cache")
+            .expect("spring orders cache");
+        assert_eq!(cache.readers.len(), 1);
+        assert_eq!(cache.evictors.len(), 1);
+        let redis = synth
+            .caches
+            .iter()
+            .find(|cache| cache.name == "orders:" && cache.backend == "redis")
+            .expect("redis key prefix");
+        assert_eq!(redis.readers.len(), 1);
+        assert_eq!(redis.evictors.len(), 1);
+        let edge_types: Vec<_> = synth
+            .caches
+            .iter()
+            .flat_map(SynthCache::edge_recs)
+            .map(|edge| edge.edge_type)
+            .collect();
+        assert!(edge_types.contains(&"READS_CACHE".to_string()));
+        assert!(edge_types.contains(&"EVICTS_CACHE".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_python_cache_nodes() {
+        let repo = temp_repo("python-cache");
+        std::fs::write(
+            repo.join("cache_ops.py"),
+            r#"from django.core.cache import cache
+
+def load_order(order_id, redis):
+    value = cache.get("orders:list")
+    redis.set("orders:last", order_id)
+    return redis.get("orders:last")
+
+def evict_order():
+    cache.delete("orders:list")
+"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_function_node_props_at(
+            &conn,
+            1,
+            "load_order",
+            "cache_ops.load_order",
+            "cache_ops.py",
+            (3, 6),
+            json!({
+                "language": "python",
+            }),
+        );
+        insert_function_node_props_at(
+            &conn,
+            2,
+            "evict_order",
+            "cache_ops.evict_order",
+            "cache_ops.py",
+            (8, 9),
+            json!({
+                "language": "python",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let django = synth
+            .caches
+            .iter()
+            .find(|cache| cache.name == "orders:list" && cache.backend == "django-cache")
+            .expect("django cache key");
+        assert_eq!(django.readers.len(), 1);
+        assert_eq!(django.evictors.len(), 1);
+        let redis = synth
+            .caches
+            .iter()
+            .find(|cache| cache.name == "orders:last" && cache.backend == "redis")
+            .expect("redis cache key");
+        assert_eq!(redis.readers.len(), 1);
+        assert_eq!(redis.writers.len(), 1);
+        let edge_types: Vec<_> = synth
+            .caches
+            .iter()
+            .flat_map(SynthCache::edge_recs)
+            .map(|edge| edge.edge_type)
+            .collect();
+        assert!(edge_types.contains(&"READS_CACHE".to_string()));
+        assert!(edge_types.contains(&"WRITES_CACHE".to_string()));
+        assert!(edge_types.contains(&"EVICTS_CACHE".to_string()));
     }
 
     #[test]

@@ -670,6 +670,7 @@ fn is_symbol_label(label: &str) -> bool {
             | "Job"
             | "Table"
             | "Repository"
+            | "Cache"
             | "Resource"
     )
 }
@@ -690,6 +691,7 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Job"
             | "Table"
             | "Repository"
+            | "Cache"
     )
 }
 
@@ -703,7 +705,15 @@ fn is_container_label(label: &str) -> bool {
 fn node_search_text(node: &NodeRec) -> String {
     if !matches!(
         node.label.as_str(),
-        "Process" | "Route" | "Tool" | "Job" | "Table" | "Repository" | "Community" | "Resource"
+        "Process"
+            | "Route"
+            | "Tool"
+            | "Job"
+            | "Table"
+            | "Repository"
+            | "Cache"
+            | "Community"
+            | "Resource"
     ) {
         return String::new();
     }
@@ -720,6 +730,8 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "tableSource");
     push_prop_str(&mut parts, &node.properties, "entityName");
     push_prop_str(&mut parts, &node.properties, "repositorySource");
+    push_prop_str(&mut parts, &node.properties, "backend");
+    push_prop_str(&mut parts, &node.properties, "cacheSource");
     push_prop_str(&mut parts, &node.properties, "route");
     push_prop_str(&mut parts, &node.properties, "tool");
     push_prop_array(&mut parts, &node.properties, "trace");
@@ -901,6 +913,11 @@ mod tests {
             Value::String("java-spring-data-repository".into()),
         );
 
+        let mut cache_props = Map::new();
+        cache_props.insert("name".into(), Value::String("orders:last".into()));
+        cache_props.insert("backend".into(), Value::String("redis".into()));
+        cache_props.insert("cacheSource".into(), Value::String("source-scan".into()));
+
         let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
         writer
             .add_nodes(
@@ -919,6 +936,11 @@ mod tests {
                         id: "repository:orders".into(),
                         label: "Repository".into(),
                         properties: repo_props,
+                    },
+                    NodeRec {
+                        id: "cache:orders-last".into(),
+                        label: "Cache".into(),
+                        properties: cache_props,
                     },
                 ]
                 .into_iter(),
@@ -943,5 +965,10 @@ mod tests {
         let repo_hit = repo_hits.first().expect("repository search hit");
         assert_eq!(repo_hit.node_id, "repository:orders");
         assert_eq!(repo_hit.label, "Repository");
+
+        let cache_hits = index.search("redis orders last cache", 5).unwrap();
+        let cache_hit = cache_hits.first().expect("cache search hit");
+        assert_eq!(cache_hit.node_id, "cache:orders-last");
+        assert_eq!(cache_hit.label, "Cache");
     }
 }
