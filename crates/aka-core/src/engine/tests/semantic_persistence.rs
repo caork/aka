@@ -520,6 +520,126 @@ def archive_orders(session):
 }
 
 #[test]
+fn synthesizes_python_django_orm_write_table_access_edges() {
+    let repo = temp_repo("python-django-orm-table-access");
+    std::fs::write(
+        repo.join("models.py"),
+        r#"from sqlalchemy import Column, Integer
+
+class Order(Base):
+    __tablename__ = "orders"
+    id = Column(Integer, primary_key=True)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("services.py"),
+        r#"from models import Order
+
+def load_order(order_id):
+    return Order.objects.get(id=order_id)
+
+def create_order(payload):
+    return Order.objects.create(**payload)
+
+def cancel_orders(customer_id):
+    return Order.objects.filter(customer_id=customer_id).update(status="cancelled")
+
+def purge_cancelled():
+    return Order.objects.filter(status="cancelled").delete()
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "Order", "models.Order", "models.py"),
+        (3, 5),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "load_order",
+        "services.load_order",
+        "services.py",
+        (3, 4),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "create_order",
+        "services.create_order",
+        "services.py",
+        (6, 7),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "cancel_orders",
+        "services.cancel_orders",
+        "services.py",
+        (9, 10),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        5,
+        "purge_cancelled",
+        "services.purge_cancelled",
+        "services.py",
+        (12, 13),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let table_id = synth
+        .persistence
+        .node_recs()
+        .into_iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+        })
+        .expect("orders table")
+        .id;
+    let edges = synth.persistence.edge_recs();
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "READS_TABLE"
+            && edge.source_id == "cbm:2:services.load_order"
+            && edge.target_id == table_id
+    }));
+    for writer in [
+        "cbm:3:services.create_order",
+        "cbm:4:services.cancel_orders",
+        "cbm:5:services.purge_cancelled",
+    ] {
+        assert!(
+            edges.iter().any(|edge| {
+                edge.edge_type == "WRITES_TABLE"
+                    && edge.source_id == writer
+                    && edge.target_id == table_id
+            }),
+            "expected {writer} to write orders"
+        );
+    }
+}
+
+#[test]
 fn synthesizes_python_async_db_table_access_from_multiline_sql() {
     let repo = temp_repo("python-async-db-table-access");
     std::fs::write(

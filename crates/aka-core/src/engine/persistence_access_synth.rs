@@ -193,14 +193,15 @@ fn detect_orm_table_accesses(
             while let Some(pos) = text[offset..].find(&marker) {
                 let start = offset + pos;
                 if let Some(node) = node_at_offset(text, nodes, start) {
+                    let (kind, strategy) = orm_manager_access_kind(text, start + marker.len());
                     out.push(TableAccessDetection {
                         table: TableAccessRef {
                             table_id: entity.table_id.clone(),
                             table_name: entity.table_name.clone(),
                         },
                         node_id: node.aka_id.clone(),
-                        kind: TableAccessKind::Read,
-                        strategy: "orm-entity-manager".into(),
+                        kind,
+                        strategy: strategy.into(),
                     });
                 }
                 offset = start + marker.len();
@@ -208,6 +209,37 @@ fn detect_orm_table_accesses(
         }
     }
     out
+}
+
+fn orm_manager_access_kind(text: &str, start: usize) -> (TableAccessKind, &'static str) {
+    let rest = text.get(start..).unwrap_or_default();
+    let window = rest
+        .split(['\n', ';'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let lower = window.to_ascii_lowercase();
+    for marker in [
+        ".create(",
+        ".bulk_create(",
+        ".update(",
+        ".bulk_update(",
+        ".update_or_create(",
+        ".get_or_create(",
+        ".delete(",
+    ] {
+        if lower.contains(marker) {
+            return (TableAccessKind::Write, "orm-entity-manager-write");
+        }
+    }
+    if lower.starts_with("create(")
+        || lower.starts_with("bulk_create(")
+        || lower.starts_with("update_or_create(")
+        || lower.starts_with("get_or_create(")
+    {
+        return (TableAccessKind::Write, "orm-entity-manager-write");
+    }
+    (TableAccessKind::Read, "orm-entity-manager-read")
 }
 
 fn table_access_edge(detection: TableAccessDetection) -> EdgeRec {
