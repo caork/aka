@@ -730,6 +730,111 @@ class AsyncBillingJobs {
 }
 
 #[test]
+fn synthesizes_spring_jobs_from_source_annotations_without_metadata() {
+    let repo = temp_repo("spring-scheduled-source-annotations");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/jobs")).unwrap();
+    let file = "src/main/java/com/example/jobs/BillingJobs.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.jobs;
+
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.scheduling.annotation.Scheduled;
+
+class BillingJobs {
+    @Scheduled(fixedDelayString = "${billing.delay.ms}")
+    void refreshInvoices() {
+        writeLedger();
+    }
+
+    void writeLedger() {
+        persistLedger();
+    }
+
+    void persistLedger() {}
+
+    @Async
+    void rebuildInvoiceCache() {}
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "refreshInvoices",
+        "com.example.jobs.BillingJobs.refreshInvoices",
+        file,
+        (8, 10),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "writeLedger",
+        "com.example.jobs.BillingJobs.writeLedger",
+        file,
+        (12, 14),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "persistLedger",
+        "com.example.jobs.BillingJobs.persistLedger",
+        file,
+        (16, 16),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "rebuildInvoiceCache",
+        "com.example.jobs.BillingJobs.rebuildInvoiceCache",
+        file,
+        (19, 19),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "CALLS");
+    insert_edge(&conn, 2, 2, 3, "CALLS");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let scheduled = synth
+        .jobs
+        .iter()
+        .find(|job| job.handler_id == "cbm:1:com.example.jobs.BillingJobs.refreshInvoices")
+        .expect("scheduled job from source annotation");
+    assert_eq!(scheduled.job_type, "spring-scheduled");
+    assert_eq!(
+        scheduled.schedule.as_deref(),
+        Some("fixedDelayString=${billing.delay.ms}")
+    );
+    assert_eq!(
+        scheduled.strategy,
+        "java-spring-scheduled-source-annotation"
+    );
+    assert_eq!(scheduled.process_ids.len(), 1);
+
+    let async_job = synth
+        .jobs
+        .iter()
+        .find(|job| job.handler_id == "cbm:4:com.example.jobs.BillingJobs.rebuildInvoiceCache")
+        .expect("async job from source annotation");
+    assert_eq!(async_job.job_type, "spring-async");
+    assert_eq!(async_job.strategy, "java-spring-async-source-annotation");
+}
+
+#[test]
 fn synthesizes_python_task_jobs() {
     let repo = temp_repo("python-task-jobs");
     std::fs::write(

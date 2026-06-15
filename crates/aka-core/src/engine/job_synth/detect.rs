@@ -22,7 +22,7 @@ pub(super) fn detect_node_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobD
             "java" | "kotlin" | "scala" | "groovy"
         )
     {
-        out.extend(detect_jvm_jobs(node));
+        out.extend(detect_jvm_jobs(text, node));
     }
     if lower_path.ends_with(".py") || node.language.eq_ignore_ascii_case("python") {
         out.extend(detect_python_jobs(text, node));
@@ -36,7 +36,7 @@ pub(super) fn detect_node_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobD
     out
 }
 
-fn detect_jvm_jobs(node: &SynthNode) -> Vec<JobDetection> {
+fn detect_jvm_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobDetection> {
     let mut out = Vec::new();
     for decorator in &node.decorators {
         if decorator.contains("Scheduled") {
@@ -61,7 +61,97 @@ fn detect_jvm_jobs(node: &SynthNode) -> Vec<JobDetection> {
             });
         }
     }
+    if let Some(text) = text {
+        out.extend(detect_jvm_source_annotation_jobs(text, node));
+    }
     out
+}
+
+fn detect_jvm_source_annotation_jobs(text: &str, node: &SynthNode) -> Vec<JobDetection> {
+    let mut out = Vec::new();
+    for annotation in source_annotations_before_node(text, node) {
+        if annotation.contains("Scheduled") {
+            let schedule = scheduled_annotation_schedule(&annotation);
+            out.push(JobDetection {
+                name: schedule
+                    .as_ref()
+                    .map(|s| format!("{} ({s})", node.display_name()))
+                    .unwrap_or_else(|| node.display_name().to_string()),
+                job_type: "spring-scheduled".into(),
+                schedule,
+                strategy: "java-spring-scheduled-source-annotation".into(),
+            });
+        } else if annotation.contains("Async") {
+            out.push(JobDetection {
+                name: node.display_name().to_string(),
+                job_type: "spring-async".into(),
+                schedule: None,
+                strategy: "java-spring-async-source-annotation".into(),
+            });
+        }
+    }
+    out
+}
+
+fn source_annotations_before_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let node_line = node.start_line_key();
+    if node_line <= 1 {
+        return Vec::new();
+    }
+    let mut idx = node_line.saturating_sub(2) as usize;
+    let mut annotations = Vec::new();
+    loop {
+        let Some(line) = lines.get(idx) else {
+            break;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+            continue;
+        }
+        if !trimmed.starts_with('@') {
+            break;
+        }
+        annotations.push(collect_annotation_from_line(text, &lines, idx));
+        if idx == 0 {
+            break;
+        }
+        idx -= 1;
+    }
+    annotations.reverse();
+    annotations
+}
+
+fn collect_annotation_from_line(text: &str, lines: &[&str], line_idx: usize) -> String {
+    let start = line_start_offset(text, line_idx);
+    let line = lines[line_idx].trim();
+    let Some(open) = text[start..].find('(').map(|rel| start + rel) else {
+        return line.to_string();
+    };
+    let Some(close) = find_matching_paren(text, open) else {
+        return line.to_string();
+    };
+    text[start..=close].trim().replace('\n', " ")
+}
+
+fn line_start_offset(text: &str, line_idx: usize) -> usize {
+    if line_idx == 0 {
+        return 0;
+    }
+    let mut line = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            line += 1;
+            if line == line_idx {
+                return idx + 1;
+            }
+        }
+    }
+    text.len()
 }
 
 fn detect_python_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobDetection> {

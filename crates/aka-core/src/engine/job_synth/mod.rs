@@ -65,3 +65,27 @@ pub(super) fn synthesize_jobs_from_sources(
     });
     out
 }
+
+pub(super) fn job_entry_hints_from_sources(
+    repo: &Path,
+    nodes: &BTreeMap<String, SynthNode>,
+) -> BTreeMap<String, String> {
+    let project_sources = ProjectSourceSet::discover(repo);
+    let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
+    let mut out = BTreeMap::new();
+    for (file_path, file_nodes) in by_file {
+        let text = read_repo_text(repo, &file_path);
+        for node in file_nodes
+            .iter()
+            .copied()
+            .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+        {
+            for detection in detect_node_jobs(text.as_deref(), node) {
+                if detection.job_type == "spring-scheduled" {
+                    out.entry(node.aka_id.clone()).or_insert(detection.strategy);
+                }
+            }
+        }
+    }
+    out
+}

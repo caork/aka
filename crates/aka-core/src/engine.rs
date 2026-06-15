@@ -62,7 +62,7 @@ use config_synth::{synthesize_configs_from_sources, SynthConfig};
 use dependency_synth::synthesize_dependency_edges_from_sources;
 use event_synth::{synthesize_events_from_sources, SynthEvent};
 use graphql_synth::{synthesize_graphql_from_sources, SynthGraphqlOperation};
-use job_synth::{synthesize_jobs_from_sources, SynthJob};
+use job_synth::{job_entry_hints_from_sources, synthesize_jobs_from_sources, SynthJob};
 use persistence_synth::{synthesize_persistence_from_sources, SynthPersistenceGraph};
 use policy_synth::{synthesize_policies_from_sources, SynthPolicy};
 #[cfg(test)]
@@ -1643,7 +1643,12 @@ fn synthesize_graph_with_progress(
     let synthetic_edges =
         synthesize_dependency_edges_from_sources(repo, &nodes, &existing_call_pairs);
     let calls = load_call_graph(conn, project, &nodes, &synthetic_edges)?;
-    let command_entry_hints = command_entry_hints_from_sources(repo, &nodes);
+    let mut command_entry_hints = command_entry_hints_from_sources(repo, &nodes);
+    for (handler_id, strategy) in job_entry_hints_from_sources(repo, &nodes) {
+        command_entry_hints
+            .entry(handler_id)
+            .or_insert(CommandEntryHint { strategy });
+    }
 
     emit_phase(
         on_event,
