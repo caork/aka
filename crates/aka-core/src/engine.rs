@@ -4013,6 +4013,12 @@ pub(super) fn read_string_literal(text: &str, start: usize) -> Option<(String, u
     if !matches!(quote, b'\'' | b'"' | b'`') {
         return None;
     }
+    if matches!(quote, b'\'' | b'"')
+        && bytes.get(start + 1) == Some(&quote)
+        && bytes.get(start + 2) == Some(&quote)
+    {
+        return read_triple_quoted_string_literal(text, start, quote);
+    }
     let mut out = String::new();
     let mut escape = false;
     let mut i = start + 1;
@@ -4036,6 +4042,37 @@ pub(super) fn read_string_literal(text: &str, start: usize) -> Option<(String, u
             continue;
         }
         i += 1;
+    }
+    None
+}
+
+fn read_triple_quoted_string_literal(
+    text: &str,
+    start: usize,
+    quote: u8,
+) -> Option<(String, usize)> {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut escape = false;
+    let mut i = start + 3;
+    while i < bytes.len() {
+        if !escape
+            && bytes.get(i) == Some(&quote)
+            && bytes.get(i + 1) == Some(&quote)
+            && bytes.get(i + 2) == Some(&quote)
+        {
+            return Some((out, i + 3));
+        }
+        let ch = text[i..].chars().next()?;
+        if escape {
+            out.push(ch);
+            escape = false;
+        } else if ch == '\\' {
+            escape = true;
+        } else {
+            out.push(ch);
+        }
+        i += ch.len_utf8();
     }
     None
 }
