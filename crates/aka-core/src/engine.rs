@@ -3900,7 +3900,7 @@ fn entry_score(
 fn is_hard_entry_name(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "main" | "start" | "run" | "init" | "bootstrap"
+        "main" | "start" | "init" | "bootstrap"
     )
 }
 

@@ -6,6 +6,7 @@ mod semantic_commands;
 mod semantic_events;
 mod semantic_messaging;
 mod semantic_persistence;
+mod semantic_process;
 mod semantic_routes;
 mod semantic_stream;
 
