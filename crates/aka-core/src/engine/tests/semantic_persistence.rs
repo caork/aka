@@ -524,11 +524,13 @@ fn synthesizes_python_django_orm_write_table_access_edges() {
     let repo = temp_repo("python-django-orm-table-access");
     std::fs::write(
         repo.join("models.py"),
-        r#"from sqlalchemy import Column, Integer
+        r#"from django.db import models
 
-class Order(Base):
-    __tablename__ = "orders"
-    id = Column(Integer, primary_key=True)
+class Order(models.Model):
+    status = models.CharField(max_length=32)
+
+    class Meta:
+        db_table = "orders"
 "#,
     )
     .unwrap();
@@ -556,7 +558,7 @@ def purge_cancelled():
         &conn,
         1,
         ("Class", "Order", "models.Order", "models.py"),
-        (3, 5),
+        (3, 7),
         json!({
             "language": "python",
         }),

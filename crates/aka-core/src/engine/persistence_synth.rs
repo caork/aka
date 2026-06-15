@@ -594,14 +594,54 @@ fn python_repository_entity(text: &str, node: &SynthNode) -> Option<String> {
 }
 
 fn python_class_table_name(text: &str, node: &SynthNode) -> Option<String> {
-    class_body_text(text, node).and_then(|body| {
-        body.lines().find_map(|line| {
-            let line = line.trim();
-            let rest = line.strip_prefix("__tablename__")?.trim_start();
-            let rest = rest.strip_prefix('=')?.trim();
-            first_raw_string_literal(rest)
-        })
+    let body = class_body_text(text, node)?;
+    python_sqlalchemy_table_name(body).or_else(|| python_django_meta_table_name(body))
+}
+
+fn python_sqlalchemy_table_name(body: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("__tablename__")?.trim_start();
+        let rest = rest.strip_prefix('=')?.trim();
+        first_raw_string_literal(rest)
     })
+}
+
+fn python_django_meta_table_name(body: &str) -> Option<String> {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut idx = 0usize;
+    while idx < lines.len() {
+        let line = lines[idx];
+        let trimmed = line.trim();
+        if !(trimmed == "class Meta:" || trimmed.starts_with("class Meta(")) {
+            idx += 1;
+            continue;
+        }
+        let meta_indent = leading_space_count(line);
+        idx += 1;
+        while idx < lines.len() {
+            let nested = lines[idx];
+            let nested_trimmed = nested.trim();
+            if nested_trimmed.is_empty() || nested_trimmed.starts_with('#') {
+                idx += 1;
+                continue;
+            }
+            if leading_space_count(nested) <= meta_indent {
+                break;
+            }
+            if let Some(rest) = nested_trimmed.strip_prefix("db_table") {
+                let rest = rest.trim_start();
+                let rest = rest.strip_prefix('=')?.trim();
+                return first_raw_string_literal(rest);
+            }
+            idx += 1;
+        }
+    }
+    None
+}
+
+fn leading_space_count(line: &str) -> usize {
+    line.chars().take_while(|ch| *ch == ' ').count()
 }
 
 fn python_column_names(text: &str, node: &SynthNode) -> Vec<String> {
