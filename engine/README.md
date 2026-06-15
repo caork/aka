@@ -4,7 +4,7 @@ aka 的解析入口已经切换为原生 `codebase-memory-mcp` 二进制。Rust 
 `docs/contracts/artifacts.md` 中的 NDJSON 工件合同，`crates/aka-core` 会运行
 CBM CLI、读取它的 SQLite 图谱，再导出 aka 工件。
 
-同步/构建方式：
+初始化/构建方式：
 
 ```bash
 scripts/sync-engine.sh
@@ -16,5 +16,6 @@ scripts/sync-engine.sh
 
 解析能力改动直接在 `engine/codebase-memory-mcp-src/` 里做，并提交到
 `caork/codebase-memory-mcp`。日常不要维护 aka 仓库内的 patch 堆；只有月度或显式
-上游同步时，才用 `scripts/sync-engine.sh --refresh-upstream` 或手工 merge/rebase
-选择性吸收上游 feature。不要把大体积源码或构建产物塞进本仓库。
+上游同步时，才用 `scripts/sync-engine.sh --refresh-upstream` 抓取 origin/upstream，
+随后手工 merge/rebase/cherry-pick 选择性吸收上游 feature。脚本不会 reset 或 clean
+维护中的 checkout。不要把大体积源码或构建产物塞进本仓库。

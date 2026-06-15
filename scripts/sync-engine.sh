@@ -6,7 +6,8 @@
 #
 # By default this builds the existing maintained checkout at
 # engine/codebase-memory-mcp-src without resetting it. Use --refresh-upstream
-# only for a deliberate upstream sync.
+# only to fetch remotes for a deliberate upstream sync; it never resets or
+# cleans the maintained checkout.
 set -euo pipefail
 
 REFRESH_UPSTREAM=0
@@ -15,7 +16,8 @@ if [[ "${1:-}" == "--refresh-upstream" ]]; then
   shift
 fi
 
-SRC="${1:-https://github.com/caork/codebase-memory-mcp.git}"
+FORK_URL="${1:-https://github.com/caork/codebase-memory-mcp.git}"
+UPSTREAM_URL="${CBM_UPSTREAM_URL:-https://github.com/DeusData/codebase-memory-mcp.git}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DST="${ROOT}/engine"
 CHECKOUT="${DST}/codebase-memory-mcp-src"
@@ -27,25 +29,32 @@ fi
 mkdir -p "${DST}"
 
 SHA=""
-if [[ ${REFRESH_UPSTREAM} -eq 1 || ! -d "${CHECKOUT}/.git" ]]; then
-  if [[ -d "${SRC}/.git" ]]; then
+if [[ ! -d "${CHECKOUT}/.git" ]]; then
+  if [[ -d "${FORK_URL}/.git" ]]; then
     rm -rf "${CHECKOUT}"
     mkdir -p "${CHECKOUT}"
     rsync -a --delete \
       --exclude .git \
       --exclude build \
-      "${SRC}/" "${CHECKOUT}/"
-    SHA="$(git -C "${SRC}" rev-parse HEAD)"
-  elif [[ -d "${CHECKOUT}/.git" ]]; then
-    git -C "${CHECKOUT}" remote set-url origin "${SRC}"
-    git -C "${CHECKOUT}" fetch --tags --prune origin
-    git -C "${CHECKOUT}" checkout --detach origin/HEAD
-    git -C "${CHECKOUT}" reset --hard origin/HEAD
-    git -C "${CHECKOUT}" clean -fdx
+      "${FORK_URL}/" "${CHECKOUT}/"
+    SHA="$(git -C "${FORK_URL}" rev-parse HEAD)"
   else
     rm -rf "${CHECKOUT}"
-    git clone --depth 1 "${SRC}" "${CHECKOUT}"
+    git clone "${FORK_URL}" "${CHECKOUT}"
   fi
+fi
+
+if [[ ${REFRESH_UPSTREAM} -eq 1 ]]; then
+  git -C "${CHECKOUT}" remote set-url origin "${FORK_URL}"
+  if git -C "${CHECKOUT}" remote get-url upstream >/dev/null 2>&1; then
+    git -C "${CHECKOUT}" remote set-url upstream "${UPSTREAM_URL}"
+  else
+    git -C "${CHECKOUT}" remote add upstream "${UPSTREAM_URL}"
+  fi
+  git -C "${CHECKOUT}" fetch --tags --prune origin
+  git -C "${CHECKOUT}" fetch --tags --prune upstream
+  echo "Fetched origin (${FORK_URL}) and upstream (${UPSTREAM_URL})."
+  echo "Review and merge/rebase manually inside ${CHECKOUT}; this script will build the current checkout as-is."
 fi
 
 if [[ -z "${SHA}" ]]; then

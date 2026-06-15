@@ -103,4 +103,4 @@ Claude Code 也可直接装插件（捆绑 MCP server + 使用策略 skill）：
 
 ## 相关仓库
 
-- engine 来源：[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)，经 `scripts/sync-engine.sh` 同步并构建 native C binary。
+- engine：基于上游 [DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 维护自有 fork `caork/codebase-memory-mcp`；`scripts/sync-engine.sh` 默认构建本地维护 checkout，月度/显式同步时再从上游选择性合入。

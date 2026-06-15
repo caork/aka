@@ -88,7 +88,7 @@ git 导入的 `checkouts/`。删除容器不丢索引；要全清就 `docker vol
 
 **镜像不在 macOS 本机构建**（约定）。推送 `v*` tag 触发 `.github/workflows/release.yml`：
 
-1. Dockerfile 按 CBM pin 拉取 `DeusData/codebase-memory-mcp` 并构建 native C binary；
+1. Dockerfile 按 CBM pin 拉取 aka 维护的 `caork/codebase-memory-mcp` fork 并构建 native C binary（可用 `--build-arg CBM_REPO=...` 覆盖为上游或临时分支）；
 2. 构建 linux/amd64 镜像并**容器内冒烟**（health → `analyze /opt/aka/fixtures-demo` → query 非空，
    覆盖 CBM native engine + SQLite->NDJSON adapter 这一关键风险点）；
 3. 推 `ghcr.io/caork/aka:<版本>` 与 `:latest`（私有 package，拉取需 `read:packages` 的 PAT：
