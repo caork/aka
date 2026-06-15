@@ -35,6 +35,7 @@ mod route_shape;
 mod source_scan;
 mod tool_synth;
 mod topic_synth;
+mod transaction_synth;
 use cache_synth::{synthesize_caches_from_sources, SynthCache};
 use event_synth::{synthesize_events_from_sources, SynthEvent};
 use graphql_synth::{synthesize_graphql_from_sources, SynthGraphqlOperation};
@@ -56,6 +57,7 @@ use source_scan::{
 };
 use tool_synth::{synthesize_tools_from_sources, SynthTool};
 use topic_synth::{synthesize_topics_from_sources, SynthTopic};
+use transaction_synth::{synthesize_transactions_from_sources, SynthTransaction};
 
 const DEFAULT_CBM_MODE: &str = "fast";
 #[cfg(windows)]
@@ -831,6 +833,12 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for transaction in &synth.transactions {
+        let node = transaction.node_rec();
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     emit_export_progress(on_event, "nodes", count, total);
     Ok(count)
 }
@@ -924,6 +932,12 @@ fn export_edges(
                 .flat_map(SynthGraphqlOperation::edge_recs),
         )
         .chain(synth.persistence.edge_recs())
+        .chain(
+            synth
+                .transactions
+                .iter()
+                .flat_map(SynthTransaction::edge_recs),
+        )
         .chain(synth.edges.iter().cloned())
     {
         serde_json::to_writer(&mut out, &edge)?;
@@ -1186,6 +1200,7 @@ struct SynthGraph {
     resources: Vec<SynthResource>,
     graphql: Vec<SynthGraphqlOperation>,
     persistence: SynthPersistenceGraph,
+    transactions: Vec<SynthTransaction>,
     properties: Vec<SynthProperty>,
     edges: Vec<EdgeRec>,
 }
@@ -1643,6 +1658,13 @@ fn synthesize_graph_with_progress(
         0,
     );
     let persistence = synthesize_persistence_from_sources(repo, &nodes);
+    emit_phase(
+        on_event,
+        "codebase-memory:export-artifacts:synthesize:transactions",
+        0,
+        0,
+    );
+    let transactions = synthesize_transactions_from_sources(repo, &nodes);
 
     Ok(SynthGraph {
         communities,
@@ -1657,6 +1679,7 @@ fn synthesize_graph_with_progress(
         resources,
         graphql,
         persistence,
+        transactions,
         properties,
         edges: synthetic_edges,
     })

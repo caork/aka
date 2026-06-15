@@ -2088,6 +2088,172 @@ class OrderRepository:
 }
 
 #[test]
+fn synthesizes_java_transaction_boundaries() {
+    let repo = temp_repo("java-transactions");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/OrderService.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+@Transactional(readOnly = true)
+class OrderService {
+    public Order loadOrder(String id) {
+        return repo.findById(id).orElseThrow();
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW, readOnly = false)
+    public void submitOrder(Order order) {
+        repo.save(order);
+    }
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderService",
+            "com.example.orders.OrderService",
+            file,
+        ),
+        (6, 15),
+        json!({
+            "decorators": ["@Transactional(readOnly = true)"],
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "loadOrder",
+        "com.example.orders.OrderService.loadOrder",
+        file,
+        (8, 10),
+        json!({
+            "language": "java",
+            "parent_class": "OrderService",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "submitOrder",
+        "com.example.orders.OrderService.submitOrder",
+        file,
+        (13, 15),
+        json!({
+            "decorators": ["@Transactional(propagation = Propagation.REQUIRES_NEW, readOnly = false)"],
+            "language": "java",
+            "parent_class": "OrderService",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let load_tx = synth
+        .transactions
+        .iter()
+        .find(|tx| tx.name == "loadOrder transaction")
+        .expect("class-level transaction should apply to method");
+    assert_eq!(load_tx.manager, "spring-transaction");
+    assert_eq!(load_tx.read_only, Some(true));
+    assert_eq!(
+        load_tx.endpoints[0].node_id,
+        "cbm:2:com.example.orders.OrderService.loadOrder"
+    );
+
+    let submit_tx = synth
+        .transactions
+        .iter()
+        .find(|tx| tx.name == "submitOrder transaction")
+        .expect("method-level transaction");
+    assert_eq!(submit_tx.propagation.as_deref(), Some("REQUIRES_NEW"));
+    assert_eq!(submit_tx.read_only, Some(false));
+
+    let edge_types: Vec<_> = synth
+        .transactions
+        .iter()
+        .flat_map(SynthTransaction::edge_recs)
+        .map(|edge| edge.edge_type)
+        .collect();
+    assert_eq!(
+        edge_types
+            .iter()
+            .filter(|edge| edge.as_str() == "HAS_TRANSACTION_BOUNDARY")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn synthesizes_python_transaction_boundaries() {
+    let repo = temp_repo("python-transactions");
+    std::fs::write(
+        repo.join("services.py"),
+        r#"from django.db import transaction
+
+@transaction.atomic
+def submit_order(order):
+    order.save()
+
+def reconcile_order(order):
+    with transaction.atomic():
+        order.reconcile()
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "submit_order",
+        "services.submit_order",
+        "services.py",
+        (4, 5),
+        json!({
+            "decorators": ["@transaction.atomic"],
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "reconcile_order",
+        "services.reconcile_order",
+        "services.py",
+        (7, 9),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let submit_tx = synth
+        .transactions
+        .iter()
+        .find(|tx| tx.name == "submit_order transaction")
+        .expect("decorator transaction");
+    assert_eq!(submit_tx.manager, "django-transaction");
+
+    let reconcile_tx = synth
+        .transactions
+        .iter()
+        .find(|tx| tx.name == "reconcile_order transaction")
+        .expect("context manager transaction");
+    assert_eq!(
+        reconcile_tx.endpoints[0].node_id,
+        "cbm:2:services.reconcile_order"
+    );
+}
+
+#[test]
 fn synthesizes_java_cache_nodes() {
     let repo = temp_repo("java-cache");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/cache")).unwrap();

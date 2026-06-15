@@ -674,6 +674,7 @@ fn is_symbol_label(label: &str) -> bool {
             | "Event"
             | "Policy"
             | "Resource"
+            | "Transaction"
     )
 }
 
@@ -696,6 +697,7 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Cache"
             | "Event"
             | "Policy"
+            | "Transaction"
     )
 }
 
@@ -720,6 +722,7 @@ fn node_search_text(node: &NodeRec) -> String {
             | "Policy"
             | "Community"
             | "Resource"
+            | "Transaction"
     ) {
         return String::new();
     }
@@ -956,6 +959,15 @@ mod tests {
         resource_props.insert("resourceType".into(), Value::String("http".into()));
         resource_props.insert("resourceSource".into(), Value::String("source-scan".into()));
 
+        let mut transaction_props = Map::new();
+        transaction_props.insert(
+            "name".into(),
+            Value::String("submitOrder transaction".into()),
+        );
+        transaction_props.insert("manager".into(), Value::String("spring-transaction".into()));
+        transaction_props.insert("propagation".into(), Value::String("REQUIRES_NEW".into()));
+        transaction_props.insert("readOnly".into(), Value::Bool(false));
+
         let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
         writer
             .add_nodes(
@@ -994,6 +1006,11 @@ mod tests {
                         id: "resource:payments-charge".into(),
                         label: "Resource".into(),
                         properties: resource_props,
+                    },
+                    NodeRec {
+                        id: "transaction:submit-order".into(),
+                        label: "Transaction".into(),
+                        properties: transaction_props,
                     },
                 ]
                 .into_iter(),
@@ -1038,5 +1055,12 @@ mod tests {
         let resource_hit = resource_hits.first().expect("resource search hit");
         assert_eq!(resource_hit.node_id, "resource:payments-charge");
         assert_eq!(resource_hit.label, "Resource");
+
+        let transaction_hits = index
+            .search("submit order spring transaction requires new", 5)
+            .unwrap();
+        let transaction_hit = transaction_hits.first().expect("transaction search hit");
+        assert_eq!(transaction_hit.node_id, "transaction:submit-order");
+        assert_eq!(transaction_hit.label, "Transaction");
     }
 }

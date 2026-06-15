@@ -45,7 +45,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 {"id":"...","label":"Function","properties":{"name":"...","filePath":"...","startLine":1,"endLine":20}}
 ```
 
-`label` 取值来自 CBM graph，经 adapter 规范化为 aka 节点标签（Project/Package/Folder/File/Module/Class/Function/Method/Interface/Enum/Type/Route/GraphQL/Tool/Resource/…）。`properties` 为开放对象，aka 侧只索引已知字段（name/filePath/startLine/endLine/…），其余落到 JSON 列存底。
+`label` 取值来自 CBM graph，经 adapter 规范化为 aka 节点标签（Project/Package/Folder/File/Module/Class/Function/Method/Interface/Enum/Type/Route/GraphQL/Tool/Resource/Transaction/…）。`properties` 为开放对象，aka 侧只索引已知字段（name/filePath/startLine/endLine/…），其余落到 JSON 列存底。
 
 **行号语义**：工件中的 `startLine`/`endLine`（节点与 chunk 同）由 CBM/tree-sitter 坐标导出，合同内保持 **0-based row**。Rust 摄取层（aka-graph/aka-search）写索引时统一 **+1 转为 1-based 人类行号**（`NodeRec::start_line_1based`），因此 SQLite/tantivy 及一切下游（HTTP/MCP/桌面端）的行号都与编辑器、`/api/source` 对齐。`properties` JSON 列存底里保留的是工件原始 0-based 值。
 
@@ -55,20 +55,23 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 
 **Route/GraphQL/Tool 应用语义节点**：`label = "Route"` 表示可被路由工具消费的 API/HTTP route 节点；`properties.name` 通常为 route path，`filePath` 指向 route 定义或 handler 文件，`middleware`、`responseKeys`、`errorKeys` 为可选数组。`label = "GraphQL"` 表示 GraphQL query/mutation/subscription/field 入口；`properties.name`/`operationName` 为 operation 名，`operationType` 为 query/mutation/subscription/field，`handlerId` 指向 resolver/handler。`label = "Tool"` 表示 MCP/RPC/agent tool 定义节点；`properties.name` 为工具名，`filePath` 指向定义文件，`description` 为可选说明。aka 不要求所有语言/框架都能产出这些节点；缺失时相关工具会返回空结果或显式提示。
 
+**Transaction 事务边界节点**：`label = "Transaction"` 表示业务方法/函数上的事务边界，例如 Spring `@Transactional` 或 Django `transaction.atomic`；`properties.name` 为边界名，`manager` 表示事务管理器来源，`propagation`、`isolation`、`readOnly` 为可选属性。
+
 ### edges.ndjson — aka contract `GraphRelationship`
 
 ```json
 {"id":"...","sourceId":"...","targetId":"...","type":"CALLS","confidence":0.9,"reason":"...","step":1,"evidence":[{"kind":"...","weight":0.5}]}
 ```
 
-`type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/HTTP_CALLS/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
+`type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/HTTP_CALLS/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HAS_TRANSACTION_BOUNDARY/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
 
-Route/GraphQL/Tool 相关边的当前消费语义：
+应用语义相关边的当前消费语义：
 
 - `HANDLES_ROUTE`：handler 符号/文件 → Route。`route_map` 用它找 route handler；没有时回退 Route 自身的 `filePath`。
 - `FETCHES`：前端/客户端消费者 → Route。`route_map`、`shape_check`、`api_impact` 用它列直接消费者；当前工具从边 `reason` 的 `keys:<a,b>|fetches:<n>` 摘要解析 consumer `accessedKeys` 和可选 `fetchCount`，adapter 也可在 `evidence` 中保留同名原始字段。`HTTP_CALLS` 也会作为兼容的 route consumer 边消费。
 - `HANDLES_GRAPHQL`：resolver/handler 符号 → GraphQL operation。`graphql_map` 用它列 resolver handlers；query/context/impact 也会按普通定义节点和图边消费。
 - `HANDLES_TOOL`：handler 符号/文件 → Tool。`tool_map` 用它列工具处理函数。
+- `HAS_TRANSACTION_BOUNDARY`：业务方法/函数 → Transaction。context/impact 会按普通图边消费，用于识别 Spring/Django 等服务的事务边界。
 
 合成 Community 会追加：
 

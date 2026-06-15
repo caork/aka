@@ -62,6 +62,7 @@ const DEFINITION_LABELS: &[&str] = &[
     "Event",
     "Policy",
     "Resource",
+    "Transaction",
 ];
 
 const JOB_LOG_LIMIT: usize = 80;
