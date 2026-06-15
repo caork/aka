@@ -19,9 +19,16 @@ pub(super) struct SynthCommand {
     pub(super) handler_name: String,
     pub(super) strategy: String,
     pub(super) process_ids: Vec<String>,
+    handler_node: Option<SynthCommandHandlerNode>,
 }
 
 impl SynthCommand {
+    pub(super) fn handler_node_rec(&self) -> Option<NodeRec> {
+        self.handler_node
+            .as_ref()
+            .map(SynthCommandHandlerNode::node_rec)
+    }
+
     pub(super) fn node_rec(&self) -> NodeRec {
         let mut properties = Map::new();
         properties.insert("name".into(), Value::String(self.name.clone()));
@@ -92,20 +99,27 @@ pub(super) fn synthesize_commands_from_sources(
     let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
+
+    for file_path in project_sources
+        .project_files(repo)
+        .filter(|path| is_jvm_source_path(path) || by_file.contains_key(*path))
+    {
+        if !is_jvm_source_path(file_path) {
+            continue;
+        }
+        let Some(text) = read_repo_text(repo, file_path) else {
+            continue;
+        };
+        let file_nodes = by_file.get(file_path).map(Vec::as_slice).unwrap_or(&[]);
+        for (handler, detection) in detect_spring_runner_commands(file_path, &text, file_nodes) {
+            push_command(
+                &mut out, &mut seen, file_path, processes, handler, detection,
+            );
+        }
+    }
+
     for (file_path, file_nodes) in by_file {
         let text = read_repo_text(repo, &file_path);
-        if let Some(text) = text.as_deref() {
-            for (node, detection) in detect_spring_runner_commands(text, &file_nodes) {
-                push_command(
-                    &mut out,
-                    &mut seen,
-                    file_path.as_str(),
-                    processes,
-                    node,
-                    detection,
-                );
-            }
-        }
         for node in file_nodes
             .iter()
             .copied()
@@ -117,7 +131,7 @@ pub(super) fn synthesize_commands_from_sources(
                     &mut seen,
                     file_path.as_str(),
                     processes,
-                    node,
+                    CommandHandler::Existing(node),
                     detection,
                 );
             }
@@ -137,12 +151,14 @@ fn push_command(
     seen: &mut HashSet<String>,
     file_path: &str,
     processes: &[SynthProcess],
-    node: &SynthNode,
+    handler: CommandHandler<'_>,
     detection: CommandDetection,
 ) {
+    let handler_id = handler.id().to_string();
+    let handler_name = handler.name().to_string();
     let key = format!(
         "{}|{}|{}|{}",
-        node.aka_id, detection.command_type, detection.name, detection.strategy
+        handler_id, detection.command_type, detection.name, detection.strategy
     );
     if !seen.insert(key.clone()) {
         return;
@@ -152,10 +168,11 @@ fn push_command(
         name: detection.name,
         command_type: detection.command_type,
         file_path: file_path.to_string(),
-        handler_id: node.aka_id.clone(),
-        handler_name: node.display_name().to_string(),
+        handler_id: handler_id.clone(),
+        handler_name,
         strategy: detection.strategy,
-        process_ids: process_ids_for_entry(processes, file_path, Some(&node.aka_id)),
+        process_ids: process_ids_for_entry(processes, file_path, Some(&handler_id)),
+        handler_node: handler.synthetic_node().cloned(),
     });
 }
 
@@ -208,29 +225,108 @@ fn detect_jvm_commands(_text: Option<&str>, node: &SynthNode) -> Vec<CommandDete
 }
 
 fn detect_spring_runner_commands<'a>(
+    file_path: &str,
     text: &str,
     nodes: &[&'a SynthNode],
-) -> Vec<(&'a SynthNode, CommandDetection)> {
+) -> Vec<(CommandHandler<'a>, CommandDetection)> {
     spring_runner_candidates(text)
         .into_iter()
-        .filter_map(|candidate| {
-            let node = candidate.pick_handler(nodes)?;
-            Some((
-                node,
+        .map(|candidate| {
+            let handler = candidate
+                .pick_handler(nodes)
+                .map(CommandHandler::Existing)
+                .unwrap_or_else(|| {
+                    CommandHandler::Synthetic(candidate.synthetic_handler(file_path, text))
+                });
+            (
+                handler,
                 CommandDetection {
-                    name: format!("{} runner", node.display_name()),
+                    name: format!("{} runner", candidate.display_name()),
                     command_type: "spring-runner".into(),
                     strategy: candidate.strategy().into(),
                 },
-            ))
+            )
         })
         .collect()
 }
 
 #[derive(Debug, Clone)]
+struct SynthCommandHandlerNode {
+    id: String,
+    label: String,
+    name: String,
+    qn: String,
+    file_path: String,
+    start_line: i64,
+    end_line: i64,
+    language: String,
+    strategy: String,
+}
+
+impl SynthCommandHandlerNode {
+    fn node_rec(&self) -> NodeRec {
+        let mut properties = Map::new();
+        properties.insert("name".into(), Value::String(self.name.clone()));
+        properties.insert("qualifiedName".into(), Value::String(self.qn.clone()));
+        properties.insert("filePath".into(), Value::String(self.file_path.clone()));
+        properties.insert(
+            "startLine".into(),
+            Value::from(to_artifact_line(self.start_line)),
+        );
+        properties.insert(
+            "endLine".into(),
+            Value::from(to_artifact_line(self.end_line)),
+        );
+        properties.insert("language".into(), Value::String(self.language.clone()));
+        properties.insert("source".into(), Value::String("aka-cbm-synth".into()));
+        properties.insert("strategy".into(), Value::String(self.strategy.clone()));
+        NodeRec {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            properties,
+        }
+    }
+}
+
+enum CommandHandler<'a> {
+    Existing(&'a SynthNode),
+    Synthetic(SynthCommandHandlerNode),
+}
+
+impl<'a> CommandHandler<'a> {
+    fn id(&self) -> &str {
+        match self {
+            CommandHandler::Existing(node) => &node.aka_id,
+            CommandHandler::Synthetic(node) => &node.id,
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            CommandHandler::Existing(node) => node.display_name(),
+            CommandHandler::Synthetic(node) => &node.name,
+        }
+    }
+
+    fn synthetic_node(&self) -> Option<&SynthCommandHandlerNode> {
+        match self {
+            CommandHandler::Existing(_) => None,
+            CommandHandler::Synthetic(node) => Some(node),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 enum SpringRunnerCandidate {
-    Class { class_name: String, line: i64 },
-    BeanMethod { method_name: String, line: i64 },
+    Class {
+        class_name: String,
+        line: i64,
+    },
+    BeanMethod {
+        method_name: String,
+        owner_class: Option<String>,
+        line: i64,
+    },
 }
 
 impl SpringRunnerCandidate {
@@ -240,6 +336,13 @@ impl SpringRunnerCandidate {
             SpringRunnerCandidate::BeanMethod { .. } => {
                 "java-spring-runner-bean-source-declaration"
             }
+        }
+    }
+
+    fn display_name(&self) -> &str {
+        match self {
+            SpringRunnerCandidate::Class { class_name, .. } => class_name,
+            SpringRunnerCandidate::BeanMethod { method_name, .. } => method_name,
         }
     }
 
@@ -262,11 +365,46 @@ impl SpringRunnerCandidate {
                         })
                         .min_by_key(|node| line_distance(*line, node.start_line_key()))
                 }),
-            SpringRunnerCandidate::BeanMethod { method_name, line } => nodes
+            SpringRunnerCandidate::BeanMethod {
+                method_name, line, ..
+            } => nodes
                 .iter()
                 .copied()
                 .filter(|node| node.label == "Method" && node.name == *method_name)
                 .min_by_key(|node| line_distance(*line, node.start_line_key())),
+        }
+    }
+
+    fn synthetic_handler(&self, file_path: &str, text: &str) -> SynthCommandHandlerNode {
+        let package = java_package_name(text);
+        let (label, name, owner, line) = match self {
+            SpringRunnerCandidate::Class { class_name, line } => {
+                ("Class", class_name.as_str(), None, *line)
+            }
+            SpringRunnerCandidate::BeanMethod {
+                method_name,
+                owner_class,
+                line,
+            } => (
+                "Method",
+                method_name.as_str(),
+                owner_class.as_deref(),
+                *line,
+            ),
+        };
+        let qn = java_qualified_name(package.as_deref(), owner, name);
+        let strategy = self.strategy().to_string();
+        let key = format!("{file_path}|{qn}|{strategy}|{line}");
+        SynthCommandHandlerNode {
+            id: format!("command-handler:source:{:016x}", stable_hash(&key)),
+            label: label.into(),
+            name: name.into(),
+            qn,
+            file_path: file_path.into(),
+            start_line: line,
+            end_line: line,
+            language: "java".into(),
+            strategy,
         }
     }
 }
@@ -336,6 +474,7 @@ fn spring_runner_bean_method_candidates(text: &str) -> Vec<SpringRunnerCandidate
                 {
                     out.push(SpringRunnerCandidate::BeanMethod {
                         method_name: method_name.to_string(),
+                        owner_class: enclosing_java_type_name(text, type_pos),
                         line: line_number_at_offset(text, type_pos),
                     });
                 }
@@ -349,6 +488,75 @@ fn spring_runner_bean_method_candidates(text: &str) -> Vec<SpringRunnerCandidate
 fn declaration_mentions_runner(declaration: &str) -> bool {
     declaration.contains("implements")
         && (declaration.contains("CommandLineRunner") || declaration.contains("ApplicationRunner"))
+}
+
+fn is_jvm_source_path(path: &str) -> bool {
+    matches!(
+        Path::new(&path.to_ascii_lowercase())
+            .extension()
+            .and_then(|ext| ext.to_str()),
+        Some("java" | "kt" | "kts" | "scala" | "groovy")
+    )
+}
+
+fn java_package_name(text: &str) -> Option<String> {
+    for line in text.lines().take(80) {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("package ") {
+            continue;
+        }
+        return trimmed
+            .trim_start_matches("package ")
+            .trim_end_matches(';')
+            .split_whitespace()
+            .next()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
+    None
+}
+
+fn java_qualified_name(package: Option<&str>, owner: Option<&str>, name: &str) -> String {
+    let mut parts = Vec::new();
+    if let Some(package) = package.filter(|value| !value.is_empty()) {
+        parts.push(package);
+    }
+    if let Some(owner) = owner.filter(|value| !value.is_empty()) {
+        parts.push(owner);
+    }
+    parts.push(name);
+    parts.join(".")
+}
+
+fn enclosing_java_type_name(text: &str, pos: usize) -> Option<String> {
+    let prefix = &text[..pos.min(text.len())];
+    let mut offset = 0usize;
+    let mut last = None;
+    while offset < prefix.len() {
+        let next = ["class", "interface", "record"]
+            .iter()
+            .filter_map(|keyword| {
+                prefix[offset..]
+                    .find(keyword)
+                    .map(|rel| (offset + rel, *keyword))
+            })
+            .min_by_key(|(idx, _)| *idx);
+        let Some((type_pos, keyword)) = next else {
+            break;
+        };
+        if !keyword_boundary_ok(prefix, type_pos, keyword) {
+            offset = type_pos + keyword.len();
+            continue;
+        }
+        let name_start = skip_java_ws_and_modifiers(prefix, type_pos + keyword.len());
+        if let Some((name, end)) = read_java_identifier(prefix, name_start) {
+            last = Some(name.to_string());
+            offset = end;
+        } else {
+            offset = type_pos + keyword.len();
+        }
+    }
+    last
 }
 
 fn bean_annotation_before(text: &str, pos: usize) -> bool {
@@ -444,6 +652,14 @@ fn line_number_at_offset(text: &str, offset: usize) -> i64 {
         }
     }
     line
+}
+
+fn to_artifact_line(line_1based: i64) -> u32 {
+    if line_1based <= 0 {
+        0
+    } else {
+        (line_1based - 1) as u32
+    }
 }
 
 fn detect_python_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDetection> {

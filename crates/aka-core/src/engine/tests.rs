@@ -2466,6 +2466,112 @@ class MaintenanceConfiguration {
 }
 
 #[test]
+fn spring_runner_synthesis_scans_git_sources_when_cbm_has_no_java_nodes() {
+    let repo = temp_repo("spring-runner-no-cbm-java-nodes");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    let file = "src/main/java/com/example/ops/StartupMaintenance.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.annotation.Bean;
+
+class StartupMaintenance implements ApplicationRunner {
+    public void run(ApplicationArguments args) {
+        warmCache();
+    }
+}
+
+class MaintenanceConfiguration {
+    @Bean
+    public org.springframework.boot.CommandLineRunner repairOrders() {
+        return args -> {};
+    }
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", file]);
+
+    let conn = test_conn();
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let commands: BTreeMap<_, _> = synth
+        .commands
+        .iter()
+        .filter(|command| command.command_type == "spring-runner")
+        .map(|command| (command.handler_name.as_str(), command))
+        .collect();
+    let class_command = commands
+        .get("StartupMaintenance")
+        .expect("class source-scanned runner");
+    assert!(class_command
+        .handler_id
+        .starts_with("command-handler:source:"));
+    assert_eq!(
+        class_command.strategy,
+        "java-spring-runner-source-declaration"
+    );
+    let bean_command = commands
+        .get("repairOrders")
+        .expect("bean source-scanned runner");
+    assert!(bean_command
+        .handler_id
+        .starts_with("command-handler:source:"));
+    assert_eq!(
+        bean_command.strategy,
+        "java-spring-runner-bean-source-declaration"
+    );
+
+    let handler_nodes: Vec<_> = synth
+        .commands
+        .iter()
+        .filter_map(SynthCommand::handler_node_rec)
+        .collect();
+    assert_eq!(handler_nodes.len(), 2);
+    assert!(handler_nodes.iter().any(|node| {
+        node.label == "Class"
+            && node.properties["qualifiedName"] == "com.example.ops.StartupMaintenance"
+    }));
+    assert!(handler_nodes.iter().any(|node| {
+        node.label == "Method"
+            && node.properties["qualifiedName"]
+                == "com.example.ops.MaintenanceConfiguration.repairOrders"
+    }));
+}
+
+#[test]
+fn spring_runner_source_scan_excludes_test_roots_without_cbm_nodes() {
+    let repo = temp_repo("spring-runner-no-cbm-test-roots");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    let file = "src/test/java/com/example/ops/TestMaintenance.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.ops;
+
+import org.springframework.boot.CommandLineRunner;
+
+class TestMaintenance implements CommandLineRunner {
+    public void run(String... args) {
+        resetFixtures();
+    }
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", file]);
+
+    let conn = test_conn();
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth.commands.is_empty());
+}
+
+#[test]
 fn synthesizes_spring_dependency_injection_edges() {
     let repo = temp_repo("spring-dependencies");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();

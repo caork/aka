@@ -809,6 +809,15 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
+    for node in synth
+        .commands
+        .iter()
+        .filter_map(SynthCommand::handler_node_rec)
+    {
+        serde_json::to_writer(&mut out, &node)?;
+        out.write_all(b"\n")?;
+        count += 1;
+    }
     for command in &synth.commands {
         let node = command.node_rec();
         serde_json::to_writer(&mut out, &node)?;
@@ -1569,12 +1578,38 @@ fn synthesize_graph_with_progress(
     let existing_node_ids = load_existing_node_ids(conn, project)?;
     let properties = synthesize_python_properties(conn, project, repo, &existing_node_ids)?;
     if nodes.is_empty() {
+        let processes = Vec::new();
+        let native_routes = Vec::new();
+        let native_tools = Vec::new();
+        let commands = synthesize_commands_from_sources(repo, &nodes, &processes);
+        let routes = synthesize_routes_from_sources(repo, &nodes, &processes, &native_routes);
+        let tools = synthesize_tools_from_sources(repo, &nodes, &processes, &native_tools);
         let persistence = synthesize_persistence_from_sources(repo, &nodes);
         let configs = synthesize_configs_from_sources(repo, &nodes);
+        let jobs = synthesize_jobs_from_sources(repo, &nodes, &processes);
+        let topics = synthesize_topics_from_sources(repo, &nodes);
+        let caches = synthesize_caches_from_sources(repo, &nodes);
+        let events = synthesize_events_from_sources(repo, &nodes);
+        let policies = synthesize_policies_from_sources(repo, &nodes);
+        let resources = synthesize_resources_from_sources(repo, &nodes);
+        let graphql = synthesize_graphql_from_sources(repo, &nodes, &processes);
+        let transactions = synthesize_transactions_from_sources(repo, &nodes);
         return Ok(SynthGraph {
+            processes,
+            routes,
+            tools,
+            commands,
             properties,
             persistence,
             configs,
+            jobs,
+            topics,
+            caches,
+            events,
+            policies,
+            resources,
+            graphql,
+            transactions,
             ..SynthGraph::default()
         });
     }
