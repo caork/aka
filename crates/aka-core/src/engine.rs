@@ -1061,10 +1061,15 @@ fn semantic_owner_qn<'a>(member_qn: &'a str, name: &str) -> Option<&'a str> {
 #[derive(Debug, Clone)]
 struct SynthNode {
     aka_id: String,
+    qn: String,
     label: String,
     name: String,
     file_path: String,
     language: String,
+    route_path: Option<String>,
+    route_method: Option<String>,
+    decorators: Vec<String>,
+    parent_class: Option<String>,
     is_exported: bool,
     ast_framework_multiplier: f64,
     ast_framework_reason: Option<String>,
@@ -1158,6 +1163,7 @@ struct SynthRoute {
     route: String,
     file_path: String,
     emit_node: bool,
+    method: Option<String>,
     handler_id: Option<String>,
     handler_name: Option<String>,
     middleware: Vec<String>,
@@ -1174,6 +1180,14 @@ struct SynthRouteConsumer {
     fetch_count: u32,
 }
 
+#[derive(Debug, Clone)]
+struct RouteCandidate {
+    route: String,
+    method: Option<String>,
+    handler_id: Option<String>,
+    handler_name: Option<String>,
+}
+
 impl SynthRoute {
     fn node_rec(&self) -> NodeRec {
         let mut properties = Map::new();
@@ -1181,6 +1195,9 @@ impl SynthRoute {
         properties.insert("filePath".into(), Value::String(self.file_path.clone()));
         properties.insert("source".into(), Value::String("aka-cbm-synth".into()));
         properties.insert("routeSource".into(), Value::String("source-scan".into()));
+        if let Some(method) = &self.method {
+            properties.insert("method".into(), Value::String(method.clone()));
+        }
         if let Some(handler_id) = &self.handler_id {
             properties.insert("handlerId".into(), Value::String(handler_id.clone()));
         }
@@ -1681,6 +1698,32 @@ fn load_synth_nodes(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let route_path = props
+            .get("route_path")
+            .or_else(|| props.get("routePath"))
+            .and_then(Value::as_str)
+            .map(normalize_route_literal);
+        let route_method = props
+            .get("route_method")
+            .or_else(|| props.get("routeMethod"))
+            .and_then(Value::as_str)
+            .map(|v| v.to_ascii_uppercase());
+        let decorators = props
+            .get("decorators")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let parent_class = props
+            .get("parent_class")
+            .or_else(|| props.get("parentClass"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let ast_framework_multiplier = props
             .get("astFrameworkMultiplier")
             .and_then(Value::as_f64)
@@ -1702,10 +1745,15 @@ fn load_synth_nodes(
             aka_id.clone(),
             SynthNode {
                 aka_id,
+                qn,
                 label,
                 name,
                 file_path,
                 language,
+                route_path,
+                route_method,
+                decorators,
+                parent_class,
                 is_exported,
                 ast_framework_multiplier,
                 ast_framework_reason,
@@ -2379,7 +2427,7 @@ fn synthesize_routes_from_sources(
     processes: &[SynthProcess],
     native_routes: &[NativeAppNode],
 ) -> Vec<SynthRoute> {
-    let mut by_file = web_nodes_by_file(nodes);
+    let mut by_file = route_nodes_by_file(nodes);
     let mut routes: BTreeMap<(String, String), SynthRoute> = BTreeMap::new();
     for native in native_routes {
         let route = route_from_path(&native.file_path)
@@ -2391,6 +2439,7 @@ fn synthesize_routes_from_sources(
                 route,
                 file_path: native.file_path.clone(),
                 emit_node: false,
+                method: None,
                 handler_id: None,
                 handler_name: None,
                 middleware: Vec::new(),
@@ -2405,25 +2454,45 @@ fn synthesize_routes_from_sources(
         let Some(text) = read_repo_text(repo, file_path) else {
             continue;
         };
-        let mut route_names = BTreeSet::new();
+        let handler = pick_handler_node(file_nodes);
+        let mut route_candidates = Vec::new();
         if let Some(route) = route_from_path(file_path) {
-            route_names.insert(route);
+            route_candidates.push(RouteCandidate {
+                route,
+                method: None,
+                handler_id: handler.map(|n| n.aka_id.clone()),
+                handler_name: handler.map(|n| n.display_name().to_string()),
+            });
         }
-        route_names.extend(extract_route_handler_literals(&text));
-        if route_names.is_empty() {
+        route_candidates.extend(
+            extract_route_handler_literals(&text)
+                .into_iter()
+                .map(|route| RouteCandidate {
+                    route,
+                    method: None,
+                    handler_id: handler.map(|n| n.aka_id.clone()),
+                    handler_name: handler.map(|n| n.display_name().to_string()),
+                }),
+        );
+        route_candidates.extend(extract_annotated_routes(file_nodes));
+        dedup_route_candidates(&mut route_candidates);
+        if route_candidates.is_empty() {
             continue;
         }
-        let handler = pick_handler_node(file_nodes);
         let response_keys = extract_response_keys(&text);
         let error_keys = extract_error_keys(&response_keys, &text);
         let middleware = extract_middleware(&text);
-        for route in route_names {
+        for candidate in route_candidates {
+            let route = candidate.route;
             let key = (route.clone(), file_path.clone());
             match routes.get_mut(&key) {
                 Some(existing) => {
+                    if existing.method.is_none() {
+                        existing.method = candidate.method.clone();
+                    }
                     if existing.handler_id.is_none() {
-                        existing.handler_id = handler.map(|n| n.aka_id.clone());
-                        existing.handler_name = handler.map(|n| n.display_name().to_string());
+                        existing.handler_id = candidate.handler_id.clone();
+                        existing.handler_name = candidate.handler_name.clone();
                     }
                     merge_strings(&mut existing.middleware, &middleware);
                     merge_strings(&mut existing.response_keys, &response_keys);
@@ -2433,7 +2502,7 @@ fn synthesize_routes_from_sources(
                         &process_ids_for_entry(
                             processes,
                             file_path,
-                            handler.map(|n| n.aka_id.as_str()),
+                            candidate.handler_id.as_deref(),
                         ),
                     );
                 }
@@ -2448,8 +2517,9 @@ fn synthesize_routes_from_sources(
                             route,
                             file_path: file_path.clone(),
                             emit_node: true,
-                            handler_id: handler.map(|n| n.aka_id.clone()),
-                            handler_name: handler.map(|n| n.display_name().to_string()),
+                            method: candidate.method,
+                            handler_id: candidate.handler_id.clone(),
+                            handler_name: candidate.handler_name,
                             middleware: middleware.clone(),
                             response_keys: response_keys.clone(),
                             error_keys: error_keys.clone(),
@@ -2457,7 +2527,7 @@ fn synthesize_routes_from_sources(
                             process_ids: process_ids_for_entry(
                                 processes,
                                 file_path,
-                                handler.map(|n| n.aka_id.as_str()),
+                                candidate.handler_id.as_deref(),
                             ),
                         },
                     );
@@ -2594,6 +2664,26 @@ fn web_nodes_by_file(nodes: &BTreeMap<String, SynthNode>) -> BTreeMap<String, Ve
         .collect()
 }
 
+fn route_nodes_by_file(nodes: &BTreeMap<String, SynthNode>) -> BTreeMap<String, Vec<&SynthNode>> {
+    nodes_by_file(nodes)
+        .into_iter()
+        .filter(|(file_path, file_nodes)| {
+            is_web_backend_source_path(file_path)
+                || file_nodes.iter().any(|node| {
+                    is_web_backend_language(&node.language)
+                        || node.route_path.is_some()
+                        || node.decorators.iter().any(|decorator| {
+                            decorator.contains("Mapping")
+                                || decorator.contains("RestController")
+                                || decorator.contains(".route")
+                                || decorator.contains(".get")
+                                || decorator.contains(".post")
+                        })
+                })
+        })
+        .collect()
+}
+
 fn is_js_ts_source_path(file_path: &str) -> bool {
     let lower = file_path.to_ascii_lowercase();
     matches!(
@@ -2602,10 +2692,34 @@ fn is_js_ts_source_path(file_path: &str) -> bool {
     )
 }
 
+fn is_web_backend_source_path(file_path: &str) -> bool {
+    let lower = file_path.to_ascii_lowercase();
+    is_js_ts_source_path(&lower)
+        || matches!(
+            Path::new(&lower).extension().and_then(|ext| ext.to_str()),
+            Some("java" | "kt" | "kts" | "scala" | "groovy" | "py")
+        )
+}
+
 fn is_js_ts_language(language: &str) -> bool {
     matches!(
         language.to_ascii_lowercase().as_str(),
         "javascript" | "typescript" | "tsx" | "jsx"
+    )
+}
+
+fn is_web_backend_language(language: &str) -> bool {
+    matches!(
+        language.to_ascii_lowercase().as_str(),
+        "java"
+            | "kotlin"
+            | "scala"
+            | "groovy"
+            | "python"
+            | "javascript"
+            | "typescript"
+            | "tsx"
+            | "jsx"
     )
 }
 
@@ -2710,6 +2824,146 @@ fn route_from_segments(segments: &[&str], api_prefix: bool) -> Option<String> {
     } else {
         Some(format!("/{body}"))
     }
+}
+
+fn extract_annotated_routes(nodes: &[&SynthNode]) -> Vec<RouteCandidate> {
+    let mut class_prefixes: BTreeMap<String, String> = BTreeMap::new();
+    for node in nodes
+        .iter()
+        .filter(|node| matches!(node.label.as_str(), "Class" | "Interface"))
+    {
+        let Some(prefix) = spring_mapping_path(&node.decorators) else {
+            continue;
+        };
+        class_prefixes.insert(node.aka_id.clone(), prefix.clone());
+        class_prefixes.insert(node.qn.clone(), prefix);
+    }
+
+    let mut routes = Vec::new();
+    for node in nodes {
+        let Some(method_path) = node
+            .route_path
+            .clone()
+            .or_else(|| spring_mapping_path(&node.decorators))
+        else {
+            continue;
+        };
+        if !matches!(node.label.as_str(), "Function" | "Method") {
+            if !method_path.is_empty() {
+                routes.push(RouteCandidate {
+                    route: normalize_route_literal(&method_path),
+                    method: node.route_method.clone(),
+                    handler_id: None,
+                    handler_name: None,
+                });
+            }
+            continue;
+        }
+        let prefix = node
+            .parent_class
+            .as_ref()
+            .and_then(|parent| class_prefixes.get(parent))
+            .map(String::as_str)
+            .unwrap_or("");
+        routes.push(RouteCandidate {
+            route: join_route_paths(prefix, &method_path),
+            method: node.route_method.clone(),
+            handler_id: Some(node.aka_id.clone()),
+            handler_name: Some(node.display_name().to_string()),
+        });
+    }
+    routes
+}
+
+fn dedup_route_candidates(candidates: &mut Vec<RouteCandidate>) {
+    candidates.sort_by(|a, b| {
+        a.route
+            .cmp(&b.route)
+            .then_with(|| a.method.cmp(&b.method))
+            .then_with(|| a.handler_id.cmp(&b.handler_id))
+    });
+    candidates.dedup_by(|a, b| {
+        if a.route == b.route {
+            if b.method.is_none() {
+                b.method = a.method.clone();
+            }
+            if b.handler_id.is_none() {
+                b.handler_id = a.handler_id.clone();
+                b.handler_name = a.handler_name.clone();
+            }
+            true
+        } else {
+            false
+        }
+    });
+}
+
+fn spring_mapping_path(decorators: &[String]) -> Option<String> {
+    for decorator in decorators {
+        let Some(name_end) = decorator.find('(') else {
+            continue;
+        };
+        let name = decorator[..name_end].trim_start_matches('@');
+        if !matches!(
+            name.rsplit('.').next().unwrap_or(name),
+            "RequestMapping"
+                | "GetMapping"
+                | "PostMapping"
+                | "PutMapping"
+                | "DeleteMapping"
+                | "PatchMapping"
+        ) {
+            continue;
+        }
+        let args_start = name_end + 1;
+        let args_end = decorator.rfind(')').unwrap_or(decorator.len());
+        if args_start >= args_end {
+            return Some("/".into());
+        }
+        let args = &decorator[args_start..args_end];
+        if let Some(path) = first_route_literal(args) {
+            return Some(normalize_route_literal(&path));
+        }
+        return Some("/".into());
+    }
+    None
+}
+
+fn first_route_literal(text: &str) -> Option<String> {
+    let mut i = 0usize;
+    while i < text.len() {
+        if let Some((literal, end)) = read_string_literal(text, i) {
+            if literal.starts_with('/') || literal.starts_with('{') || !literal.contains('=') {
+                return Some(literal);
+            }
+            i = end;
+        } else {
+            i += text[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        }
+    }
+    None
+}
+
+fn join_route_paths(prefix: &str, suffix: &str) -> String {
+    let prefix = normalize_route_literal(prefix);
+    let suffix = normalize_route_literal(suffix);
+    if prefix.is_empty() || prefix == "/" {
+        return if suffix.is_empty() {
+            "/".into()
+        } else if suffix.starts_with('/') {
+            suffix
+        } else {
+            format!("/{suffix}")
+        };
+    }
+    if suffix.is_empty() || suffix == "/" {
+        return prefix;
+    }
+    format!(
+        "{}/{}",
+        prefix.trim_end_matches('/'),
+        suffix.trim_start_matches('/')
+    )
 }
 
 fn extract_route_handler_literals(text: &str) -> BTreeSet<String> {
@@ -3920,6 +4174,23 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_node_props(
+        conn: &Connection,
+        id: i64,
+        label: &str,
+        name: &str,
+        qn: &str,
+        file: &str,
+        props: Value,
+    ) {
+        conn.execute(
+            "INSERT INTO nodes (id, project, label, name, qualified_name, file_path, start_line, end_line, properties)
+             VALUES (?1, 'demo', ?2, ?3, ?4, ?5, 1, 3, ?6)",
+            rusqlite::params![id, label, name, qn, file, props.to_string()],
+        )
+        .unwrap();
+    }
+
     fn insert_edge(conn: &Connection, id: i64, src: i64, dst: i64, ty: &str) {
         conn.execute(
             "INSERT INTO edges (id, project, source_id, target_id, type, properties)
@@ -4472,6 +4743,74 @@ mod tests {
         let edge_types: Vec<_> = route.edge_recs().into_iter().map(|e| e.edge_type).collect();
         assert!(edge_types.contains(&"HANDLES_ROUTE".to_string()));
         assert!(edge_types.contains(&"FETCHES".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_spring_routes_with_class_prefix() {
+        let repo = temp_repo("spring-routes");
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+        std::fs::write(
+            repo.join("src/main/java/com/example/orders/OrderController.java"),
+            r#"package com.example.orders;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+    @GetMapping("/{id}")
+    public String getOrder(String id) {
+        return id;
+    }
+}"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_node_props(
+            &conn,
+            1,
+            "Class",
+            "OrderController",
+            "com.example.orders.OrderController",
+            "src/main/java/com/example/orders/OrderController.java",
+            json!({
+                "decorators": ["@RestController", "@RequestMapping(\"/api/orders\")"],
+                "language": "java",
+            }),
+        );
+        insert_node_props(
+            &conn,
+            2,
+            "Method",
+            "getOrder",
+            "com.example.orders.OrderController.getOrder",
+            "src/main/java/com/example/orders/OrderController.java",
+            json!({
+                "decorators": ["@GetMapping(\"/{id}\")"],
+                "language": "java",
+                "parent_class": "cbm:1:com.example.orders.OrderController",
+                "route_method": "GET",
+                "route_path": "/{id}",
+            }),
+        );
+        insert_edge(&conn, 1, 1, 2, "DEFINES_METHOD");
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let route = synth
+            .routes
+            .iter()
+            .find(|route| route.route == "/api/orders/{id}")
+            .expect("spring route with class prefix");
+        assert_eq!(
+            route.handler_id.as_deref(),
+            Some("cbm:2:com.example.orders.OrderController.getOrder")
+        );
+
+        let edge_types: Vec<_> = route.edge_recs().into_iter().map(|e| e.edge_type).collect();
+        assert!(edge_types.contains(&"HANDLES_ROUTE".to_string()));
     }
 
     #[test]
