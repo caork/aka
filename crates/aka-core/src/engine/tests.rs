@@ -1740,6 +1740,10 @@ urlpatterns = router.urls
 
     def retrieve(self, request, pk=None):
         return {"id": pk}
+
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel(self, request, pk=None):
+        return {"id": pk}
 "#,
     )
     .unwrap();
@@ -1776,6 +1780,19 @@ urlpatterns = router.urls
             "parent_class": "OrderViewSet",
         }),
     );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "cancel",
+        "orders.views.OrderViewSet.cancel",
+        "orders/views.py",
+        (8, 10),
+        json!({
+            "decorators": ["@action(detail=True, methods=[\"post\"], url_path=\"cancel\")"],
+            "language": "python",
+            "parent_class": "OrderViewSet",
+        }),
+    );
 
     let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
     let collection = synth
@@ -1796,6 +1813,16 @@ urlpatterns = router.urls
         detail.handler_id.as_deref(),
         Some("cbm:3:orders.views.OrderViewSet.retrieve")
     );
+    let cancel = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}/cancel")
+        .expect("drf detail action route");
+    assert_eq!(
+        cancel.handler_id.as_deref(),
+        Some("cbm:4:orders.views.OrderViewSet.cancel")
+    );
+    assert_eq!(cancel.method.as_deref(), Some("POST"));
 }
 
 #[test]

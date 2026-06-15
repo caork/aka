@@ -126,9 +126,26 @@ fn drf_router_routes_with_handlers(
                 handler_id: detail_handler.map(|node| node.aka_id.clone()),
                 handler_name: detail_handler.map(|node| node.display_name().to_string()),
             });
+            for action in handlers.find_actions(&viewset_expr) {
+                out.push(drf_action_route_candidate(&collection, &action));
+            }
         }
     }
     out
+}
+
+fn drf_action_route_candidate(prefix: &str, action: &DrfActionHandler<'_>) -> RouteCandidate {
+    let base = if action.detail {
+        join_django_routes(prefix, "{id}")
+    } else {
+        prefix.to_string()
+    };
+    RouteCandidate {
+        route: join_django_routes(&base, &action.url_path),
+        method: action.method.clone(),
+        handler_id: Some(action.node.aka_id.clone()),
+        handler_name: Some(action.node.display_name().to_string()),
+    }
 }
 
 fn drf_router_names(text: &str) -> BTreeSet<String> {
@@ -664,6 +681,15 @@ struct PythonHandlerIndex<'a> {
     by_module_member: HashMap<String, &'a SynthNode>,
     by_member: HashMap<String, &'a SynthNode>,
     by_owner_method: HashMap<String, &'a SynthNode>,
+    actions_by_owner: HashMap<String, Vec<DrfActionHandler<'a>>>,
+}
+
+#[derive(Debug, Clone)]
+struct DrfActionHandler<'a> {
+    node: &'a SynthNode,
+    detail: bool,
+    url_path: String,
+    method: Option<String>,
 }
 
 impl<'a> PythonHandlerIndex<'a> {
@@ -671,6 +697,7 @@ impl<'a> PythonHandlerIndex<'a> {
         let mut by_module_member = HashMap::new();
         let mut by_member = HashMap::new();
         let mut by_owner_method = HashMap::new();
+        let mut actions_by_owner: HashMap<String, Vec<DrfActionHandler<'a>>> = HashMap::new();
         for (file_path, nodes) in by_file {
             if !file_path.to_ascii_lowercase().ends_with(".py") {
                 continue;
@@ -692,6 +719,14 @@ impl<'a> PythonHandlerIndex<'a> {
                     for key in node_method_keys(node) {
                         by_owner_method.entry(key).or_insert(*node);
                     }
+                    if let Some(action) = drf_action_handler(node) {
+                        for owner in node_owner_keys(node) {
+                            actions_by_owner
+                                .entry(owner)
+                                .or_default()
+                                .push(action.clone());
+                        }
+                    }
                 }
             }
         }
@@ -699,6 +734,7 @@ impl<'a> PythonHandlerIndex<'a> {
             by_module_member,
             by_member,
             by_owner_method,
+            actions_by_owner,
         }
     }
 
@@ -721,6 +757,21 @@ impl<'a> PythonHandlerIndex<'a> {
         }
         keys.into_iter()
             .find_map(|key| self.by_owner_method.get(&key).copied())
+    }
+
+    fn find_actions(&self, owner_expr: &str) -> Vec<DrfActionHandler<'a>> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        for owner in owner_lookup_keys(owner_expr) {
+            if let Some(actions) = self.actions_by_owner.get(&owner) {
+                for action in actions {
+                    if seen.insert(action.node.aka_id.clone()) {
+                        out.push(action.clone());
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
@@ -778,6 +829,88 @@ fn node_method_keys(node: &SynthNode) -> Vec<String> {
         }
     }
     keys.into_iter().collect()
+}
+
+fn node_owner_keys(node: &SynthNode) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    if let Some(parent) = node.parent_class.as_ref() {
+        let parent = strip_node_prefix(parent);
+        keys.insert(parent.to_string());
+        if let Some((_, short_parent)) = parent.rsplit_once('.') {
+            keys.insert(short_parent.to_string());
+        }
+    }
+    let stripped = strip_node_prefix(&node.qn);
+    if let Some((owner, _)) = stripped.rsplit_once('.') {
+        keys.insert(owner.to_string());
+        if let Some((_, short_owner)) = owner.rsplit_once('.') {
+            keys.insert(short_owner.to_string());
+        }
+    }
+    keys.into_iter().collect()
+}
+
+fn owner_lookup_keys(owner_expr: &str) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    keys.insert(owner_expr.to_string());
+    if let Some((_, owner)) = owner_expr.rsplit_once('.') {
+        keys.insert(owner.to_string());
+    }
+    keys.into_iter().collect()
+}
+
+fn drf_action_handler(node: &SynthNode) -> Option<DrfActionHandler<'_>> {
+    for decorator in &node.decorators {
+        let text = decorator.trim().trim_start_matches('@');
+        if !text.starts_with("action") && !text.contains(".action") {
+            continue;
+        }
+        let args = text
+            .find('(')
+            .and_then(|open| text.rfind(')').map(|close| (open, close)))
+            .and_then(|(open, close)| (close > open).then_some(&text[open + 1..close]))
+            .unwrap_or("");
+        let detail = keyword_bool_arg(args, "detail").unwrap_or(false);
+        let url_path = keyword_string_arg(args, "url_path").unwrap_or_else(|| node.name.clone());
+        let method = drf_action_method(args);
+        return Some(DrfActionHandler {
+            node,
+            detail,
+            url_path: normalize_route_literal_like(&url_path),
+            method,
+        });
+    }
+    None
+}
+
+fn keyword_bool_arg(args: &str, keyword: &str) -> Option<bool> {
+    let needle = format!("{keyword}=");
+    let pos = args.find(&needle)?;
+    let rest = args[pos + needle.len()..].trim_start();
+    if rest.starts_with("True") || rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("False") || rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn keyword_string_arg(args: &str, keyword: &str) -> Option<String> {
+    let needle = format!("{keyword}=");
+    let pos = args.find(&needle)?;
+    let start = pos + needle.len();
+    let rel = args[start..].find(['\'', '"'])?;
+    let quote_start = start + rel;
+    read_string_literal(args, quote_start).map(|(literal, _)| literal)
+}
+
+fn drf_action_method(args: &str) -> Option<String> {
+    let needle = "methods=";
+    let pos = args.find(needle)?;
+    let rest = &args[pos + needle.len()..];
+    let start = rest.find(['\'', '"'])?;
+    read_string_literal(rest, start).map(|(literal, _)| literal.to_ascii_uppercase())
 }
 
 fn strip_node_prefix(value: &str) -> &str {
