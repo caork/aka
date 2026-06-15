@@ -10,11 +10,11 @@ Rust workspace 承担存储、搜索、服务、UI；CBM 作为 native C binary 
 
 ## 解析引擎层（engine/，codebase-memory-mcp native C）
 
-- 来源：`DeusData/codebase-memory-mcp`，MIT license；`engine/ENGINE_SHA` 锚定同步来源版本。
-- 产物：`engine/codebase-memory-mcp`（Windows 为 `.exe`）是给 CLI/Docker/Tauri 使用的原生二进制；源码 checkout/build 目录为忽略文件，不入 git。
+- 来源：基于 `DeusData/codebase-memory-mcp`（MIT license）维护 aka 自己的 engine fork（`caork/codebase-memory-mcp`）和本地 checkout；`engine/ENGINE_SHA` 锚定当前维护的 engine commit。
+- 产物：`engine/codebase-memory-mcp`（Windows 为 `.exe`）是给 CLI/Docker/Tauri 使用的原生二进制；源码 checkout/build 目录为忽略文件，不随 aka 主仓库入 git。
 - 调用：`codebase-memory-mcp cli --progress --json index_repository <json>`；`CBM_CACHE_DIR` 指向 repo 级 engine cache，`AKA_CBM_MODE=fast|moderate|full` 控制解析深度。
 - Adapter：CBM 自己维护 SQLite graph；`aka-core` 读取 CBM SQLite，导出 `manifest.json`、`nodes.ndjson`、`edges.ndjson`、可选 `chunks.ndjson`，再进入既有 Rust ingest。
-- 同步：`scripts/sync-engine.sh` 拉取/复制 CBM 源码并构建 native binary；工件合同不变则 Rust 搜索/图/服务层零改动。
+- 同步：日常直接在 `engine/codebase-memory-mcp-src/` 修改 C 源码并提交到 `caork/codebase-memory-mcp`，`scripts/sync-engine.sh` 默认构建当前 checkout；月度/显式上游同步才用 `scripts/sync-engine.sh --refresh-upstream` 或手工 merge/rebase 上游，再选择性合入上游 feature。工件合同不变则 Rust 搜索/图/服务层零改动。
 
 ## 存储 + 搜索层（Rust，性能主战场）
 

@@ -2,12 +2,12 @@
 
 感知所有代码的知识引擎（名字源自 Akasha records）：codebase-memory-mcp native C engine 解析 → SQLite->NDJSON adapter → Rust 索引（tantivy BM25 + SQLite/CSR 图）→ CLI / MCP / HTTP / 液态玻璃桌面端。私有库 `caork/aka`。
 
-**工作路径**：本仓库 `~/Documents/github/aka`；engine 来源为 `codebase-memory-mcp`（默认由 `scripts/sync-engine.sh` 同步到 `engine/codebase-memory-mcp-src/` 并产出 `engine/codebase-memory-mcp`）；运行时数据在 `~/.aka/`（registry.json + repos/<slug-hash>/{artifact,graph.db,search}/ + checkouts/）。
+**工作路径**：本仓库 `~/Documents/github/aka`；engine 源码维护在 `engine/codebase-memory-mcp-src/`（fork：`caork/codebase-memory-mcp`，上游：`DeusData/codebase-memory-mcp`），由 `scripts/sync-engine.sh` 构建产出 `engine/codebase-memory-mcp`；运行时数据在 `~/.aka/`（registry.json + repos/<slug-hash>/{artifact,graph.db,search}/ + checkouts/）。
 
 ## 硬约束（必须遵守）
 
 - **License**：codebase-memory-mcp 为 MIT；aka 按 MIT 口径接入与分发。
-- **engine/ 是 CBM 同步/构建产物，不要直接改生成物**：解析能力改动应先在 codebase-memory-mcp 源码侧完成，再跑 `scripts/sync-engine.sh` 同步 native C binary。`engine/codebase-memory-mcp*` 不入 git，`engine/ENGINE_SHA` 锚定来源版本。
+- **CBM engine 直接维护源码，不维护补丁堆**：解析能力改动直接在 `engine/codebase-memory-mcp-src/` 的 C 源码 checkout 中完成并提交；`scripts/sync-engine.sh` 默认只构建当前 checkout，不重置本地分支。只有月度/显式上游同步时使用 `scripts/sync-engine.sh --refresh-upstream`，再选择性合入上游 feature。`engine/codebase-memory-mcp*` 二进制不入 git，`engine/ENGINE_SHA` 锚定当前维护的 engine commit。
 - **工件合同** `docs/contracts/artifacts.md` 是 engine adapter↔Rust 的唯一接口：字段只增不改不删；破坏性变更必须 `contractVersion` +1 并双侧同步，Rust 侧永不 import engine 内部模块。
 - **embedding 默认关闭**（用户拍板）：默认纯 BM25；开启只能由用户在 per-repo 设置里手动操作，代码里不许悄悄打开。
 - **图查询不引 Cypher / 嵌入式图数据库**（用户拍板）：aka 服务面使用 SQLite 持久 + 内存 CSR 邻接，就这一条路。
