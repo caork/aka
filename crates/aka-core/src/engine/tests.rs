@@ -1771,6 +1771,7 @@ fn synthesizes_spring_scheduled_jobs() {
         r#"package com.example.jobs;
 
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.annotation.Async;
 
 class BillingJobs {
     @Scheduled(cron = "0 0 * * * *")
@@ -1783,6 +1784,19 @@ class BillingJobs {
     }
 
     void writeLedger() {}
+}
+
+class BillingController {
+    private BillingJobs jobs;
+
+    void submitInvoice() {
+        jobs.rebuildInvoiceCache();
+    }
+}
+
+class AsyncBillingJobs {
+    @Async
+    void rebuildInvoiceCache() {}
 }"#,
     )
     .unwrap();
@@ -1794,7 +1808,7 @@ class BillingJobs {
         "settleInvoices",
         "com.example.jobs.BillingJobs.settleInvoices",
         file,
-        (6, 8),
+        (7, 9),
         json!({
             "decorators": ["@Scheduled(cron = \"0 0 * * * *\")"],
             "language": "java",
@@ -1806,7 +1820,7 @@ class BillingJobs {
         "settleOpenInvoices",
         "com.example.jobs.BillingJobs.settleOpenInvoices",
         file,
-        (10, 12),
+        (11, 13),
         json!({
             "language": "java",
         }),
@@ -1817,8 +1831,31 @@ class BillingJobs {
         "writeLedger",
         "com.example.jobs.BillingJobs.writeLedger",
         file,
-        (14, 14),
+        (15, 15),
         json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "submitInvoice",
+        "com.example.jobs.BillingController.submitInvoice",
+        file,
+        (21, 23),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        5,
+        "rebuildInvoiceCache",
+        "com.example.jobs.AsyncBillingJobs.rebuildInvoiceCache",
+        file,
+        (28, 29),
+        json!({
+            "decorators": ["@Async"],
             "language": "java",
         }),
     );
@@ -1842,6 +1879,17 @@ class BillingJobs {
         .collect();
     assert!(edge_types.contains(&"HANDLES_JOB".to_string()));
     assert!(edge_types.contains(&"ENTRY_POINT_OF".to_string()));
+
+    let async_job = synth
+        .jobs
+        .iter()
+        .find(|job| job.handler_id == "cbm:5:com.example.jobs.AsyncBillingJobs.rebuildInvoiceCache")
+        .expect("spring async job");
+    assert_eq!(async_job.job_type, "spring-async");
+    assert!(async_job.edge_recs().iter().any(|edge| {
+        edge.edge_type == "ENQUEUES_JOB"
+            && edge.source_id == "cbm:4:com.example.jobs.BillingController.submitInvoice"
+    }));
 }
 
 #[test]
@@ -1867,6 +1915,10 @@ scheduler = BackgroundScheduler()
 @scheduler.scheduled_job("cron", id="orders.cleanup", hour="3")
 def cleanup_orders():
     return None
+
+def enqueue_orders():
+    sync_orders.delay()
+    app.send_task("orders.cleanup")
 "#,
     )
     .unwrap();
@@ -1918,6 +1970,17 @@ def cleanup_orders():
             "language": "python",
         }),
     );
+    insert_function_node_props_at(
+        &conn,
+        5,
+        "enqueue_orders",
+        "tasks.enqueue_orders",
+        "tasks.py",
+        (20, 22),
+        json!({
+            "language": "python",
+        }),
+    );
     insert_edge(&conn, 1, 1, 2, "CALLS");
     insert_edge(&conn, 2, 2, 3, "CALLS");
 
@@ -1941,6 +2004,12 @@ def cleanup_orders():
         .schedule
         .as_deref()
         .is_some_and(|schedule| schedule.contains("trigger=cron") && schedule.contains("hour=3")));
+    assert!(celery.edge_recs().iter().any(|edge| {
+        edge.edge_type == "ENQUEUES_JOB" && edge.source_id == "cbm:5:tasks.enqueue_orders"
+    }));
+    assert!(aps.edge_recs().iter().any(|edge| {
+        edge.edge_type == "ENQUEUES_JOB" && edge.source_id == "cbm:5:tasks.enqueue_orders"
+    }));
 }
 
 #[test]
