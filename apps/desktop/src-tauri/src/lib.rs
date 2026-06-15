@@ -24,8 +24,7 @@ struct DesktopMcpRuntime {
 }
 
 #[cfg(target_os = "windows")]
-const EMBEDDED_CBM_ENGINE: &[u8] =
-    include_bytes!("../embedded-engine/codebase-memory-mcp.exe");
+const EMBEDDED_CBM_ENGINE: &[u8] = include_bytes!("../embedded-engine/codebase-memory-mcp.exe");
 
 fn fallback_app_data_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
@@ -180,24 +179,62 @@ fn configure_desktop_runtime(app: &tauri::App) -> anyhow::Result<AkaBackend> {
     configure_backend(app, &app_data_dir)
 }
 
+pub fn configure_cli_runtime() -> anyhow::Result<()> {
+    let app_data_dir = fallback_app_data_dir();
+    if std::env::var_os("AKA_HOME").is_none() {
+        let aka_home = app_data_dir.join(AKA_HOME_DIR_NAME);
+        std::fs::create_dir_all(&aka_home)?;
+        std::env::set_var("AKA_HOME", &aka_home);
+    }
+    configure_cli_engine_runtime(&app_data_dir)
+}
+
 #[cfg(target_os = "windows")]
-fn configure_backend(_app: &tauri::App, app_data_dir: &std::path::Path) -> anyhow::Result<AkaBackend> {
+fn configure_backend(
+    _app: &tauri::App,
+    app_data_dir: &std::path::Path,
+) -> anyhow::Result<AkaBackend> {
     Ok(AkaBackend::with_engine_dir(ensure_embedded_engine_dir(
         app_data_dir,
     )?))
 }
 
+#[cfg(target_os = "windows")]
+fn configure_cli_engine_runtime(app_data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if std::env::var_os("AKA_ENGINE_DIR").is_none() && std::env::var_os("AKA_CBM_BIN").is_none() {
+        let engine_dir = ensure_embedded_engine_dir(app_data_dir)?;
+        std::env::set_var("AKA_ENGINE_DIR", engine_dir);
+    }
+    Ok(())
+}
+
 #[cfg(not(target_os = "windows"))]
-fn configure_backend(app: &tauri::App, _app_data_dir: &std::path::Path) -> anyhow::Result<AkaBackend> {
+fn configure_backend(
+    app: &tauri::App,
+    _app_data_dir: &std::path::Path,
+) -> anyhow::Result<AkaBackend> {
     let resource_dir = app
         .path()
         .resource_dir()
         .unwrap_or_else(|_| fallback_resource_dir());
-    Ok(if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
-        AkaBackend::with_engine_dir(engine_dir)
-    } else {
-        AkaBackend::new()
-    })
+    Ok(
+        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+            AkaBackend::with_engine_dir(engine_dir)
+        } else {
+            AkaBackend::new()
+        },
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_cli_engine_runtime(_app_data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if std::env::var_os("AKA_ENGINE_DIR").is_none() && std::env::var_os("AKA_CBM_BIN").is_none() {
+        let resource_dir = fallback_resource_dir();
+        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+            std::env::set_var("AKA_ENGINE_DIR", engine_dir);
+        }
+    }
+    Ok(())
 }
 
 fn start_desktop_mcp_server(backend: BackendState) -> anyhow::Result<DesktopMcpRuntime> {

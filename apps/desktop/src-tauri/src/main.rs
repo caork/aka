@@ -3,6 +3,7 @@
 
 fn main() -> anyhow::Result<()> {
     if should_run_cli_mode() {
+        aka_desktop_lib::configure_cli_runtime()?;
         aka_cli::commands::run_from_env()
     } else {
         aka_desktop_lib::run();
