@@ -95,3 +95,47 @@ class OrderSocket {
         Some("cbm:3:com.example.realtime.OrderSocket.subscribeStatus")
     );
 }
+
+#[test]
+fn synthesizes_python_fastapi_websocket_routes() {
+    let repo = temp_repo("python-fastapi-websocket-routes");
+    std::fs::write(
+        repo.join("realtime.py"),
+        r#"from fastapi import FastAPI, WebSocket
+
+app = FastAPI()
+
+@app.websocket("/ws/orders/{order_id}")
+async def order_socket(websocket: WebSocket, order_id: str):
+    await websocket.accept()
+    await websocket.send_json({"orderId": order_id})
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "order_socket",
+        "realtime.order_socket",
+        "realtime.py",
+        (6, 8),
+        json!({
+            "decorators": ["@app.websocket(\"/ws/orders/{order_id}\")"],
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/ws/orders/{order_id}")
+        .expect("fastapi websocket route");
+    assert_eq!(route.method.as_deref(), Some("WEBSOCKET"));
+    assert_eq!(
+        route.handler_id.as_deref(),
+        Some("cbm:1:realtime.order_socket")
+    );
+}

@@ -66,10 +66,10 @@ fn realtime_method_mappings(decorators: &[String]) -> Vec<RealtimeMapping> {
         let Some(name) = annotation_simple_name(decorator) else {
             continue;
         };
-        let method = match name {
-            "MessageMapping" => "STOMP",
-            "SubscribeMapping" => "STOMP_SUBSCRIBE",
-            "ServerEndpoint" => "WEBSOCKET",
+        let method = match name.to_ascii_lowercase().as_str() {
+            "messagemapping" => "STOMP",
+            "subscribemapping" => "STOMP_SUBSCRIBE",
+            "serverendpoint" | "websocket" | "websocket_route" => "WEBSOCKET",
             _ => continue,
         };
         out.push(RealtimeMapping {
@@ -83,7 +83,10 @@ fn realtime_method_mappings(decorators: &[String]) -> Vec<RealtimeMapping> {
 fn realtime_mapping_path(decorators: &[String]) -> Option<String> {
     decorators.iter().find_map(|decorator| {
         let name = annotation_simple_name(decorator)?;
-        matches!(name, "MessageMapping" | "ServerEndpoint")
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "messagemapping" | "serverendpoint"
+        )
             .then(|| annotation_path(decorator).unwrap_or_else(|| "/".into()))
     })
 }
