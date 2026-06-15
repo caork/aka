@@ -388,9 +388,8 @@ impl AkaMcpServer {
     )]
     pub async fn list_repos(
         &self,
-        ctx: RequestContext<RoleServer>,
+        _ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        self.queue_client_roots(ctx).await;
         self.list_repos_without_roots().await
     }
 

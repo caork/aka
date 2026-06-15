@@ -220,3 +220,34 @@ async fn tool_call_queues_client_roots_before_query() -> anyhow::Result<()> {
     server_task.await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn list_repos_queues_client_roots_once() -> anyhow::Result<()> {
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let queued = Arc::new(Mutex::new(Vec::new()));
+    let handler = AkaMcpServer::new(Arc::new(RecordingBackend::new(Arc::clone(&queued))));
+    let server_task = tokio::spawn(async move {
+        let svc = handler.serve(server_io).await.expect("server initialize");
+        let _ = svc.waiting().await;
+    });
+    let root = std::env::temp_dir().join("aka mcp list root test");
+    let uri = format!("file://{}", root.to_string_lossy().replace(' ', "%20"));
+    let client = RootsClient {
+        roots: vec![Root::new(uri)],
+    }
+    .serve(client_io)
+    .await?;
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("list_repos"))
+        .await?;
+
+    assert_ne!(result.is_error, Some(true));
+    let queued = queued.lock().unwrap().clone();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0], vec![root]);
+
+    client.cancel().await?;
+    server_task.await?;
+    Ok(())
+}
