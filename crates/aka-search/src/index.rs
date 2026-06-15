@@ -46,6 +46,8 @@ const SYMBOL_LABEL_BOOST: f32 = 1.20;
 const EXACT_NAME_BOOST: f32 = 2.40;
 /// query tokens 全部覆盖 name 时给一个中间档，提升 `prompt server` 这类查类名的体验。
 const NAME_TOKEN_COVERAGE_BOOST: f32 = 1.45;
+/// 查询中显式出现 Route/GraphQL/Tool 等类型词时，优先返回对应语义节点。
+const LABEL_TOKEN_MATCH_BOOST: f32 = 1.35;
 /// File / Folder / Project 这类容器节点通常是导航结果，不应压过真实符号。
 const CONTAINER_LABEL_PENALTY: f32 = 0.45;
 /// generated/vendor/dist/json/lockfile 等路径噪声降权。
@@ -615,6 +617,12 @@ fn rerank_score(base: f32, hit: &Hit, normalized_query: &str, query_tokens: &[St
             factor *= NAME_TOKEN_COVERAGE_BOOST;
         }
     }
+    if query_tokens
+        .iter()
+        .any(|q| q == &hit.label.to_ascii_lowercase())
+    {
+        factor *= LABEL_TOKEN_MATCH_BOOST;
+    }
 
     base * factor
 }
@@ -678,6 +686,7 @@ fn is_symbol_label(label: &str) -> bool {
             | "Policy"
             | "Resource"
             | "Transaction"
+            | "GraphQL"
     )
 }
 
@@ -704,6 +713,7 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Event"
             | "Policy"
             | "Transaction"
+            | "GraphQL"
     )
 }
 
@@ -732,10 +742,12 @@ fn node_search_text(node: &NodeRec) -> String {
             | "Community"
             | "Resource"
             | "Transaction"
+            | "GraphQL"
     ) {
         return String::new();
     }
     let mut parts = Vec::new();
+    parts.push(node.label.clone());
     push_prop_str(&mut parts, &node.properties, "name");
     push_prop_str(&mut parts, &node.properties, "summary");
     push_prop_str(&mut parts, &node.properties, "processType");
@@ -747,6 +759,12 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "jobType");
     push_prop_str(&mut parts, &node.properties, "schedule");
     push_prop_str(&mut parts, &node.properties, "handlerName");
+    push_prop_str(&mut parts, &node.properties, "method");
+    push_prop_str(&mut parts, &node.properties, "description");
+    push_prop_str(&mut parts, &node.properties, "toolSource");
+    push_prop_str(&mut parts, &node.properties, "operationName");
+    push_prop_str(&mut parts, &node.properties, "operationType");
+    push_prop_str(&mut parts, &node.properties, "graphqlSource");
     push_prop_str(&mut parts, &node.properties, "strategy");
     push_prop_str(&mut parts, &node.properties, "tableName");
     push_prop_str(&mut parts, &node.properties, "tableSource");
@@ -956,10 +974,7 @@ mod tests {
             "key".into(),
             Value::String("orders.retry.max-attempts".into()),
         );
-        config_props.insert(
-            "configType".into(),
-            Value::String("spring-property".into()),
-        );
+        config_props.insert("configType".into(), Value::String("spring-property".into()));
         config_props.insert("valueHint".into(), Value::String("3".into()));
         config_props.insert(
             "sources".into(),
@@ -1046,6 +1061,31 @@ mod tests {
         transaction_props.insert("propagation".into(), Value::String("REQUIRES_NEW".into()));
         transaction_props.insert("readOnly".into(), Value::Bool(false));
 
+        let mut route_props = Map::new();
+        route_props.insert("name".into(), Value::String("/api/orders/{id}".into()));
+        route_props.insert("method".into(), Value::String("GET".into()));
+        route_props.insert("handlerName".into(), Value::String("getOrder".into()));
+        route_props.insert(
+            "responseKeys".into(),
+            Value::Array(vec![Value::String("status".into())]),
+        );
+
+        let mut tool_props = Map::new();
+        tool_props.insert("name".into(), Value::String("orders.reindex".into()));
+        tool_props.insert(
+            "description".into(),
+            Value::String("Reindex stale order projections for support agents".into()),
+        );
+        tool_props.insert("toolSource".into(), Value::String("mcp-tool".into()));
+        tool_props.insert("handlerName".into(), Value::String("reindexOrders".into()));
+
+        let mut graphql_props = Map::new();
+        graphql_props.insert("name".into(), Value::String("createOrder".into()));
+        graphql_props.insert("operationName".into(), Value::String("createOrder".into()));
+        graphql_props.insert("operationType".into(), Value::String("mutation".into()));
+        graphql_props.insert("handlerName".into(), Value::String("createOrder".into()));
+        graphql_props.insert("graphqlSource".into(), Value::String("source-scan".into()));
+
         let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
         writer
             .add_nodes(
@@ -1104,6 +1144,21 @@ mod tests {
                         id: "transaction:submit-order".into(),
                         label: "Transaction".into(),
                         properties: transaction_props,
+                    },
+                    NodeRec {
+                        id: "route:get-order".into(),
+                        label: "Route".into(),
+                        properties: route_props,
+                    },
+                    NodeRec {
+                        id: "tool:orders-reindex".into(),
+                        label: "Tool".into(),
+                        properties: tool_props,
+                    },
+                    NodeRec {
+                        id: "graphql:create-order".into(),
+                        label: "GraphQL".into(),
+                        properties: graphql_props,
                     },
                 ]
                 .into_iter(),
@@ -1170,5 +1225,22 @@ mod tests {
         let transaction_hit = transaction_hits.first().expect("transaction search hit");
         assert_eq!(transaction_hit.node_id, "transaction:submit-order");
         assert_eq!(transaction_hit.label, "Transaction");
+
+        let route_hits = index.search("GET orders status route", 5).unwrap();
+        let route_hit = route_hits.first().expect("route search hit");
+        assert_eq!(route_hit.node_id, "route:get-order");
+        assert_eq!(route_hit.label, "Route");
+
+        let tool_hits = index
+            .search("support agent reindex stale orders tool", 5)
+            .unwrap();
+        let tool_hit = tool_hits.first().expect("tool search hit");
+        assert_eq!(tool_hit.node_id, "tool:orders-reindex");
+        assert_eq!(tool_hit.label, "Tool");
+
+        let graphql_hits = index.search("create order mutation graphql", 5).unwrap();
+        let graphql_hit = graphql_hits.first().expect("graphql search hit");
+        assert_eq!(graphql_hit.node_id, "graphql:create-order");
+        assert_eq!(graphql_hit.label, "GraphQL");
     }
 }
