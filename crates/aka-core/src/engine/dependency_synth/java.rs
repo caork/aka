@@ -1,0 +1,302 @@
+use super::super::{
+    find_matching_paren, is_ident_continue, skip_ws, split_top_level_commas, EdgeRec, SynthNode,
+};
+use super::dependency_edge;
+use super::lookup::{is_meaningful_java_type, simple_type_name, NodeLookup};
+
+pub(super) fn detect_java_dependency_edges(
+    text: &str,
+    file_path: &str,
+    nodes: &[&SynthNode],
+    lookup: &NodeLookup<'_>,
+) -> Vec<EdgeRec> {
+    if !is_java_like_file(file_path, nodes) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for class_node in nodes
+        .iter()
+        .copied()
+        .filter(|node| matches!(node.label.as_str(), "Class" | "Interface" | "Type"))
+    {
+        let Some(body) = class_source_slice(text, class_node) else {
+            continue;
+        };
+        for dep in detect_java_field_injections(body)
+            .into_iter()
+            .chain(detect_java_constructor_injections(body, &class_node.name))
+        {
+            if let Some(target) = lookup.resolve_type("java", &dep.type_name) {
+                if target.aka_id != class_node.aka_id {
+                    out.push(dependency_edge(
+                        &class_node.aka_id,
+                        &target.aka_id,
+                        "java-spring-dependency-injection",
+                        &dep.strategy,
+                        &dep.type_name,
+                        0.7,
+                    ));
+                }
+            }
+        }
+    }
+    for method in nodes
+        .iter()
+        .copied()
+        .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+    {
+        for dep in detect_java_bean_method_dependencies(text, method) {
+            if let Some(target) = lookup.resolve_type("java", &dep.type_name) {
+                if target.aka_id != method.aka_id {
+                    out.push(dependency_edge(
+                        &method.aka_id,
+                        &target.aka_id,
+                        "java-spring-bean-dependency",
+                        &dep.strategy,
+                        &dep.type_name,
+                        0.68,
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone)]
+struct JavaDependency {
+    type_name: String,
+    strategy: String,
+}
+
+fn detect_java_field_injections(text: &str) -> Vec<JavaDependency> {
+    let mut out = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if !(trimmed.contains("@Autowired")
+            || trimmed.contains("@Inject")
+            || trimmed.contains("@Resource"))
+        {
+            continue;
+        }
+        let field_line = if looks_like_java_field(trimmed) {
+            trimmed
+        } else {
+            lines
+                .iter()
+                .skip(idx + 1)
+                .map(|line| line.trim())
+                .find(|line| !line.is_empty() && !line.starts_with('@'))
+                .unwrap_or("")
+        };
+        if let Some(type_name) = java_field_type(field_line) {
+            out.push(JavaDependency {
+                type_name,
+                strategy: "java-field-injection".into(),
+            });
+        }
+    }
+    out
+}
+
+fn detect_java_constructor_injections(text: &str, class_name: &str) -> Vec<JavaDependency> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(pos) = text[offset..].find(class_name) {
+        let start = offset + pos;
+        if !word_boundary_ok(text, start, class_name.len()) {
+            offset = start + class_name.len();
+            continue;
+        }
+        let open = skip_ws(text, start + class_name.len());
+        if text.as_bytes().get(open) != Some(&b'(') {
+            offset = start + class_name.len();
+            continue;
+        }
+        let Some(close) = find_matching_paren(text, open) else {
+            offset = open + 1;
+            continue;
+        };
+        if !constructor_prefix_ok(&text[start.saturating_sub(120)..start]) {
+            offset = close + 1;
+            continue;
+        }
+        for param in split_top_level_commas(&text[open + 1..close]) {
+            if let Some(type_name) = java_parameter_type(param) {
+                out.push(JavaDependency {
+                    type_name,
+                    strategy: "java-constructor-injection".into(),
+                });
+            }
+        }
+        offset = close + 1;
+    }
+    out
+}
+
+fn detect_java_bean_method_dependencies(text: &str, node: &SynthNode) -> Vec<JavaDependency> {
+    if !node.decorators.iter().any(|decorator| {
+        let normalized = decorator.trim().trim_start_matches('@');
+        normalized == "Bean" || normalized.starts_with("Bean(") || normalized.ends_with(".Bean")
+    }) {
+        return Vec::new();
+    }
+    let Some((decl_start, decl_end)) = node_declaration_range(text, node) else {
+        return Vec::new();
+    };
+    let declaration = &text[decl_start..decl_end];
+    let Some(name_pos) = declaration.find(&node.name) else {
+        return Vec::new();
+    };
+    let open = skip_ws(declaration, name_pos + node.name.len());
+    if declaration.as_bytes().get(open) != Some(&b'(') {
+        return Vec::new();
+    }
+    let Some(close) = find_matching_paren(declaration, open) else {
+        return Vec::new();
+    };
+    split_top_level_commas(&declaration[open + 1..close])
+        .into_iter()
+        .filter_map(java_parameter_type)
+        .map(|type_name| JavaDependency {
+            type_name,
+            strategy: "java-bean-method-parameter".into(),
+        })
+        .collect()
+}
+
+fn is_java_like_file(file_path: &str, nodes: &[&SynthNode]) -> bool {
+    let lower = file_path.to_ascii_lowercase();
+    lower.ends_with(".java")
+        || lower.ends_with(".kt")
+        || lower.ends_with(".scala")
+        || lower.ends_with(".groovy")
+        || nodes.iter().any(|node| {
+            matches!(
+                node.language.to_ascii_lowercase().as_str(),
+                "java" | "kotlin" | "scala" | "groovy"
+            )
+        })
+}
+
+fn class_source_slice<'a>(text: &'a str, node: &SynthNode) -> Option<&'a str> {
+    let start_line = node.start_line.max(1);
+    let end_line = node.end_line.max(start_line);
+    let (start, end) = line_range(text, start_line, end_line)?;
+    Some(&text[start..end])
+}
+
+fn node_declaration_range(text: &str, node: &SynthNode) -> Option<(usize, usize)> {
+    let start_line = node.start_line.max(1);
+    let (start, mut end) = line_range(text, start_line, node.end_line.max(start_line))?;
+    if let Some(open_rel) = text[start..end].find('{') {
+        end = start + open_rel;
+    }
+    Some((start.saturating_sub(500), end))
+}
+
+fn line_range(text: &str, start_line: i64, end_line: i64) -> Option<(usize, usize)> {
+    let mut line = 1i64;
+    let mut start = None;
+    let mut end = text.len();
+    for (idx, ch) in text.char_indices() {
+        if line == start_line && start.is_none() {
+            start = Some(idx);
+        }
+        if line > end_line {
+            end = idx;
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    if start.is_none() && line == start_line {
+        start = Some(text.len());
+    }
+    start.map(|start| (start.min(text.len()), end.min(text.len())))
+}
+
+fn looks_like_java_field(line: &str) -> bool {
+    line.ends_with(';') && !line.contains('(') && java_field_type(line).is_some()
+}
+
+fn java_field_type(line: &str) -> Option<String> {
+    let clean = line
+        .split_once('=')
+        .map(|(lhs, _)| lhs)
+        .unwrap_or(line)
+        .trim_end_matches(';')
+        .trim();
+    let tokens = java_type_tokens(clean);
+    tokens
+        .get(tokens.len().saturating_sub(2))
+        .cloned()
+        .filter(|token| is_meaningful_java_type(token))
+}
+
+fn java_parameter_type(param: &str) -> Option<String> {
+    let clean = param
+        .split_once('=')
+        .map(|(lhs, _)| lhs)
+        .unwrap_or(param)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let tokens = java_type_tokens(clean);
+    tokens
+        .get(tokens.len().saturating_sub(2))
+        .cloned()
+        .filter(|token| is_meaningful_java_type(token))
+}
+
+fn java_type_tokens(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter(|token| !token.starts_with('@'))
+        .filter(|token| {
+            !matches!(
+                token.trim_matches(','),
+                "private"
+                    | "protected"
+                    | "public"
+                    | "final"
+                    | "static"
+                    | "volatile"
+                    | "transient"
+                    | "var"
+            )
+        })
+        .map(|token| {
+            token
+                .trim_matches(',')
+                .trim_matches(';')
+                .trim_matches(|ch: char| ch == '[' || ch == ']')
+                .to_string()
+        })
+        .filter_map(|token| simple_type_name(&token))
+        .collect()
+}
+
+fn constructor_prefix_ok(prefix: &str) -> bool {
+    let trimmed = prefix
+        .rsplit_once('\n')
+        .map(|(_, line)| line)
+        .unwrap_or(prefix)
+        .trim_end();
+    trimmed.is_empty()
+        || trimmed.ends_with("public")
+        || trimmed.ends_with("private")
+        || trimmed.ends_with("protected")
+        || trimmed.ends_with("@Autowired")
+        || trimmed.ends_with("@Inject")
+        || trimmed.contains("@Autowired")
+        || trimmed.contains("@Inject")
+}
+
+fn word_boundary_ok(text: &str, start: usize, len: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let after = text[start + len..].chars().next();
+    before.is_none_or(|ch| !is_ident_continue(ch)) && after.is_none_or(|ch| !is_ident_continue(ch))
+}
