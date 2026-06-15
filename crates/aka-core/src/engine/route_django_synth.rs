@@ -18,20 +18,24 @@ pub(super) fn django_urlconf_routes_from_repo(
         .iter()
         .map(|file_path| (python_file_module_name(file_path), file_path.clone()))
         .collect();
-    let mut include_prefixes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut include_edges: BTreeMap<String, Vec<DjangoUrlIncludeEdge>> = BTreeMap::new();
     for file_path in &file_paths {
         let Some(text) = read_repo_text(repo, file_path) else {
             continue;
         };
         for include in django_urlconf_includes(&text) {
             if let Some(target_file) = module_to_file.get(&include.module) {
-                include_prefixes
-                    .entry(target_file.clone())
+                include_edges
+                    .entry(file_path.clone())
                     .or_default()
-                    .push(include.prefix);
+                    .push(DjangoUrlIncludeEdge {
+                        target_file: target_file.clone(),
+                        prefix: include.prefix,
+                    });
             }
         }
     }
+    let include_prefixes = transitive_include_prefixes(&file_paths, &include_edges);
 
     for file_path in file_paths {
         let Some(text) = read_repo_text(repo, &file_path) else {
@@ -83,6 +87,72 @@ fn django_urlconf_routes_with_handlers(
 struct DjangoUrlInclude {
     prefix: String,
     module: String,
+}
+
+#[derive(Debug)]
+struct DjangoUrlIncludeEdge {
+    target_file: String,
+    prefix: String,
+}
+
+fn transitive_include_prefixes(
+    file_paths: &[String],
+    include_edges: &BTreeMap<String, Vec<DjangoUrlIncludeEdge>>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut has_parent = BTreeSet::new();
+    for edges in include_edges.values() {
+        for edge in edges {
+            has_parent.insert(edge.target_file.clone());
+        }
+    }
+    let mut roots: Vec<String> = file_paths
+        .iter()
+        .filter(|file_path| !has_parent.contains(*file_path))
+        .cloned()
+        .collect();
+    if roots.is_empty() {
+        roots = file_paths.to_vec();
+    }
+
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for root in roots {
+        collect_include_prefixes(&root, "", include_edges, &mut BTreeSet::new(), &mut out);
+    }
+    for prefixes in out.values_mut() {
+        prefixes.sort();
+        prefixes.dedup();
+    }
+    out
+}
+
+fn collect_include_prefixes(
+    file_path: &str,
+    prefix: &str,
+    include_edges: &BTreeMap<String, Vec<DjangoUrlIncludeEdge>>,
+    stack: &mut BTreeSet<String>,
+    out: &mut BTreeMap<String, Vec<String>>,
+) {
+    if !stack.insert(file_path.to_string()) {
+        return;
+    }
+    if !prefix.is_empty() {
+        out.entry(file_path.to_string())
+            .or_default()
+            .push(prefix.to_string());
+    }
+    if let Some(edges) = include_edges.get(file_path) {
+        for edge in edges {
+            let next_prefix = join_django_routes(prefix, &edge.prefix);
+            collect_include_prefixes(
+                &edge.target_file,
+                &next_prefix,
+                include_edges,
+                stack,
+                out,
+            );
+        }
+    }
+    stack.remove(file_path);
 }
 
 fn django_urlconf_includes(text: &str) -> Vec<DjangoUrlInclude> {

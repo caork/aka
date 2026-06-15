@@ -1631,6 +1631,80 @@ urlpatterns = [
 }
 
 #[test]
+fn synthesizes_nested_django_include_urlconf_prefixes() {
+    let repo = temp_repo("django-nested-include-urlconf-routes");
+    std::fs::create_dir_all(repo.join("project")).unwrap();
+    std::fs::create_dir_all(repo.join("api")).unwrap();
+    std::fs::create_dir_all(repo.join("orders")).unwrap();
+    std::fs::write(
+        repo.join("project/urls.py"),
+        r#"from django.urls import include, path
+
+urlpatterns = [
+    path("api/", include("api.urls")),
+]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("api/urls.py"),
+        r#"from django.urls import include, path
+
+urlpatterns = [
+    path("v1/", include("orders.urls")),
+]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("orders/urls.py"),
+        r#"from django.urls import path
+from . import views
+
+urlpatterns = [
+    path("orders/<int:id>/", views.get_order, name="order-detail"),
+]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("orders/views.py"),
+        r#"def get_order(request, id):
+    return {"id": id}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "get_order",
+        "orders.views.get_order",
+        "orders/views.py",
+        (1, 2),
+        json!({"language": "python"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/v1/orders/{id}")
+        .expect("nested django included route");
+    assert_eq!(
+        route.handler_id.as_deref(),
+        Some("cbm:1:orders.views.get_order")
+    );
+    assert!(
+        synth.routes.iter().all(|route| {
+            route.route != "/orders/{id}" && route.route != "/v1/orders/{id}"
+        }),
+        "nested include should only emit fully prefixed routes"
+    );
+}
+
+#[test]
 fn synthesizes_fastapi_local_apirouter_prefixes() {
     let repo = temp_repo("fastapi-local-router");
     std::fs::create_dir_all(repo.join("api")).unwrap();
