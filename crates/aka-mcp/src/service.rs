@@ -348,7 +348,7 @@ impl ImpactParams {
 #[tool_router]
 impl AkaMcpServer {
     #[tool(
-        description = "List indexed repositories with node/edge counts and index status. Call this first. aka tries to auto-queue MCP workspace roots (HTTP/stdio) and, in stdio fallback, the current process workspace; wait while status is indexing, or use analyze for an explicit absolute path."
+        description = "List indexed repositories with node/edge counts and index status. Call this first. aka auto-queues MCP workspace roots on every tool call when clients expose them, and stdio fallback also detects the process workspace; wait while status is indexing, or use analyze for an explicit absolute path."
     )]
     pub async fn list_repos(
         &self,
@@ -559,7 +559,7 @@ impl AkaMcpServer {
 
 #[tool_handler(
     name = "aka-mcp",
-    instructions = "Code knowledge graph for repositories. Start with list_repos; aka auto-queues MCP workspace roots when clients expose them, and stdio fallback also auto-detects its process workspace. Use analyze with an explicit absolute path if the target repo is not listed. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
+    instructions = "Code knowledge graph for repositories. Start with list_repos to see status; every tool call tries to auto-queue MCP workspace roots when clients expose them, and stdio fallback also auto-detects its process workspace. Use analyze with an explicit absolute path if the target repo is not listed. Use query to search, context for a 360-degree view of one symbol, and impact before refactoring."
 )]
 impl ServerHandler for AkaMcpServer {
     async fn call_tool(

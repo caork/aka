@@ -59,6 +59,10 @@ async fn initialize_list_and_call_query() -> anyhow::Result<()> {
     assert!(schema["properties"].get("query").is_some());
     assert!(schema["properties"].get("repo").is_some());
     assert!(schema["properties"].get("limit").is_some());
+    let list_tool = tools.iter().find(|t| t.name == "list_repos").unwrap();
+    let list_description = list_tool.description.as_deref().unwrap_or_default();
+    assert!(list_description.contains("every tool call"));
+    assert!(list_description.contains("workspace roots"));
 
     // tools/call query
     let args = serde_json::json!({ "repo": "fixture", "query": "handle" });
