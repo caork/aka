@@ -1019,6 +1019,80 @@ async def sync_order(order_id: str):
 }
 
 #[test]
+fn links_python_aiohttp_client_consumers_to_routes() {
+    let repo = temp_repo("python-aiohttp-route-consumers");
+    std::fs::create_dir_all(repo.join("api")).unwrap();
+    std::fs::create_dir_all(repo.join("workers")).unwrap();
+    std::fs::write(
+        repo.join("api/orders.py"),
+        r#"from fastapi import APIRouter
+
+router = APIRouter(prefix="/api/orders")
+
+@router.post("/{id}/reserve")
+def reserve_order(id: str):
+    return {"id": id, "status": "reserved"}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("workers/reserve.py"),
+        r#"import aiohttp
+
+async def reserve_order(order_id: str):
+    async with aiohttp.ClientSession() as session:
+        async with session.request(
+            "POST",
+            f"http://orders.internal/api/orders/{order_id}/reserve",
+        ) as response:
+            data = await response.json()
+            return data["status"]
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Function",
+        "reserve_order",
+        "api.orders.reserve_order",
+        "api/orders.py",
+        json!({
+            "decorators": ["@router.post(\"/{id}/reserve\")"],
+            "language": "python",
+            "route_method": "POST",
+            "route_path": "/{id}/reserve",
+        }),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Function",
+        "reserve_order",
+        "workers.reserve.reserve_order",
+        "workers/reserve.py",
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders/{id}/reserve")
+        .expect("parameterized FastAPI route");
+    assert_eq!(route.consumers.len(), 1);
+    assert_eq!(
+        route.consumers[0].node_id,
+        "cbm:2:workers.reserve.reserve_order"
+    );
+    assert!(route.consumers[0].keys.contains(&"status".to_string()));
+}
+
+#[test]
 fn synthesizes_spring_routes_with_class_prefix() {
     let repo = temp_repo("spring-routes");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
