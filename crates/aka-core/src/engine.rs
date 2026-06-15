@@ -37,6 +37,7 @@ mod persistence_synth;
 mod policy_synth;
 mod property_synth;
 mod resource_synth;
+mod route_consumer_synth;
 mod route_shape;
 mod source_scan;
 mod tool_synth;
@@ -55,10 +56,9 @@ use policy_synth::{synthesize_policies_from_sources, SynthPolicy};
 use property_synth::extract_python_class_properties;
 use property_synth::{synthesize_python_properties, SynthProperty};
 use resource_synth::{synthesize_resources_from_sources, SynthResource};
+use route_consumer_synth::attach_route_consumers;
 use route_shape::{
-    extract_accessed_keys_near_route, extract_error_keys, extract_middleware,
-    extract_response_keys, fetch_literal_windows, is_route_parameter_segment, literal_occurrences,
-    route_occurrences,
+    extract_error_keys, extract_middleware, extract_response_keys, literal_occurrences,
 };
 use source_scan::{
     find_call_args, find_matching_paren, is_ident_continue, is_noisy_source_path,
@@ -1308,8 +1308,8 @@ pub(super) struct SynthProcess {
 #[derive(Debug, Clone)]
 struct SynthRoute {
     id: String,
-    route: String,
-    file_path: String,
+    pub(super) route: String,
+    pub(super) file_path: String,
     emit_node: bool,
     method: Option<String>,
     handler_id: Option<String>,
@@ -1317,15 +1317,15 @@ struct SynthRoute {
     middleware: Vec<String>,
     response_keys: Vec<String>,
     error_keys: Vec<String>,
-    consumers: Vec<SynthRouteConsumer>,
+    pub(super) consumers: Vec<SynthRouteConsumer>,
     process_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
-struct SynthRouteConsumer {
-    node_id: String,
-    keys: Vec<String>,
-    fetch_count: u32,
+pub(super) struct SynthRouteConsumer {
+    pub(super) node_id: String,
+    pub(super) keys: Vec<String>,
+    pub(super) fetch_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -2623,7 +2623,9 @@ pub(super) fn web_nodes_by_file(
         .collect()
 }
 
-fn route_nodes_by_file(nodes: &BTreeMap<String, SynthNode>) -> BTreeMap<String, Vec<&SynthNode>> {
+pub(super) fn route_nodes_by_file(
+    nodes: &BTreeMap<String, SynthNode>,
+) -> BTreeMap<String, Vec<&SynthNode>> {
     nodes_by_file(nodes)
         .into_iter()
         .filter(|(file_path, file_nodes)| {
@@ -3610,7 +3612,7 @@ fn dedup_route_candidates(candidates: &mut Vec<RouteCandidate>) {
     });
 }
 
-fn spring_mapping_path(decorators: &[String]) -> Option<String> {
+pub(super) fn spring_mapping_path(decorators: &[String]) -> Option<String> {
     for decorator in decorators {
         let Some(name_end) = decorator.find('(') else {
             continue;
@@ -3641,7 +3643,7 @@ fn spring_mapping_path(decorators: &[String]) -> Option<String> {
     None
 }
 
-fn feign_client_path(decorators: &[String]) -> Option<String> {
+pub(super) fn feign_client_path(decorators: &[String]) -> Option<String> {
     for decorator in decorators {
         let Some(name_end) = decorator.find('(') else {
             continue;
@@ -3667,7 +3669,7 @@ fn feign_client_path(decorators: &[String]) -> Option<String> {
     None
 }
 
-fn request_line_path(decorator: &str) -> Option<String> {
+pub(super) fn request_line_path(decorator: &str) -> Option<String> {
     let name_end = decorator.find('(')?;
     let name = decorator[..name_end].trim_start_matches('@');
     if name.rsplit('.').next().unwrap_or(name) != "RequestLine" {
@@ -3711,7 +3713,7 @@ fn first_route_literal(text: &str) -> Option<String> {
     None
 }
 
-fn join_route_paths(prefix: &str, suffix: &str) -> String {
+pub(super) fn join_route_paths(prefix: &str, suffix: &str) -> String {
     let prefix = normalize_route_literal(prefix);
     let suffix = normalize_route_literal(suffix);
     if prefix.is_empty() || prefix == "/" {
@@ -3766,195 +3768,6 @@ fn extract_route_handler_literals(text: &str) -> BTreeSet<String> {
         }
     }
     routes
-}
-
-fn attach_route_consumers(
-    repo: &Path,
-    nodes: &BTreeMap<String, SynthNode>,
-    routes: &mut BTreeMap<(String, String), SynthRoute>,
-) {
-    if routes.is_empty() {
-        return;
-    }
-    let by_file = route_nodes_by_file(nodes);
-    let route_names: Vec<String> = routes.keys().map(|(route, _)| route.clone()).collect();
-    for (file_path, file_nodes) in by_file {
-        let Some(text) = read_repo_text(repo, &file_path) else {
-            continue;
-        };
-        for (route, node_id) in java_feign_route_consumers(&file_nodes) {
-            for candidate in routes.values_mut().filter(|r| r.route == route) {
-                if candidate.file_path == file_path {
-                    continue;
-                }
-                candidate.consumers.push(SynthRouteConsumer {
-                    node_id: node_id.clone(),
-                    keys: Vec::new(),
-                    fetch_count: 1,
-                });
-            }
-        }
-        for (route, consumer) in route_fetch_consumers(&text, &route_names, &file_nodes) {
-            for candidate in routes.values_mut().filter(|r| &r.route == route) {
-                if candidate.file_path == file_path {
-                    continue;
-                }
-                candidate.consumers.push(consumer.clone());
-            }
-        }
-    }
-    for route in routes.values_mut() {
-        route.consumers.sort_by(|a, b| a.node_id.cmp(&b.node_id));
-        route.consumers.dedup_by(|a, b| {
-            if a.node_id == b.node_id {
-                b.fetch_count = b.fetch_count.saturating_add(a.fetch_count);
-                b.keys.extend(a.keys.clone());
-                b.keys.sort();
-                b.keys.dedup();
-                true
-            } else {
-                false
-            }
-        });
-    }
-    remove_parent_route_consumers(routes);
-}
-
-fn remove_parent_route_consumers(routes: &mut BTreeMap<(String, String), SynthRoute>) {
-    let route_names: Vec<String> = routes.values().map(|route| route.route.clone()).collect();
-    let mut removals: HashMap<String, BTreeSet<String>> = HashMap::new();
-    for route in routes.values() {
-        let parent_routes = parent_routes_for(&route.route, &route_names);
-        if parent_routes.is_empty() {
-            continue;
-        }
-        for consumer in &route.consumers {
-            for parent in &parent_routes {
-                removals
-                    .entry(parent.clone())
-                    .or_default()
-                    .insert(consumer.node_id.clone());
-            }
-        }
-    }
-    for route in routes.values_mut() {
-        let Some(remove_consumers) = removals.get(&route.route) else {
-            continue;
-        };
-        route
-            .consumers
-            .retain(|consumer| !remove_consumers.contains(&consumer.node_id));
-    }
-}
-
-fn parent_routes_for(route: &str, all_routes: &[String]) -> Vec<String> {
-    if !route
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .any(is_route_parameter_segment)
-    {
-        return Vec::new();
-    }
-    let mut parents = Vec::new();
-    let mut current = route.trim_end_matches('/').to_string();
-    while let Some((parent, _)) = current.rsplit_once('/') {
-        if parent.is_empty() {
-            break;
-        }
-        if all_routes.iter().any(|route| route == parent) {
-            parents.push(parent.to_string());
-        }
-        current = parent.to_string();
-    }
-    parents
-}
-
-fn java_feign_route_consumers(nodes: &[&SynthNode]) -> Vec<(String, String)> {
-    let mut feign_prefixes: BTreeMap<String, String> = BTreeMap::new();
-    for node in nodes
-        .iter()
-        .filter(|node| matches!(node.label.as_str(), "Class" | "Interface"))
-    {
-        let Some(prefix) = feign_client_path(&node.decorators) else {
-            continue;
-        };
-        feign_prefixes.insert(node.aka_id.clone(), prefix.clone());
-        feign_prefixes.insert(node.qn.clone(), prefix);
-    }
-
-    let mut out = Vec::new();
-    for node in nodes
-        .iter()
-        .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
-    {
-        let Some(parent) = node.parent_class.as_ref() else {
-            continue;
-        };
-        let Some(prefix) = feign_prefixes.get(parent) else {
-            continue;
-        };
-        if let Some(route) = node
-            .decorators
-            .iter()
-            .find_map(|decorator| request_line_path(decorator))
-        {
-            out.push((join_route_paths(prefix, &route), node.aka_id.clone()));
-            continue;
-        }
-        if let Some(method_path) = node
-            .route_path
-            .clone()
-            .or_else(|| spring_mapping_path(&node.decorators))
-        {
-            out.push((join_route_paths(prefix, &method_path), node.aka_id.clone()));
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn route_fetch_consumers<'a>(
-    text: &str,
-    route_names: &'a [String],
-    file_nodes: &[&SynthNode],
-) -> Vec<(&'a String, SynthRouteConsumer)> {
-    if route_names.is_empty() {
-        return Vec::new();
-    }
-    let fetch_windows = fetch_literal_windows(text);
-    if fetch_windows.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for route in route_names {
-        let mut consumers: BTreeMap<String, SynthRouteConsumer> = BTreeMap::new();
-        for (window_start, window) in &fetch_windows {
-            for idx in route_occurrences(window, route) {
-                let absolute_idx = window_start + idx;
-                let Some(node) = node_at_offset(text, file_nodes, absolute_idx)
-                    .or_else(|| pick_handler_node(file_nodes))
-                else {
-                    continue;
-                };
-                let entry =
-                    consumers
-                        .entry(node.aka_id.clone())
-                        .or_insert_with(|| SynthRouteConsumer {
-                            node_id: node.aka_id.clone(),
-                            keys: Vec::new(),
-                            fetch_count: 0,
-                        });
-                entry.fetch_count = entry.fetch_count.saturating_add(1);
-            }
-        }
-        let keys = extract_accessed_keys_near_route(text, route);
-        for consumer in consumers.values_mut() {
-            consumer.keys = keys.clone();
-            out.push((route, consumer.clone()));
-        }
-    }
-    out
 }
 
 pub(super) fn clamp_char_boundary(text: &str, idx: usize) -> usize {
