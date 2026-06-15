@@ -90,7 +90,44 @@ fn detect_jvm_source_annotation_jobs(text: &str, node: &SynthNode) -> Vec<JobDet
             });
         }
     }
+    out.extend(detect_spring_batch_bean_jobs(text, node));
     out
+}
+
+fn detect_spring_batch_bean_jobs(text: &str, node: &SynthNode) -> Vec<JobDetection> {
+    if !matches!(node.label.as_str(), "Function" | "Method")
+        || !source_annotations_before_node(text, node).iter().any(|a| {
+            let trimmed = a.trim().trim_start_matches('@');
+            trimmed == "Bean" || trimmed.starts_with("Bean(") || trimmed.ends_with(".Bean")
+        })
+    {
+        return Vec::new();
+    }
+    let Some(signature) = java_method_signature_window(text, node) else {
+        return Vec::new();
+    };
+    let (job_type, strategy, builder_type) = if signature_mentions_type(&signature, "Job") {
+        (
+            "spring-batch-job",
+            "java-spring-batch-job-bean",
+            "JobBuilder",
+        )
+    } else if signature_mentions_type(&signature, "Step") {
+        (
+            "spring-batch-step",
+            "java-spring-batch-step-bean",
+            "StepBuilder",
+        )
+    } else {
+        return Vec::new();
+    };
+    vec![JobDetection {
+        name: spring_batch_builder_name(text, node, builder_type)
+            .unwrap_or_else(|| node.display_name().to_string()),
+        job_type: job_type.into(),
+        schedule: None,
+        strategy: strategy.into(),
+    }]
 }
 
 fn source_annotations_before_node(text: &str, node: &SynthNode) -> Vec<String> {
@@ -128,8 +165,9 @@ fn source_annotations_before_node(text: &str, node: &SynthNode) -> Vec<String> {
 
 fn collect_annotation_from_line(text: &str, lines: &[&str], line_idx: usize) -> String {
     let start = line_start_offset(text, line_idx);
-    let line = lines[line_idx].trim();
-    let Some(open) = text[start..].find('(').map(|rel| start + rel) else {
+    let raw_line = lines[line_idx];
+    let line = raw_line.trim();
+    let Some(open) = raw_line.find('(').map(|rel| start + rel) else {
         return line.to_string();
     };
     let Some(close) = find_matching_paren(text, open) else {
@@ -152,6 +190,52 @@ fn line_start_offset(text: &str, line_idx: usize) -> usize {
         }
     }
     text.len()
+}
+
+fn java_method_signature_window(text: &str, node: &SynthNode) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = node.start_line_key().max(1).saturating_sub(1) as usize;
+    let end = (start + 4).min(lines.len());
+    let signature = lines
+        .get(start..end)?
+        .join(" ")
+        .split('{')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    (!signature.is_empty()).then_some(signature)
+}
+
+fn signature_mentions_type(signature: &str, type_name: &str) -> bool {
+    signature
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .any(|part| part == type_name)
+}
+
+fn spring_batch_builder_name(text: &str, node: &SynthNode, builder_type: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start_line = node.start_line_key().max(1);
+    let end_line = node.end_line_key().max(start_line);
+    let start_idx = line_start_offset(text, start_line.saturating_sub(1) as usize);
+    let end_idx = if end_line as usize >= lines.len() {
+        text.len()
+    } else {
+        line_start_offset(text, end_line as usize)
+    };
+    let body = text.get(start_idx..end_idx)?;
+    for callee in [
+        format!("new {builder_type}"),
+        format!("{builder_type}("),
+        format!(".{builder_type}"),
+    ] {
+        for call in find_call_args(body, &callee) {
+            if let Some(name) = first_string_literal(call.args) {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 fn detect_python_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobDetection> {

@@ -835,3 +835,87 @@ class BillingJobs {
     assert_eq!(async_job.job_type, "spring-async");
     assert_eq!(async_job.strategy, "java-spring-async-source-annotation");
 }
+
+#[test]
+fn synthesizes_spring_batch_job_and_step_beans() {
+    let repo = temp_repo("spring-batch-job-step-beans");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/jobs")).unwrap();
+    let file = "src/main/java/com/example/jobs/OrderBatchConfig.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.jobs;
+
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.context.annotation.Bean;
+
+class OrderBatchConfig {
+    @Bean
+    Job importOrdersJob(Step loadOrdersStep) {
+        return new JobBuilder("orders.import")
+            .start(loadOrdersStep)
+            .build();
+    }
+
+    @Bean
+    Step loadOrdersStep() {
+        return new StepBuilder("orders.load")
+            .tasklet((contribution, context) -> null)
+            .build();
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Method",
+            "importOrdersJob",
+            "com.example.jobs.OrderBatchConfig.importOrdersJob",
+            file,
+        ),
+        (11, 15),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "loadOrdersStep",
+            "com.example.jobs.OrderBatchConfig.loadOrdersStep",
+            file,
+        ),
+        (18, 22),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let job = synth
+        .jobs
+        .iter()
+        .find(|job| job.handler_id == "cbm:1:com.example.jobs.OrderBatchConfig.importOrdersJob")
+        .expect("spring batch job bean");
+    assert_eq!(job.name, "orders.import");
+    assert_eq!(job.job_type, "spring-batch-job");
+    assert_eq!(job.strategy, "java-spring-batch-job-bean");
+
+    let step = synth
+        .jobs
+        .iter()
+        .find(|job| job.handler_id == "cbm:2:com.example.jobs.OrderBatchConfig.loadOrdersStep")
+        .expect("spring batch step bean");
+    assert_eq!(step.name, "orders.load");
+    assert_eq!(step.job_type, "spring-batch-step");
+    assert_eq!(step.strategy, "java-spring-batch-step-bean");
+}
