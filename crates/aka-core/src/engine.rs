@@ -2334,7 +2334,7 @@ fn synthesize_processes_from_calls(
     let max_processes = dynamic_process_cap(symbol_count);
     let mut starts = find_entry_points(nodes, adjacency, indegree, command_entry_hints);
     if starts.is_empty() {
-        starts = adjacency.keys().cloned().collect();
+        starts = fallback_entry_points(nodes, adjacency);
         starts.sort_by(|a, b| {
             let na = &nodes[a];
             let nb = &nodes[b];
@@ -2399,6 +2399,25 @@ fn find_entry_points(
         })
     });
     candidates.into_iter().map(|(id, _)| id).collect()
+}
+
+fn fallback_entry_points(
+    nodes: &BTreeMap<String, SynthNode>,
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<String> {
+    adjacency
+        .keys()
+        .filter(|id| {
+            nodes
+                .get(*id)
+                .is_some_and(allows_name_only_process_fallback)
+        })
+        .cloned()
+        .collect()
+}
+
+fn allows_name_only_process_fallback(node: &SynthNode) -> bool {
+    !is_jvm_business_node(node)
 }
 
 fn trace_from_entry_point(
@@ -3925,7 +3944,7 @@ fn entry_score(
     let export_multiplier = if node.is_exported { 2.0 } else { 1.0 };
     let name_multiplier = if is_utility_name(&node.name) {
         0.3
-    } else if is_entry_name(&node.name, &node.language) {
+    } else if is_name_entry_candidate(node) {
         1.5
     } else {
         1.0
@@ -3981,6 +4000,27 @@ fn language_entry_name(lower_name: &str, language: &str) -> bool {
         "rust" => lower_name == "main" || lower_name.starts_with("run_"),
         _ => false,
     }
+}
+
+fn is_name_entry_candidate(node: &SynthNode) -> bool {
+    let lower = node.name.to_ascii_lowercase();
+    if is_jvm_business_node(node) {
+        return lower == "main";
+    }
+    is_entry_name(&node.name, &node.language)
+}
+
+fn is_jvm_business_node(node: &SynthNode) -> bool {
+    let language = node.language.to_ascii_lowercase();
+    matches!(
+        language.as_str(),
+        "java" | "kotlin" | "scala" | "groovy" | "csharp"
+    ) || matches!(
+        std::path::Path::new(&node.file_path.to_ascii_lowercase())
+            .extension()
+            .and_then(|ext| ext.to_str()),
+        Some("java" | "kt" | "kts" | "scala" | "groovy" | "cs")
+    )
 }
 
 fn is_utility_name(name: &str) -> bool {

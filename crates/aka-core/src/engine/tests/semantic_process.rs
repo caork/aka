@@ -267,3 +267,66 @@ class AuditHandler {
         "Java Handler suffixes are name-only hints and must not outrank source-fact entries"
     );
 }
+
+#[test]
+fn java_call_chains_without_source_entry_facts_do_not_fallback_to_name_only_processes() {
+    let repo = temp_repo("java-no-name-only-process-fallback");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    let file = "src/main/java/com/example/orders/OrderService.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+class OrderService {
+    void processOrders() {
+        persistOrders();
+    }
+
+    void persistOrders() {}
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", "pom.xml", file]);
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Method",
+            "processOrders",
+            "com.example.orders.OrderService.processOrders",
+            file,
+        ),
+        (4, 6),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.orders.OrderService",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "persistOrders",
+            "com.example.orders.OrderService.persistOrders",
+            file,
+        ),
+        (8, 8),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.orders.OrderService",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "CALLS");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(
+        synth.processes.is_empty(),
+        "Git-tracked Java code without runner/job/source entry facts must not use process* names as entry points"
+    );
+}
