@@ -7,7 +7,7 @@ description: 用 aka 代码知识图谱（15 个 MCP 工具：list_repos/query/s
 
 aka 把仓库解析成「符号节点 + 调用/引用/应用语义边」的图，并建了 BM25 全文索引。十五个 MCP 工具覆盖四类任务：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**影响分析**（impact/detect_changes/api_impact/shape_check）、**应用映射**（route_map/graphql_map/tool_map），外加 **管理**（list_repos/analyze）。
 
-其中 Route/GraphQL/Tool/Command/Transaction/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等是 GitNexus-like 的索引语义：可用于流程分组、HTTP API/GraphQL operation/工具入口、CLI/management command、事务边界、消费者和响应字段检查，但不是完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义层。索引缺少相应节点/边/字段时，相关工具会返回空结果或提示缺数据。
+其中 Route/GraphQL/Tool/Command/Table/Repository/Migration/Transaction/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/MIGRATES_TABLE/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等是 GitNexus-like 的索引语义：可用于流程分组、HTTP API/GraphQL operation/工具入口、CLI/management command、schema migration、事务边界、消费者和响应字段检查，但不是完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义层。索引缺少相应节点/边/字段时，相关工具会返回空结果或提示缺数据。
 
 > OpenCode 里 MCP 工具按 `<server>_<tool>` 命名：上面十五个工具显示为 `aka_list_repos`、`aka_query` 等。下文用短名。
 

@@ -28,6 +28,7 @@ mod command_synth;
 mod event_synth;
 mod graphql_synth;
 mod job_synth;
+mod migration_synth;
 mod persistence_synth;
 mod policy_synth;
 mod property_synth;
@@ -1540,8 +1541,10 @@ fn synthesize_graph_with_progress(
     let existing_node_ids = load_existing_node_ids(conn, project)?;
     let properties = synthesize_python_properties(conn, project, repo, &existing_node_ids)?;
     if nodes.is_empty() {
+        let persistence = synthesize_persistence_from_sources(repo, &nodes);
         return Ok(SynthGraph {
             properties,
+            persistence,
             ..SynthGraph::default()
         });
     }

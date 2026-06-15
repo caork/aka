@@ -671,6 +671,7 @@ fn is_symbol_label(label: &str) -> bool {
             | "Job"
             | "Table"
             | "Repository"
+            | "Migration"
             | "Cache"
             | "Event"
             | "Policy"
@@ -696,6 +697,7 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Job"
             | "Table"
             | "Repository"
+            | "Migration"
             | "Cache"
             | "Event"
             | "Policy"
@@ -720,6 +722,7 @@ fn node_search_text(node: &NodeRec) -> String {
             | "Job"
             | "Table"
             | "Repository"
+            | "Migration"
             | "Cache"
             | "Event"
             | "Policy"
@@ -732,7 +735,6 @@ fn node_search_text(node: &NodeRec) -> String {
     let mut parts = Vec::new();
     push_prop_str(&mut parts, &node.properties, "name");
     push_prop_str(&mut parts, &node.properties, "summary");
-    push_prop_str(&mut parts, &node.properties, "description");
     push_prop_str(&mut parts, &node.properties, "processType");
     push_prop_str(&mut parts, &node.properties, "commandType");
     push_prop_str(&mut parts, &node.properties, "jobType");
@@ -743,6 +745,9 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "tableSource");
     push_prop_str(&mut parts, &node.properties, "entityName");
     push_prop_str(&mut parts, &node.properties, "repositorySource");
+    push_prop_str(&mut parts, &node.properties, "migrationType");
+    push_prop_str(&mut parts, &node.properties, "migrationSource");
+    push_prop_str(&mut parts, &node.properties, "version");
     push_prop_str(&mut parts, &node.properties, "backend");
     push_prop_str(&mut parts, &node.properties, "cacheSource");
     push_prop_str(&mut parts, &node.properties, "bus");
@@ -757,6 +762,8 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_array(&mut parts, &node.properties, "trace");
     push_prop_array(&mut parts, &node.properties, "steps");
     push_prop_array(&mut parts, &node.properties, "columns");
+    push_prop_array(&mut parts, &node.properties, "tables");
+    push_prop_array(&mut parts, &node.properties, "operations");
     push_prop_array(&mut parts, &node.properties, "responseKeys");
     push_prop_array(&mut parts, &node.properties, "errorKeys");
     push_prop_array(&mut parts, &node.properties, "middleware");
@@ -949,6 +956,26 @@ mod tests {
             Value::String("java-spring-data-repository".into()),
         );
 
+        let mut migration_props = Map::new();
+        migration_props.insert("name".into(), Value::String("V1__create_orders".into()));
+        migration_props.insert(
+            "migrationType".into(),
+            Value::String("sql-migration".into()),
+        );
+        migration_props.insert("version".into(), Value::String("1".into()));
+        migration_props.insert(
+            "tables".into(),
+            Value::Array(vec![Value::String("orders".into())]),
+        );
+        migration_props.insert(
+            "operations".into(),
+            Value::Array(vec![Value::String("create".into())]),
+        );
+        migration_props.insert(
+            "filePath".into(),
+            Value::String("src/main/resources/db/migration/V1__create_orders.sql".into()),
+        );
+
         let mut cache_props = Map::new();
         cache_props.insert("name".into(), Value::String("orders:last".into()));
         cache_props.insert("backend".into(), Value::String("redis".into()));
@@ -1013,6 +1040,11 @@ mod tests {
                         properties: repo_props,
                     },
                     NodeRec {
+                        id: "migration:create-orders".into(),
+                        label: "Migration".into(),
+                        properties: migration_props,
+                    },
+                    NodeRec {
                         id: "cache:orders-last".into(),
                         label: "Cache".into(),
                         properties: cache_props,
@@ -1065,6 +1097,11 @@ mod tests {
         let repo_hit = repo_hits.first().expect("repository search hit");
         assert_eq!(repo_hit.node_id, "repository:orders");
         assert_eq!(repo_hit.label, "Repository");
+
+        let migration_hits = index.search("flyway migration create orders", 5).unwrap();
+        let migration_hit = migration_hits.first().expect("migration search hit");
+        assert_eq!(migration_hit.node_id, "migration:create-orders");
+        assert_eq!(migration_hit.label, "Migration");
 
         let cache_hits = index.search("redis orders last cache", 5).unwrap();
         let cache_hit = cache_hits.first().expect("cache search hit");

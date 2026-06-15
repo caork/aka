@@ -45,7 +45,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 {"id":"...","label":"Function","properties":{"name":"...","filePath":"...","startLine":1,"endLine":20}}
 ```
 
-`label` 取值来自 CBM graph，经 adapter 规范化为 aka 节点标签（Project/Package/Folder/File/Module/Class/Function/Method/Interface/Enum/Type/Route/GraphQL/Tool/Command/Resource/Transaction/…）。`properties` 为开放对象，aka 侧只索引已知字段（name/filePath/startLine/endLine/…），其余落到 JSON 列存底。
+`label` 取值来自 CBM graph，经 adapter 规范化为 aka 节点标签（Project/Package/Folder/File/Module/Class/Function/Method/Interface/Enum/Type/Route/GraphQL/Tool/Command/Table/Repository/Migration/Resource/Transaction/…）。`properties` 为开放对象，aka 侧只索引已知字段（name/filePath/startLine/endLine/…），其余落到 JSON 列存底。
 
 **行号语义**：工件中的 `startLine`/`endLine`（节点与 chunk 同）由 CBM/tree-sitter 坐标导出，合同内保持 **0-based row**。Rust 摄取层（aka-graph/aka-search）写索引时统一 **+1 转为 1-based 人类行号**（`NodeRec::start_line_1based`），因此 SQLite/tantivy 及一切下游（HTTP/MCP/桌面端）的行号都与编辑器、`/api/source` 对齐。`properties` JSON 列存底里保留的是工件原始 0-based 值。
 
@@ -57,13 +57,15 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 
 **Transaction 事务边界节点**：`label = "Transaction"` 表示业务方法/函数上的事务边界，例如 Spring `@Transactional` 或 Django `transaction.atomic`；`properties.name` 为边界名，`manager` 表示事务管理器来源，`propagation`、`isolation`、`readOnly` 为可选属性。
 
+**Persistence/Migration 节点**：`label = "Table"` / `"Repository"` 表示由 JPA/SQLAlchemy/Django 等实体和 repository 推导出的持久化语义；`properties.tableName`、`entityName`、`columns`、`repositorySource` 等为可选属性。`label = "Migration"` 表示 Flyway/Liquibase/Alembic/Django migration 等 schema 变更脚本；`properties.migrationType`、`version`、`tables`、`operations` 描述迁移框架、版本、涉及表和 create/alter/drop 等操作。若 migration 涉及的表没有 ORM entity，adapter 可合成 `tableSource = "migration-script"` 的 Table。
+
 ### edges.ndjson — aka contract `GraphRelationship`
 
 ```json
 {"id":"...","sourceId":"...","targetId":"...","type":"CALLS","confidence":0.9,"reason":"...","step":1,"evidence":[{"kind":"...","weight":0.5}]}
 ```
 
-`type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/HTTP_CALLS/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/HAS_TRANSACTION_BOUNDARY/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
+`type` 取值来自 CBM graph，经 adapter 规范化为 aka 关系类型（CONTAINS/DEFINES/CALLS/IMPORTS/INHERITS/IMPLEMENTS/HTTP_CALLS/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/HAS_TRANSACTION_BOUNDARY/MAPS_TO_TABLE/REPOSITORY_FOR/MIGRATES_TABLE/READS/WRITES/…）。`step`/`evidence` 可选，缺失时下游按普通图边处理。
 
 应用语义相关边的当前消费语义：
 
@@ -73,6 +75,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 - `HANDLES_TOOL`：handler 符号/文件 → Tool。`tool_map` 用它列工具处理函数。
 - `HANDLES_COMMAND`：handler 符号/类 → Command。query/context/impact 会按普通定义节点和图边消费，用于识别运维脚本、管理命令和 CLI 入口的业务影响面。
 - `HAS_TRANSACTION_BOUNDARY`：业务方法/函数 → Transaction。context/impact 会按普通图边消费，用于识别 Spring/Django 等服务的事务边界。
+- `MIGRATES_TABLE`：Migration → Table。query/context/impact 会按普通图边消费，用于把 schema migration 变更映射到表、repository、entity 和业务流程风险面。
 
 合成 Community 会追加：
 

@@ -3,6 +3,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
+use super::migration_synth::{detect_migrations, ExistingTable, MigrationTableRef, SynthMigration};
 use super::{
     find_matching_paren, nodes_by_file, read_repo_text, split_top_level_commas, stable_hash,
     EdgeRec, NodeRec, SynthNode,
@@ -12,6 +13,7 @@ use super::{
 pub(super) struct SynthPersistenceGraph {
     tables: Vec<SynthTable>,
     repositories: Vec<SynthRepository>,
+    migrations: Vec<SynthMigration>,
     edges: Vec<EdgeRec>,
 }
 
@@ -21,6 +23,7 @@ impl SynthPersistenceGraph {
             .iter()
             .map(SynthTable::node_rec)
             .chain(self.repositories.iter().map(SynthRepository::node_rec))
+            .chain(self.migrations.iter().map(SynthMigration::node_rec))
             .collect()
     }
 
@@ -33,6 +36,7 @@ impl SynthPersistenceGraph {
                     .iter()
                     .flat_map(SynthRepository::edge_recs),
             )
+            .chain(self.migrations.iter().flat_map(SynthMigration::edge_recs))
             .chain(self.edges.iter().cloned())
             .collect()
     }
@@ -73,6 +77,9 @@ impl SynthTable {
     }
 
     fn edge_recs(&self) -> Vec<EdgeRec> {
+        if self.source == "migration-script" {
+            return Vec::new();
+        }
         vec![EdgeRec {
             id: format!(
                 "{}:maps-entity:{:016x}",
@@ -211,6 +218,7 @@ pub(super) fn synthesize_persistence_from_sources(
     let mut tables: BTreeMap<String, SynthTable> = BTreeMap::new();
     let mut entity_by_name: BTreeMap<String, EntityInfo> = BTreeMap::new();
     let mut repositories: BTreeMap<String, SynthRepository> = BTreeMap::new();
+    let mut migrations: BTreeMap<String, SynthMigration> = BTreeMap::new();
     let mut edges: BTreeMap<String, EdgeRec> = BTreeMap::new();
 
     for (file_path, file_nodes) in &by_file {
@@ -253,6 +261,19 @@ pub(super) fn synthesize_persistence_from_sources(
         }
     }
 
+    let existing_tables = tables.values().map(|table| ExistingTable {
+        id: table.id.clone(),
+        name: table.name.clone(),
+    });
+    for migration in detect_migrations(repo, existing_tables) {
+        for table_ref in &migration.tables {
+            tables
+                .entry(table_ref.table_id.clone())
+                .or_insert_with(|| migration_table_placeholder(table_ref, &migration));
+        }
+        migrations.insert(migration.id.clone(), migration);
+    }
+
     let mut tables: Vec<_> = tables.into_values().collect();
     tables.sort_by(|a, b| {
         a.name
@@ -268,6 +289,7 @@ pub(super) fn synthesize_persistence_from_sources(
     SynthPersistenceGraph {
         tables,
         repositories,
+        migrations: migrations.into_values().collect(),
         edges: edges.into_values().collect(),
     }
 }
@@ -455,6 +477,21 @@ fn relation_edge(source: &EntityInfo, target: &EntityInfo, strategy: &str) -> Ed
             "fromTable": source.table_name,
             "toTable": target.table_name,
         })),
+    }
+}
+
+fn migration_table_placeholder(
+    table_ref: &MigrationTableRef,
+    migration: &SynthMigration,
+) -> SynthTable {
+    SynthTable {
+        id: table_ref.table_id.clone(),
+        name: table_ref.table_name.clone(),
+        source: "migration-script".into(),
+        entity_id: migration.id.clone(),
+        entity_name: migration.name.clone(),
+        file_path: migration.file_path.clone(),
+        columns: Vec::new(),
     }
 }
 

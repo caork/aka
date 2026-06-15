@@ -9,7 +9,7 @@
 
 aka 把仓库解析成「符号节点 + 调用/引用/应用语义边」的图，并建了 BM25 全文索引。MCP server `aka` 提供十五个工具（OpenCode 里显示为 `aka_list_repos`、`aka_query` 等）：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**影响分析**（impact/detect_changes/api_impact/shape_check）、**应用映射**（route_map/graphql_map/tool_map），外加 **管理**（list_repos/analyze）。在已索引仓库里找符号定义、搜实现、评估改动影响面（blast radius）、检查当前 git 改动、查看 API route/GraphQL/tool 映射时优先用它们，比逐文件 grep/read 更省 token、更准。
 
-Route/GraphQL/Tool/Command/Transaction/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等是 GitNexus-like 的索引语义：可用于流程分组、HTTP API/GraphQL operation/工具入口、CLI/management command、事务边界、消费者和响应字段检查，但不是完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义层。索引缺少相应节点/边/字段时，相关工具会返回空结果或提示缺数据。
+Route/GraphQL/Tool/Command/Table/Repository/Migration/Transaction/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/MIGRATES_TABLE/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等是 GitNexus-like 的索引语义：可用于流程分组、HTTP API/GraphQL operation/工具入口、CLI/management command、schema migration、事务边界、消费者和响应字段检查，但不是完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义层。索引缺少相应节点/边/字段时，相关工具会返回空结果或提示缺数据。
 
 ## 第一步：永远先 list_repos
 

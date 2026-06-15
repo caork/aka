@@ -615,7 +615,7 @@ fn symbol_score(member: &ClusterMember) -> u32 {
         "Process" => 22,
         "Class" | "Interface" | "Struct" | "Enum" | "Trait" | "Type" => 18,
         "Function" | "Method" | "Route" | "Tool" | "Command" | "Job" | "Table" | "Repository"
-        | "Cache" | "Event" | "Policy" | "Transaction" => 14,
+        | "Migration" | "Cache" | "Event" | "Policy" | "Transaction" => 14,
         _ => 5,
     };
     let source_weight = if member.start_line.is_some() { 4 } else { 0 };
@@ -628,14 +628,7 @@ fn symbol_score(member: &ClusterMember) -> u32 {
 fn is_symbol_label(label: &str) -> bool {
     !matches!(
         label,
-        "Community"
-            | "File"
-            | "Folder"
-            | "Project"
-            | "Repository"
-            | "Directory"
-            | "Module"
-            | "Package"
+        "Community" | "File" | "Folder" | "Project" | "Directory" | "Module" | "Package"
     )
 }
 
