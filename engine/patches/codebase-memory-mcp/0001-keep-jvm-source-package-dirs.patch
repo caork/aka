@@ -1,8 +1,8 @@
 diff --git a/src/discover/discover.c b/src/discover/discover.c
-index 314c00c..5c0a000 100644
+index 314c00c..f07a33a 100644
 --- a/src/discover/discover.c
 +++ b/src/discover/discover.c
-@@ -131,6 +131,36 @@ static bool str_contains(const char *s, const char *sub) {
+@@ -131,6 +131,39 @@ static bool str_contains(const char *s, const char *sub) {
      return strstr(s, sub) != NULL;
  }
  
@@ -15,22 +15,25 @@ index 314c00c..5c0a000 100644
 +        return false;
 +    }
 +    return str_contains(rel_path, "src/main/java/") ||
++           str_contains(rel_path, "src/main/java") ||
 +           str_contains(rel_path, "src/test/java/") ||
++           str_contains(rel_path, "src/test/java") ||
 +           str_contains(rel_path, "src/main/kotlin/") ||
++           str_contains(rel_path, "src/main/kotlin") ||
 +           str_contains(rel_path, "src/test/kotlin/") ||
++           str_contains(rel_path, "src/test/kotlin") ||
 +           str_contains(rel_path, "src/main/scala/") ||
++           str_contains(rel_path, "src/main/scala") ||
 +           str_contains(rel_path, "src/test/scala/") ||
++           str_contains(rel_path, "src/test/scala") ||
 +           str_contains(rel_path, "src/main/groovy/") ||
++           str_contains(rel_path, "src/main/groovy") ||
 +           str_contains(rel_path, "src/test/groovy/");
 +}
 +
 +static bool keep_fast_source_package_dir(const char *entry_name, const char *rel_path,
 +                                         cbm_index_mode_t mode) {
 +    if (mode == CBM_MODE_FULL || !entry_name || !rel_path || !is_fast_skip_dir_name(entry_name)) {
-+        return false;
-+    }
-+    if (!(strcmp(entry_name, "example") == 0 || strcmp(entry_name, "examples") == 0 ||
-+          strcmp(entry_name, "sample") == 0 || strcmp(entry_name, "samples") == 0)) {
 +        return false;
 +    }
 +    return is_jvm_source_package_path(rel_path);
@@ -51,20 +54,26 @@ index 314c00c..5c0a000 100644
      }
      if (gitignore && cbm_gitignore_matches(gitignore, rel_path, true)) {
 diff --git a/tests/test_discover.c b/tests/test_discover.c
-index af51a92..4b90abc 100644
+index af51a92..3520467 100644
 --- a/tests/test_discover.c
 +++ b/tests/test_discover.c
-@@ -605,6 +605,37 @@ TEST(discover_generic_dirs_fast_mode) {
+@@ -605,6 +605,55 @@ TEST(discover_generic_dirs_fast_mode) {
      PASS();
  }
  
-+TEST(discover_fast_keeps_jvm_example_package_dirs) {
-+    char *base = th_mktempdir("cbm_disc_jvm_example");
++TEST(discover_fast_keeps_jvm_source_package_dirs) {
++    char *base = th_mktempdir("cbm_disc_jvm_package");
 +    ASSERT(base != NULL);
 +
 +    th_write_file(TH_PATH(base, "example/ignored.go"), "package ignored\n");
 +    th_write_file(TH_PATH(base, "src/main/java/com/example/RootApp.java"),
 +                  "package com.example;\nclass RootApp {}\n");
++    th_write_file(TH_PATH(base, "src/main/java/com/example/tools/ToolApp.java"),
++                  "package com.example.tools;\nclass ToolApp {}\n");
++    th_write_file(TH_PATH(base, "src/main/java/com/example/integration/IntegrationApp.java"),
++                  "package com.example.integration;\nclass IntegrationApp {}\n");
++    th_write_file(TH_PATH(base, "src/main/java/com/example/generated/GeneratedApp.java"),
++                  "package com.example.generated;\nclass GeneratedApp {}\n");
 +    th_write_file(TH_PATH(base, "src/test/java/com/example/RootAppTest.java"),
 +                  "package com.example;\nclass RootAppTest {}\n");
 +    th_write_file(TH_PATH(base, "services/order/src/main/java/com/example/App.java"),
@@ -78,11 +87,23 @@ index af51a92..4b90abc 100644
 +
 +    int rc = cbm_discover(base, &opts, &files, &count);
 +    ASSERT_EQ(rc, 0);
-+    ASSERT_EQ(count, 4);
-+    ASSERT_STR_EQ(files[0].rel_path, "services/order/src/main/java/com/example/App.java");
-+    ASSERT_STR_EQ(files[1].rel_path, "services/order/src/test/java/com/example/AppTest.java");
-+    ASSERT_STR_EQ(files[2].rel_path, "src/main/java/com/example/RootApp.java");
-+    ASSERT_STR_EQ(files[3].rel_path, "src/test/java/com/example/RootAppTest.java");
++    ASSERT_EQ(count, 7);
++    const char *expected[] = {
++        "src/main/java/com/example/RootApp.java",
++        "src/main/java/com/example/generated/GeneratedApp.java",
++        "src/main/java/com/example/integration/IntegrationApp.java",
++        "src/main/java/com/example/tools/ToolApp.java",
++        "src/test/java/com/example/RootAppTest.java",
++        "services/order/src/main/java/com/example/App.java",
++        "services/order/src/test/java/com/example/AppTest.java",
++    };
++    for (int i = 0; i < 7; i++) {
++        bool found = false;
++        for (int j = 0; j < count; j++) {
++            found = found || strcmp(files[j].rel_path, expected[i]) == 0;
++        }
++        ASSERT_TRUE(found);
++    }
 +
 +    cbm_discover_free(files, count);
 +    th_cleanup(base);
@@ -92,11 +113,11 @@ index af51a92..4b90abc 100644
  TEST(discover_cbmignore_no_git) {
      char *base = th_mktempdir("cbm_disc_nogit");
      ASSERT(base != NULL);
-@@ -792,6 +817,7 @@ SUITE(discover) {
+@@ -792,6 +841,7 @@ SUITE(discover) {
      RUN_TEST(discover_new_ignore_patterns);
      RUN_TEST(discover_generic_dirs_full_mode);
      RUN_TEST(discover_generic_dirs_fast_mode);
-+    RUN_TEST(discover_fast_keeps_jvm_example_package_dirs);
++    RUN_TEST(discover_fast_keeps_jvm_source_package_dirs);
      RUN_TEST(discover_cbmignore_no_git);
  
      /* Nested .gitignore tests (issue #178) */
