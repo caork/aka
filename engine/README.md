@@ -13,6 +13,8 @@ scripts/sync-engine.sh
 脚本默认使用 aka 维护的 fork `caork/codebase-memory-mcp`，并构建被 git 忽略的
 `engine/codebase-memory-mcp-src/` 当前 checkout，复制可执行文件到
 `engine/codebase-memory-mcp`，并把当前 engine commit 写入 `engine/ENGINE_SHA`。
+随后运行 `scripts/pin-engine-ref.sh`，把 Dockerfile 和 release workflow 的 `CBM_REF`
+同步到同一个 commit，保证 Docker/Windows/macOS 分发用的都是我们维护并验证过的 engine。
 
 解析能力改动直接在 `engine/codebase-memory-mcp-src/` 里做，并提交到
 `caork/codebase-memory-mcp`。日常不要维护 aka 仓库内的 patch 堆；只有月度或显式

@@ -7,7 +7,7 @@
 ## 硬约束（必须遵守）
 
 - **License**：codebase-memory-mcp 为 MIT；aka 按 MIT 口径接入与分发。
-- **CBM engine 直接维护源码，不维护补丁堆**：解析能力改动直接在 `engine/codebase-memory-mcp-src/` 的 C 源码 checkout 中完成并提交；`scripts/sync-engine.sh` 默认只构建当前 checkout，不重置本地分支。只有月度/显式上游同步时使用 `scripts/sync-engine.sh --refresh-upstream` 抓取 `aka` fork 和 `upstream` 上游，然后手工 merge/rebase/cherry-pick 选择性合入上游 feature；脚本不得自动 reset/clean 维护分支。`engine/codebase-memory-mcp*` 二进制不入 git，`engine/ENGINE_SHA` 锚定当前维护的 engine commit。
+- **CBM engine 直接维护源码，不维护补丁堆**：解析能力改动直接在 `engine/codebase-memory-mcp-src/` 的 C 源码 checkout 中完成并提交；`scripts/sync-engine.sh` 默认只构建当前 checkout，不重置本地分支。只有月度/显式上游同步时使用 `scripts/sync-engine.sh --refresh-upstream` 抓取 `aka` fork 和 `upstream` 上游，然后手工 merge/rebase/cherry-pick 选择性合入上游 feature；脚本不得自动 reset/clean 维护分支。`engine/codebase-memory-mcp*` 二进制不入 git，`engine/ENGINE_SHA` 锚定当前维护的 engine commit；engine commit 变化后运行 `scripts/pin-engine-ref.sh` 同步 Docker/release 的 `CBM_REF`。
 - **工件合同** `docs/contracts/artifacts.md` 是 engine adapter↔Rust 的唯一接口：字段只增不改不删；破坏性变更必须 `contractVersion` +1 并双侧同步，Rust 侧永不 import engine 内部模块。
 - **embedding 默认关闭**（用户拍板）：默认纯 BM25；开启只能由用户在 per-repo 设置里手动操作，代码里不许悄悄打开。
 - **图查询不引 Cypher / 嵌入式图数据库**（用户拍板）：aka 服务面使用 SQLite 持久 + 内存 CSR 邻接，就这一条路。

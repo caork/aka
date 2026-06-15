@@ -22,6 +22,8 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/aka
+  CBM_REPO: https://github.com/caork/codebase-memory-mcp.git
+  CBM_REF: 74f9a856e6be14a43305b721c9af742a728a476f
 
 jobs:
   macos-desktop:
@@ -114,10 +116,37 @@ jobs:
         shell: pwsh
         run: choco install zip --no-progress -y
 
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-zlib
+
+      - name: Build Windows CBM engine
+        id: cbm
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          git clone "${CBM_REPO}" cbm-win-src
+          git -C cbm-win-src checkout "${CBM_REF}"
+          make -C cbm-win-src -f Makefile.cbm cbm
+          CBM_BIN="${PWD}/cbm-win-src/build/c/codebase-memory-mcp.exe"
+          if [[ ! -x "${CBM_BIN}" && -x "${PWD}/cbm-win-src/build/c/codebase-memory-mcp" ]]; then
+            cp "${PWD}/cbm-win-src/build/c/codebase-memory-mcp" "${CBM_BIN}"
+          fi
+          test -x "${CBM_BIN}"
+          echo "bin=$(cygpath -m "${CBM_BIN}")" >> "$GITHUB_OUTPUT"
+
       - name: Build Windows desktop GUI
         id: pkg
         shell: bash
         env:
+          AKA_CBM_BIN_WIN_X64: ${{ steps.cbm.outputs.bin }}
           AKA_TAURI_UPDATER: ${{ github.ref_type == 'tag' && 'required' || 'auto' }}
           AKA_UPDATER_ENDPOINT: https://github.com/caork/aka/releases/latest/download/latest.json
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
@@ -128,13 +157,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           [ "${GITHUB_REF_TYPE}" = "tag" ] || VERSION="dev-${GITHUB_SHA::8}"
 
-          CBM_ZIP="codebase-memory-mcp-windows-amd64.zip"
-          curl -fL "https://github.com/DeusData/codebase-memory-mcp/releases/latest/download/${CBM_ZIP}" -o "${CBM_ZIP}"
-          unzip -q "${CBM_ZIP}" -d cbm-win
-          CBM_BIN="$(find cbm-win -type f -name codebase-memory-mcp.exe | head -n 1)"
-          test -f "${CBM_BIN}"
-
-          AKA_CBM_BIN_WIN_X64="${PWD}/${CBM_BIN}" scripts/package-release.sh --version "${VERSION}" --desktop-windows
+          test -f "${AKA_CBM_BIN_WIN_X64}"
+          scripts/package-release.sh --version "${VERSION}" --desktop-windows
 
           echo "setup_name=aka-desktop-${VERSION}-x86_64-pc-windows-msvc-setup.exe" >> "$GITHUB_OUTPUT"
           echo "portable_name=aka-desktop-${VERSION}-x86_64-pc-windows-msvc-portable.zip" >> "$GITHUB_OUTPUT"
@@ -220,7 +244,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build image (linux/amd64)
-        run: docker build -t "$IMAGE:${{ steps.ver.outputs.version }}" .
+        run: docker build --build-arg CBM_REPO="$CBM_REPO" --build-arg CBM_REF="$CBM_REF" -t "$IMAGE:${{ steps.ver.outputs.version }}" .
 
       - name: Smoke test (health / analyze / query)
         run: |
