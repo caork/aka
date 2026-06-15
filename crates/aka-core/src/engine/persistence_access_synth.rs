@@ -224,6 +224,7 @@ fn detect_orm_table_accesses(
     }
     out.extend(detect_python_instance_table_accesses(text, nodes, entities));
     out.extend(detect_python_session_table_accesses(text, nodes, entities));
+    out.extend(detect_python_sqlalchemy_core_writes(text, nodes, entities));
     out.extend(detect_java_repository_table_accesses(
         text,
         nodes,
@@ -469,6 +470,38 @@ fn detect_python_session_table_accesses(
                     strategy: "python-sqlalchemy-session-write".into(),
                 });
             }
+        }
+    }
+    out
+}
+
+fn detect_python_sqlalchemy_core_writes(
+    text: &str,
+    nodes: &[&SynthNode],
+    entities: &BTreeMap<String, TableAccessEntity>,
+) -> Vec<TableAccessDetection> {
+    let mut out = Vec::new();
+    for callee in ["insert", "update", "delete"] {
+        for call in find_call_args(text, callee) {
+            let Some(entity) = split_top_level_commas(call.args)
+                .first()
+                .and_then(|arg| first_type_token(arg))
+                .and_then(|name| entities.get(&name).cloned())
+            else {
+                continue;
+            };
+            let Some(node) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            out.push(TableAccessDetection {
+                table: TableAccessRef {
+                    table_id: entity.table_id,
+                    table_name: entity.table_name,
+                },
+                node_id: node.aka_id.clone(),
+                kind: TableAccessKind::Write,
+                strategy: "python-sqlalchemy-core-write".into(),
+            });
         }
     }
     out

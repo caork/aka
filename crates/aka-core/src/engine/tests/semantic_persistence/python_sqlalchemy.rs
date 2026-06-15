@@ -317,3 +317,111 @@ def purge_order(session, order_id):
         );
     }
 }
+
+#[test]
+fn synthesizes_python_sqlalchemy_core_write_table_access_edges() {
+    let repo = temp_repo("python-sqlalchemy-core-writes");
+    std::fs::write(
+        repo.join("models.py"),
+        r#"from sqlalchemy import Column, Integer
+
+class Order(Base):
+    __tablename__ = "orders"
+    id = Column(Integer, primary_key=True)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("services.py"),
+        r#"from sqlalchemy import delete, insert, update
+from models import Order
+
+def bulk_create(session, rows):
+    session.execute(insert(Order), rows)
+
+async def mark_cancelled(session):
+    await session.execute(update(Order).where(Order.status == "open").values(status="cancelled"))
+
+def purge_cancelled(db):
+    db.execute(delete(Order).where(Order.status == "cancelled"))
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "Order", "models.Order", "models.py"),
+        (3, 5),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "bulk_create",
+        "services.bulk_create",
+        "services.py",
+        (4, 5),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "mark_cancelled",
+        "services.mark_cancelled",
+        "services.py",
+        (7, 8),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "purge_cancelled",
+        "services.purge_cancelled",
+        "services.py",
+        (10, 11),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let table_id = synth
+        .persistence
+        .node_recs()
+        .into_iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+        })
+        .expect("orders table")
+        .id;
+    let edges = synth.persistence.edge_recs();
+    for writer in [
+        "cbm:2:services.bulk_create",
+        "cbm:3:services.mark_cancelled",
+        "cbm:4:services.purge_cancelled",
+    ] {
+        assert!(
+            edges.iter().any(|edge| {
+                edge.edge_type == "WRITES_TABLE"
+                    && edge.source_id == writer
+                    && edge.target_id == table_id
+                    && edge
+                        .evidence
+                        .as_ref()
+                        .and_then(|v| v.get("strategy"))
+                        .and_then(Value::as_str)
+                        == Some("python-sqlalchemy-core-write")
+            }),
+            "expected {writer} to write orders through SQLAlchemy Core"
+        );
+    }
+}
