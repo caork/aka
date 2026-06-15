@@ -208,16 +208,119 @@ fn detect_orm_table_accesses(
             }
         }
     }
+    out.extend(detect_python_instance_table_accesses(text, nodes, entities));
     out
+}
+
+fn detect_python_instance_table_accesses(
+    text: &str,
+    nodes: &[&SynthNode],
+    entities: &BTreeMap<String, TableAccessEntity>,
+) -> Vec<TableAccessDetection> {
+    let mut out = Vec::new();
+    for node in nodes
+        .iter()
+        .copied()
+        .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+    {
+        let Some(body) = node_text_window(text, node) else {
+            continue;
+        };
+        let vars = python_entity_variables(body, entities);
+        for (var, entity) in vars {
+            if python_instance_write_call(body, &var) {
+                out.push(TableAccessDetection {
+                    table: TableAccessRef {
+                        table_id: entity.table_id,
+                        table_name: entity.table_name,
+                    },
+                    node_id: node.aka_id.clone(),
+                    kind: TableAccessKind::Write,
+                    strategy: "python-orm-instance-write".into(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn python_entity_variables(
+    body: &str,
+    entities: &BTreeMap<String, TableAccessEntity>,
+) -> BTreeMap<String, TableAccessEntity> {
+    let mut vars = BTreeMap::new();
+    let entity_list = unique_entities(entities);
+    for line in body.lines() {
+        let Some((lhs, rhs)) = line.split_once('=') else {
+            continue;
+        };
+        if lhs.contains("==") || rhs.trim_start().starts_with('=') {
+            continue;
+        }
+        let Some(var) = python_assignment_name(lhs) else {
+            continue;
+        };
+        let rhs = rhs.trim_start();
+        for entity in &entity_list {
+            if python_rhs_constructs_entity(rhs, &entity.entity_name) {
+                vars.insert(var.to_string(), entity.clone());
+                break;
+            }
+        }
+    }
+    vars
+}
+
+fn python_assignment_name(lhs: &str) -> Option<&str> {
+    let name = lhs.trim().strip_prefix("async ").unwrap_or(lhs.trim());
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric()))
+    .then_some(name)
+}
+
+fn python_rhs_constructs_entity(rhs: &str, entity_name: &str) -> bool {
+    let rhs = rhs
+        .trim_start_matches("await ")
+        .trim_start_matches("return ")
+        .trim_start();
+    rhs.starts_with(&format!("{entity_name}("))
+        || rhs.starts_with(&format!("{entity_name}.objects."))
+        || rhs.starts_with(&format!("{entity_name}.query."))
+}
+
+fn python_instance_write_call(body: &str, var: &str) -> bool {
+    [".save(", ".asave(", ".delete(", ".adelete("]
+        .iter()
+        .any(|method| python_contains_var_method_call(body, var, method))
+}
+
+fn python_contains_var_method_call(body: &str, var: &str, method: &str) -> bool {
+    let needle = format!("{var}{method}");
+    let mut offset = 0usize;
+    while let Some(pos) = body[offset..].find(&needle) {
+        let start = offset + pos;
+        let before = start
+            .checked_sub(1)
+            .and_then(|idx| body.as_bytes().get(idx))
+            .copied()
+            .map(char::from);
+        if before.is_none_or(|ch| !is_python_ident_continue(ch)) {
+            return true;
+        }
+        offset = start + needle.len();
+    }
+    false
+}
+
+fn is_python_ident_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }
 
 fn orm_manager_access_kind(text: &str, start: usize) -> (TableAccessKind, &'static str) {
     let rest = text.get(start..).unwrap_or_default();
-    let window = rest
-        .split(['\n', ';'])
-        .next()
-        .unwrap_or_default()
-        .trim();
+    let window = rest.split(['\n', ';']).next().unwrap_or_default().trim();
     let lower = window.to_ascii_lowercase();
     for marker in [
         ".create(",
@@ -277,12 +380,20 @@ fn sql_table_accesses(
     let mut out: Vec<(TableAccessKind, TableAccessRef, String)> = Vec::new();
     for name in sql_names_after(sql, " from ") {
         if let Some(table) = table_lookup.get(&normalize_table_access_key(&name)) {
-            out.push((TableAccessKind::Read, table.clone(), "sql-select-from".into()));
+            out.push((
+                TableAccessKind::Read,
+                table.clone(),
+                "sql-select-from".into(),
+            ));
         }
     }
     for name in sql_names_after(sql, " join ") {
         if let Some(table) = table_lookup.get(&normalize_table_access_key(&name)) {
-            out.push((TableAccessKind::Read, table.clone(), "sql-select-join".into()));
+            out.push((
+                TableAccessKind::Read,
+                table.clone(),
+                "sql-select-join".into(),
+            ));
         }
     }
     for (keyword, strategy) in [
@@ -400,4 +511,25 @@ fn is_type_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|ch| ch.is_ascii_uppercase())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn node_text_window<'a>(text: &'a str, node: &SynthNode) -> Option<&'a str> {
+    let start_line = node.start_line_key().max(1);
+    let end_line = node.end_line_key().max(start_line);
+    let mut line = 1i64;
+    let mut start = None;
+    let mut end = text.len();
+    for (idx, ch) in text.char_indices() {
+        if line == start_line && start.is_none() {
+            start = Some(idx);
+        }
+        if line > end_line {
+            end = idx;
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    start.map(|start| &text[start.min(text.len())..end.min(text.len())])
 }
