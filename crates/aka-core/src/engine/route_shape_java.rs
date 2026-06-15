@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use super::route_shape_java_builder::{java_builder_response_keys, java_builder_response_types};
 use super::{
     find_call_args, find_matching_paren, is_ident_continue, read_repo_text, read_string_literal,
     skip_ws, split_top_level_commas,
@@ -27,6 +28,7 @@ pub(super) fn extract_java_response_model_keys_for_file(
             keys.extend(fields.iter().cloned());
         }
     }
+    keys.extend(java_builder_response_keys(text));
     keys.into_iter().collect()
 }
 
@@ -68,6 +70,7 @@ fn java_route_response_types(text: &str, file_path: &str) -> Vec<String> {
         }
     }
     out.extend(java_constructed_response_types(text));
+    out.extend(java_builder_response_types(text));
     out.into_iter().collect()
 }
 
@@ -98,7 +101,7 @@ fn java_constructed_response_types(text: &str) -> Vec<String> {
     out.into_iter().collect()
 }
 
-fn is_java_common_constructed_type(name: &str) -> bool {
+pub(super) fn is_java_common_constructed_type(name: &str) -> bool {
     matches!(
         name,
         "String" | "Object" | "ArrayList" | "HashMap" | "LinkedHashMap" | "ResponseEntity"
@@ -348,7 +351,7 @@ fn keyword_boundary_ok(text: &str, start: usize, keyword: &str) -> bool {
     before.is_none_or(|ch| !is_ident_continue(ch)) && after.is_none_or(|ch| !is_ident_continue(ch))
 }
 
-fn read_java_identifier(text: &str, start: usize) -> Option<(&str, usize)> {
+pub(super) fn read_java_identifier(text: &str, start: usize) -> Option<(&str, usize)> {
     let bytes = text.as_bytes();
     let first = *bytes.get(start)? as char;
     if !is_java_ident_start(first) {
@@ -361,7 +364,7 @@ fn read_java_identifier(text: &str, start: usize) -> Option<(&str, usize)> {
     Some((&text[start..end], end))
 }
 
-fn is_java_ident(value: &str) -> bool {
+pub(super) fn is_java_ident(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -409,7 +412,7 @@ fn java_string_arg(arg: &str) -> Option<String> {
         .and_then(|(literal, end)| (skip_ws(trimmed, end) == trimmed.len()).then_some(literal))
 }
 
-fn is_object_key(key: &str) -> bool {
+pub(super) fn is_object_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= 64
         && key
