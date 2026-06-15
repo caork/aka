@@ -2970,41 +2970,34 @@ fn python_router_prefixes_by_file<'a>(
         let Some(text) = read_repo_text(repo, file_path) else {
             continue;
         };
-        let local_by_router = extract_python_apirouter_prefixes(&text);
+        let local_by_router = extract_python_local_router_prefixes(&text);
         if !local_by_router.is_empty() {
             out.entry(file_path.clone()).or_default().local_by_router = local_by_router;
         }
-        if !text.contains("include_router") {
-            continue;
-        }
         let imports = python_router_imports(&text);
-        for include in extract_python_include_router_prefixes(&text) {
-            let targets: Vec<String> = if include.router_expr.ends_with(".router") {
-                let module_name = include
-                    .router_expr
-                    .trim_end_matches(".router")
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or(&include.router_expr);
-                imports
-                    .module_aliases
-                    .get(module_name)
-                    .and_then(|long_key| long_to_files.get(long_key))
-                    .cloned()
-                    .or_else(|| short_to_files.get(module_name).cloned())
-                    .unwrap_or_default()
-            } else if let Some(import) = imports.router_names.get(&include.router_expr) {
-                if let Some(long_key) = &import.long_key {
-                    long_to_files.get(long_key).cloned().unwrap_or_default()
-                } else {
-                    short_to_files
-                        .get(&import.short_key)
+        for include in extract_python_router_includes(&text) {
+            let targets: Vec<String> =
+                if let Some((module_expr, _)) = python_router_module_expr(&include.router_expr) {
+                    let module_name = module_expr.rsplit('.').next().unwrap_or(module_expr);
+                    imports
+                        .module_aliases
+                        .get(module_name)
+                        .and_then(|long_key| long_to_files.get(long_key))
                         .cloned()
+                        .or_else(|| short_to_files.get(module_name).cloned())
                         .unwrap_or_default()
-                }
-            } else {
-                Vec::new()
-            };
+                } else if let Some(import) = imports.router_names.get(&include.router_expr) {
+                    if let Some(long_key) = &import.long_key {
+                        long_to_files.get(long_key).cloned().unwrap_or_default()
+                    } else {
+                        short_to_files
+                            .get(&import.short_key)
+                            .cloned()
+                            .unwrap_or_default()
+                    }
+                } else {
+                    Vec::new()
+                };
             for target in targets {
                 out.entry(target)
                     .or_default()
@@ -3097,7 +3090,7 @@ fn python_router_imports(text: &str) -> PythonRouterImports {
                 continue;
             }
             let (name, alias) = split_python_import_alias(item);
-            if name == "router" {
+            if is_python_router_export_name(name) {
                 let local = alias.unwrap_or(name);
                 let short_key = module
                     .trim_start_matches('.')
@@ -3122,12 +3115,32 @@ fn python_router_imports(text: &str) -> PythonRouterImports {
     imports
 }
 
-fn extract_python_apirouter_prefixes(text: &str) -> HashMap<String, String> {
+fn is_python_router_export_name(name: &str) -> bool {
+    matches!(name, "router" | "bp" | "blueprint")
+}
+
+fn python_router_module_expr(expr: &str) -> Option<(&str, &str)> {
+    let (module_expr, export_name) = expr.rsplit_once('.')?;
+    is_python_router_export_name(export_name).then_some((module_expr, export_name))
+}
+
+fn extract_python_local_router_prefixes(text: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
+    extend_python_constructor_prefixes(text, "APIRouter", "prefix", &mut out);
+    extend_python_constructor_prefixes(text, "Blueprint", "url_prefix", &mut out);
+    out
+}
+
+fn extend_python_constructor_prefixes(
+    text: &str,
+    constructor: &str,
+    prefix_kw: &str,
+    out: &mut HashMap<String, String>,
+) {
     let mut offset = 0usize;
-    while let Some(pos) = text[offset..].find("APIRouter") {
+    while let Some(pos) = text[offset..].find(constructor) {
         let name_start = offset + pos;
-        let name_end = name_start + "APIRouter".len();
+        let name_end = name_start + constructor.len();
         let Some(open_rel) = text[name_start..].find('(') else {
             break;
         };
@@ -3142,13 +3155,12 @@ fn extract_python_apirouter_prefixes(text: &str) -> HashMap<String, String> {
         };
         if let Some(router_name) = assigned_name_before_call(text, name_start) {
             let args = &text[open + 1..close];
-            if let Some(prefix) = keyword_string_arg(args, "prefix") {
+            if let Some(prefix) = keyword_string_arg(args, prefix_kw) {
                 out.insert(router_name, normalize_route_literal(&prefix));
             }
         }
         offset = close + 1;
     }
-    out
 }
 
 fn assigned_name_before_call(text: &str, call_start: usize) -> Option<String> {
@@ -3196,10 +3208,33 @@ fn split_python_import_alias(item: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn extract_python_include_router_prefixes(text: &str) -> Vec<PythonIncludeRouter> {
+fn extract_python_router_includes(text: &str) -> Vec<PythonIncludeRouter> {
+    let mut out = Vec::new();
+    if text.contains("include_router") {
+        out.extend(extract_python_router_mounts(
+            text,
+            ".include_router",
+            "prefix",
+        ));
+    }
+    if text.contains("register_blueprint") {
+        out.extend(extract_python_router_mounts(
+            text,
+            ".register_blueprint",
+            "url_prefix",
+        ));
+    }
+    out
+}
+
+fn extract_python_router_mounts(
+    text: &str,
+    call_name: &str,
+    prefix_kw: &str,
+) -> Vec<PythonIncludeRouter> {
     let mut out = Vec::new();
     let mut offset = 0usize;
-    while let Some(pos) = text[offset..].find(".include_router") {
+    while let Some(pos) = text[offset..].find(call_name) {
         let call_start = offset + pos;
         let Some(open_rel) = text[call_start..].find('(') else {
             break;
@@ -3212,7 +3247,7 @@ fn extract_python_include_router_prefixes(text: &str) -> Vec<PythonIncludeRouter
         let args = &text[open + 1..close];
         if let (Some(router_expr), Some(prefix)) = (
             first_call_argument(args),
-            keyword_string_arg(args, "prefix"),
+            keyword_string_arg(args, prefix_kw),
         ) {
             out.push(PythonIncludeRouter {
                 router_expr,
@@ -3759,12 +3794,45 @@ fn fetch_reason(keys: &[String], fetch_count: u32) -> String {
 }
 
 fn normalize_route_literal(route: &str) -> String {
-    let mut out = route.trim().to_string();
+    let mut out = normalize_flask_route_params(route.trim());
     if out.len() > 1 {
         while out.ends_with('/') {
             out.pop();
         }
     }
+    out
+}
+
+fn normalize_flask_route_params(route: &str) -> String {
+    let mut out = String::with_capacity(route.len());
+    let mut rest = route;
+    while let Some(open) = rest.find('<') {
+        let (before, after_open) = rest.split_at(open);
+        out.push_str(before);
+        let after_open = &after_open[1..];
+        let Some(close) = after_open.find('>') else {
+            out.push('<');
+            out.push_str(after_open);
+            return out;
+        };
+        let raw_param = &after_open[..close];
+        let param = raw_param
+            .rsplit_once(':')
+            .map(|(_, name)| name)
+            .unwrap_or(raw_param)
+            .trim();
+        if param.is_empty() {
+            out.push('<');
+            out.push_str(raw_param);
+            out.push('>');
+        } else {
+            out.push('{');
+            out.push_str(param);
+            out.push('}');
+        }
+        rest = &after_open[close + 1..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -5388,6 +5456,98 @@ router = APIRouter(prefix="/api/orders")
             file.local_by_router.get("router").map(String::as_str),
             Some("/api/orders")
         );
+    }
+
+    #[test]
+    fn synthesizes_flask_blueprint_prefixes() {
+        let repo = temp_repo("flask-blueprint-routes");
+        std::fs::create_dir_all(repo.join("api")).unwrap();
+        std::fs::write(
+            repo.join("app.py"),
+            r#"from flask import Flask
+from api import orders
+
+app = Flask(__name__)
+app.register_blueprint(orders.bp, url_prefix="/api")
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("api/orders.py"),
+            r#"from flask import Blueprint
+
+bp = Blueprint("orders", __name__, url_prefix="/orders")
+
+@bp.get("/<id>")
+def get_order(id: str):
+    return {"id": id}
+"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_node_props(
+            &conn,
+            1,
+            "Function",
+            "get_order",
+            "api.orders.get_order",
+            "api/orders.py",
+            json!({
+                "decorators": ["@bp.get(\"/<id>\")"],
+                "language": "python",
+                "route_method": "GET",
+                "route_path": "/<id>",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let route = synth
+            .routes
+            .iter()
+            .find(|route| route.route == "/api/orders/{id}")
+            .expect("flask blueprint route with app and blueprint prefixes");
+        assert!(
+            synth.routes.iter().all(|route| route.route != "/{id}"),
+            "Flask decorator literals should not create unprefixed duplicate routes"
+        );
+        assert_eq!(route.method.as_deref(), Some("GET"));
+        assert_eq!(
+            route.handler_id.as_deref(),
+            Some("cbm:1:api.orders.get_order")
+        );
+    }
+
+    #[test]
+    fn scans_flask_imported_blueprint_prefixes() {
+        let repo = temp_repo("flask-blueprint-prefix-scan");
+        std::fs::create_dir_all(repo.join("api")).unwrap();
+        std::fs::write(
+            repo.join("app.py"),
+            r#"from flask import Flask
+from api.orders import bp
+
+app = Flask(__name__)
+app.register_blueprint(bp, url_prefix="/api")
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("api/orders.py"),
+            r#"from flask import Blueprint
+
+bp = Blueprint("orders", __name__, url_prefix="/orders")
+"#,
+        )
+        .unwrap();
+
+        let prefixes = python_router_prefixes_by_file(&repo, ["api/orders.py"].into_iter());
+        let file = prefixes.get("api/orders.py").expect("file prefixes");
+        assert_eq!(
+            file.local_by_router.get("bp").map(String::as_str),
+            Some("/orders")
+        );
+        assert_eq!(file.include, ["/api"]);
     }
 
     #[test]
