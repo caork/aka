@@ -488,6 +488,17 @@ fn job_matches_key(name: &str, job: &JobInfo, key: &str) -> bool {
         .is_ok_and(|path| path == job.path)
 }
 
+fn looks_like_local_path(key: &str) -> bool {
+    let path = Path::new(key);
+    path.is_absolute()
+        || key.starts_with("./")
+        || key.starts_with("../")
+        || key == "."
+        || key == ".."
+        || key.contains('/')
+        || key.contains('\\')
+}
+
 fn run_auto_indexer(
     auto: Arc<AutoIndexer>,
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
@@ -1668,9 +1679,14 @@ impl AkaBackend {
         {
             return Ok(vec![entry]);
         }
-        let requested = PathBuf::from(key);
-        let Some(repo) = discover_workspace_root(&requested)? else {
+        if !looks_like_local_path(key) {
             bail!("未注册的仓库: {key}（aka repos 查看）");
+        }
+        let requested = PathBuf::from(key);
+        let repo = match discover_workspace_root(&requested) {
+            Ok(Some(repo)) => repo,
+            Ok(None) => bail!("未注册的仓库: {key}（aka repos 查看）"),
+            Err(err) => bail!("未注册的仓库: {key}（{err:#}）"),
         };
         if let Some(entry) = registry.find(&repo).cloned() {
             return Ok(vec![entry]);
@@ -3284,6 +3300,27 @@ mod tests {
             repo.canonicalize().unwrap().to_string_lossy()
         );
         assert_eq!(repos[0].status, "indexing");
+    }
+
+    #[test]
+    fn explicit_unknown_repo_name_stays_a_registry_error() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let home = temp_repo("workspace-query-name-home");
+        std::env::set_var("AKA_HOME", &home);
+
+        let backend = AkaBackend::new();
+        let err = backend
+            .search(Some("missing-service"), "orders", 5)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("未注册的仓库: missing-service"), "{err}");
+        assert!(
+            !err.contains("resolve workspace path"),
+            "plain repo names must not be treated as filesystem paths: {err}"
+        );
+        assert!(backend.list_repos().unwrap().is_empty());
     }
 
     #[test]
