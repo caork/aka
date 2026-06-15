@@ -3407,6 +3407,61 @@ fn spring_mapping_path(decorators: &[String]) -> Option<String> {
     None
 }
 
+fn feign_client_path(decorators: &[String]) -> Option<String> {
+    for decorator in decorators {
+        let Some(name_end) = decorator.find('(') else {
+            continue;
+        };
+        let name = decorator[..name_end].trim_start_matches('@');
+        if name.rsplit('.').next().unwrap_or(name) != "FeignClient" {
+            continue;
+        }
+        let args_start = name_end + 1;
+        let args_end = decorator.rfind(')').unwrap_or(decorator.len());
+        if args_start >= args_end {
+            return Some("/".into());
+        }
+        let args = &decorator[args_start..args_end];
+        let path = keyword_string_arg(args, "path")
+            .or_else(|| keyword_string_arg(args, "url"))
+            .or_else(|| first_route_literal(args));
+        if let Some(path) = path {
+            return Some(normalize_route_literal(&path));
+        }
+        return Some("/".into());
+    }
+    None
+}
+
+fn request_line_path(decorator: &str) -> Option<String> {
+    let name_end = decorator.find('(')?;
+    let name = decorator[..name_end].trim_start_matches('@');
+    if name.rsplit('.').next().unwrap_or(name) != "RequestLine" {
+        return None;
+    }
+    let args_start = name_end + 1;
+    let args_end = decorator.rfind(')').unwrap_or(decorator.len());
+    if args_start >= args_end {
+        return None;
+    }
+    let literal = first_route_literal(&decorator[args_start..args_end])?;
+    parse_request_line_path(&literal)
+}
+
+fn parse_request_line_path(literal: &str) -> Option<String> {
+    let mut parts = literal.split_whitespace();
+    let method = parts.next()?;
+    if !matches!(
+        method.to_ascii_uppercase().as_str(),
+        "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
+    ) {
+        return None;
+    }
+    let path = parts.next()?;
+    let path = path.split_once('?').map(|(path, _)| path).unwrap_or(path);
+    path.starts_with('/').then(|| normalize_route_literal(path))
+}
+
 fn first_route_literal(text: &str) -> Option<String> {
     let mut i = 0usize;
     while i < text.len() {
@@ -3496,6 +3551,18 @@ fn attach_route_consumers(
         let Some(consumer) = pick_handler_node(&file_nodes) else {
             continue;
         };
+        for (route, node_id) in java_feign_route_consumers(&file_nodes) {
+            for candidate in routes.values_mut().filter(|r| r.route == route) {
+                if candidate.file_path == file_path {
+                    continue;
+                }
+                candidate.consumers.push(SynthRouteConsumer {
+                    node_id: node_id.clone(),
+                    keys: Vec::new(),
+                    fetch_count: 1,
+                });
+            }
+        }
         for (route, occurrences) in route_fetch_counts(&text, &route_names) {
             let keys = extract_accessed_keys_near_route(&text, route);
             for candidate in routes.values_mut().filter(|r| &r.route == route) {
@@ -3524,6 +3591,101 @@ fn attach_route_consumers(
             }
         });
     }
+    remove_parent_route_consumers(routes);
+}
+
+fn remove_parent_route_consumers(routes: &mut BTreeMap<(String, String), SynthRoute>) {
+    let route_names: Vec<String> = routes.values().map(|route| route.route.clone()).collect();
+    let mut removals: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for route in routes.values() {
+        let parent_routes = parent_routes_for(&route.route, &route_names);
+        if parent_routes.is_empty() {
+            continue;
+        }
+        for consumer in &route.consumers {
+            for parent in &parent_routes {
+                removals
+                    .entry(parent.clone())
+                    .or_default()
+                    .insert(consumer.node_id.clone());
+            }
+        }
+    }
+    for route in routes.values_mut() {
+        let Some(remove_consumers) = removals.get(&route.route) else {
+            continue;
+        };
+        route
+            .consumers
+            .retain(|consumer| !remove_consumers.contains(&consumer.node_id));
+    }
+}
+
+fn parent_routes_for(route: &str, all_routes: &[String]) -> Vec<String> {
+    if !route
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .any(is_route_parameter_segment)
+    {
+        return Vec::new();
+    }
+    let mut parents = Vec::new();
+    let mut current = route.trim_end_matches('/').to_string();
+    while let Some((parent, _)) = current.rsplit_once('/') {
+        if parent.is_empty() {
+            break;
+        }
+        if all_routes.iter().any(|route| route == parent) {
+            parents.push(parent.to_string());
+        }
+        current = parent.to_string();
+    }
+    parents
+}
+
+fn java_feign_route_consumers(nodes: &[&SynthNode]) -> Vec<(String, String)> {
+    let mut feign_prefixes: BTreeMap<String, String> = BTreeMap::new();
+    for node in nodes
+        .iter()
+        .filter(|node| matches!(node.label.as_str(), "Class" | "Interface"))
+    {
+        let Some(prefix) = feign_client_path(&node.decorators) else {
+            continue;
+        };
+        feign_prefixes.insert(node.aka_id.clone(), prefix.clone());
+        feign_prefixes.insert(node.qn.clone(), prefix);
+    }
+
+    let mut out = Vec::new();
+    for node in nodes
+        .iter()
+        .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+    {
+        let Some(parent) = node.parent_class.as_ref() else {
+            continue;
+        };
+        let Some(prefix) = feign_prefixes.get(parent) else {
+            continue;
+        };
+        if let Some(route) = node
+            .decorators
+            .iter()
+            .find_map(|decorator| request_line_path(decorator))
+        {
+            out.push((join_route_paths(prefix, &route), node.aka_id.clone()));
+            continue;
+        }
+        if let Some(method_path) = node
+            .route_path
+            .clone()
+            .or_else(|| spring_mapping_path(&node.decorators))
+        {
+            out.push((join_route_paths(prefix, &method_path), node.aka_id.clone()));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn route_fetch_counts<'a>(text: &str, route_names: &'a [String]) -> Vec<(&'a String, u32)> {
@@ -3593,6 +3755,20 @@ fn fetch_literal_windows(text: &str) -> Vec<(usize, &str)> {
         "requests.",
         "httpx.",
         "AsyncClient",
+        "RestTemplate",
+        "restTemplate.",
+        "getForObject(",
+        "getForEntity(",
+        "postForObject(",
+        "postForEntity(",
+        "patchForObject(",
+        "exchange(",
+        "WebClient",
+        "webClient.",
+        ".uri(",
+        ".url(",
+        "HttpRequest.newBuilder",
+        "Request.Builder",
     ] {
         let mut offset = 0usize;
         while let Some(pos) = text[offset..].find(marker) {
@@ -3626,6 +3802,7 @@ fn extract_accessed_keys_near_route(text: &str, route: &str) -> Vec<String> {
                 keys.insert(key);
             }
         }
+        keys.extend(java_getter_property_names(window));
         keys.extend(bracket_string_property_names(window));
     }
     keys.into_iter().take(16).collect()
@@ -3658,6 +3835,54 @@ fn dotted_property_names(text: &str) -> Vec<String> {
         out.push(text[start..i].to_string());
     }
     out
+}
+
+fn java_getter_property_names(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 2 < bytes.len() {
+        if bytes[i] != b'.' || !is_ident_start(bytes[i + 1] as char) {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        i = start + 1;
+        while i < bytes.len() && is_ident_continue(bytes[i] as char) {
+            i += 1;
+        }
+        let name = &text[start..i];
+        let open = skip_ws(text, i);
+        if text.as_bytes().get(open) == Some(&b'(')
+            && text.as_bytes().get(skip_ws(text, open + 1)) == Some(&b')')
+            && is_plain_response_key(name)
+            && !is_java_common_method(name)
+        {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+fn is_java_common_method(name: &str) -> bool {
+    matches!(
+        name,
+        "get"
+            | "post"
+            | "put"
+            | "patch"
+            | "delete"
+            | "request"
+            | "exchange"
+            | "retrieve"
+            | "bodyToMono"
+            | "block"
+            | "toString"
+            | "hashCode"
+            | "equals"
+            | "json"
+            | "text"
+    )
 }
 
 fn bracket_string_property_names(text: &str) -> Vec<String> {
@@ -3706,6 +3931,7 @@ fn is_common_property(key: &str) -> bool {
             | "request"
             | "internal"
             | "AsyncClient"
+            | "class"
             | "map"
             | "filter"
             | "reduce"
@@ -5482,6 +5708,224 @@ public class OrderController {
 
         let edge_types: Vec<_> = route.edge_recs().into_iter().map(|e| e.edge_type).collect();
         assert!(edge_types.contains(&"HANDLES_ROUTE".to_string()));
+    }
+
+    #[test]
+    fn links_java_http_consumers_to_spring_routes() {
+        let repo = temp_repo("java-route-consumers");
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/workers")).unwrap();
+        std::fs::write(
+            repo.join("src/main/java/com/example/orders/OrderController.java"),
+            r#"package com.example.orders;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+    @GetMapping("/{id}")
+    public OrderDto getOrder(String id) {
+        return new OrderDto(id, "ok");
+    }
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("src/main/java/com/example/workers/OrderWorker.java"),
+            r#"package com.example.workers;
+
+import org.springframework.web.client.RestTemplate;
+
+public class OrderWorker {
+    private final RestTemplate restTemplate = new RestTemplate();
+
+    public String syncOrder(String id) {
+        OrderDto order = restTemplate.getForObject("http://orders/api/orders/" + id, OrderDto.class);
+        return order.status();
+    }
+}"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_node_props(
+            &conn,
+            1,
+            "Class",
+            "OrderController",
+            "com.example.orders.OrderController",
+            "src/main/java/com/example/orders/OrderController.java",
+            json!({
+                "decorators": ["@RestController", "@RequestMapping(\"/api/orders\")"],
+                "language": "java",
+            }),
+        );
+        insert_node_props(
+            &conn,
+            2,
+            "Method",
+            "getOrder",
+            "com.example.orders.OrderController.getOrder",
+            "src/main/java/com/example/orders/OrderController.java",
+            json!({
+                "decorators": ["@GetMapping(\"/{id}\")"],
+                "language": "java",
+                "parent_class": "cbm:1:com.example.orders.OrderController",
+                "route_method": "GET",
+                "route_path": "/{id}",
+            }),
+        );
+        insert_edge(&conn, 1, 1, 2, "DEFINES_METHOD");
+        insert_node_props(
+            &conn,
+            3,
+            "Method",
+            "syncOrder",
+            "com.example.workers.OrderWorker.syncOrder",
+            "src/main/java/com/example/workers/OrderWorker.java",
+            json!({
+                "language": "java",
+            }),
+        );
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let route = synth
+            .routes
+            .iter()
+            .find(|route| route.route == "/api/orders/{id}")
+            .expect("spring route with class prefix");
+        let parent_route = synth
+            .routes
+            .iter()
+            .find(|route| route.route == "/api/orders")
+            .expect("spring class prefix route");
+        assert!(
+            parent_route.consumers.is_empty(),
+            "parameterized detail calls should not also attach to parent collection routes"
+        );
+        assert_eq!(route.consumers.len(), 1);
+        assert_eq!(
+            route.consumers[0].node_id,
+            "cbm:3:com.example.workers.OrderWorker.syncOrder"
+        );
+        assert!(route.consumers[0].keys.contains(&"status".to_string()));
+
+        let edge_types: Vec<_> = route.edge_recs().into_iter().map(|e| e.edge_type).collect();
+        assert!(edge_types.contains(&"FETCHES".to_string()));
+    }
+
+    #[test]
+    fn links_java_feign_consumers_to_spring_routes() {
+        let repo = temp_repo("java-feign-consumers");
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+        std::fs::write(
+            repo.join("src/main/java/com/example/orders/OrderController.java"),
+            r#"package com.example.orders;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+    @GetMapping("/{id}")
+    public OrderDto getOrder(String id) {
+        return new OrderDto(id, "ok");
+    }
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("src/main/java/com/example/orders/OrderClient.java"),
+            r#"package com.example.orders;
+
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.GetMapping;
+
+@FeignClient(name = "orders", path = "/api/orders")
+public interface OrderClient {
+    @GetMapping("/{id}")
+    OrderDto getOrder(String id);
+}"#,
+        )
+        .unwrap();
+
+        let conn = test_conn();
+        insert_node_props(
+            &conn,
+            1,
+            "Class",
+            "OrderController",
+            "com.example.orders.OrderController",
+            "src/main/java/com/example/orders/OrderController.java",
+            json!({
+                "decorators": ["@RestController", "@RequestMapping(\"/api/orders\")"],
+                "language": "java",
+            }),
+        );
+        insert_node_props(
+            &conn,
+            2,
+            "Method",
+            "getOrder",
+            "com.example.orders.OrderController.getOrder",
+            "src/main/java/com/example/orders/OrderController.java",
+            json!({
+                "decorators": ["@GetMapping(\"/{id}\")"],
+                "language": "java",
+                "parent_class": "cbm:1:com.example.orders.OrderController",
+                "route_method": "GET",
+                "route_path": "/{id}",
+            }),
+        );
+        insert_edge(&conn, 1, 1, 2, "DEFINES_METHOD");
+        insert_node_props(
+            &conn,
+            3,
+            "Interface",
+            "OrderClient",
+            "com.example.orders.OrderClient",
+            "src/main/java/com/example/orders/OrderClient.java",
+            json!({
+                "decorators": ["@FeignClient(name = \"orders\", path = \"/api/orders\")"],
+                "language": "java",
+            }),
+        );
+        insert_node_props(
+            &conn,
+            4,
+            "Method",
+            "getOrder",
+            "com.example.orders.OrderClient.getOrder",
+            "src/main/java/com/example/orders/OrderClient.java",
+            json!({
+                "decorators": ["@GetMapping(\"/{id}\")"],
+                "language": "java",
+                "parent_class": "cbm:3:com.example.orders.OrderClient",
+                "route_method": "GET",
+                "route_path": "/{id}",
+            }),
+        );
+        insert_edge(&conn, 2, 3, 4, "DEFINES_METHOD");
+
+        let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+        let route = synth
+            .routes
+            .iter()
+            .find(|route| {
+                route.route == "/api/orders/{id}"
+                    && route.handler_id.as_deref()
+                        == Some("cbm:2:com.example.orders.OrderController.getOrder")
+            })
+            .expect("spring provider route");
+        assert!(route
+            .consumers
+            .iter()
+            .any(|consumer| consumer.node_id == "cbm:4:com.example.orders.OrderClient.getOrder"));
     }
 
     #[test]
