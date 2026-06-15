@@ -16,6 +16,13 @@ pub(super) struct TableAccessEntity {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct TableAccessRepository {
+    pub(super) repo_name: String,
+    pub(super) table_id: String,
+    pub(super) table_name: String,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct TableAccessRef {
     pub(super) table_id: String,
     pub(super) table_name: String,
@@ -56,12 +63,18 @@ pub(super) fn detect_table_access_edges(
     nodes: &[&SynthNode],
     table_lookup: &BTreeMap<String, TableAccessRef>,
     entities: &BTreeMap<String, TableAccessEntity>,
+    repositories: &BTreeMap<String, TableAccessRepository>,
 ) -> Vec<EdgeRec> {
     let mut out = Vec::new();
     for detection in detect_sql_literal_table_accesses(text, nodes, table_lookup)
         .into_iter()
         .chain(detect_annotation_table_accesses(nodes, table_lookup))
-        .chain(detect_orm_table_accesses(text, nodes, entities))
+        .chain(detect_orm_table_accesses(
+            text,
+            nodes,
+            entities,
+            repositories,
+        ))
     {
         out.push(table_access_edge(detection));
     }
@@ -140,6 +153,7 @@ fn detect_orm_table_accesses(
     text: &str,
     nodes: &[&SynthNode],
     entities: &BTreeMap<String, TableAccessEntity>,
+    repositories: &BTreeMap<String, TableAccessRepository>,
 ) -> Vec<TableAccessDetection> {
     let mut out = Vec::new();
     for call in find_call_args(text, ".query") {
@@ -209,7 +223,184 @@ fn detect_orm_table_accesses(
         }
     }
     out.extend(detect_python_instance_table_accesses(text, nodes, entities));
+    out.extend(detect_java_repository_table_accesses(
+        text,
+        nodes,
+        repositories,
+    ));
     out
+}
+
+fn detect_java_repository_table_accesses(
+    text: &str,
+    nodes: &[&SynthNode],
+    repositories: &BTreeMap<String, TableAccessRepository>,
+) -> Vec<TableAccessDetection> {
+    let mut out = Vec::new();
+    let file_vars = java_repository_variables(text, repositories);
+    let class_vars = java_class_repository_variables(text, nodes, repositories);
+    for node in nodes
+        .iter()
+        .copied()
+        .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+    {
+        let Some(body) = node_text_window(text, node) else {
+            continue;
+        };
+        let mut vars = file_vars.clone();
+        for file_vars in class_vars.values() {
+            vars.extend(file_vars.clone());
+        }
+        if let Some(parent_vars) = class_vars.get(node.parent_class.as_deref().unwrap_or_default())
+        {
+            vars.extend(parent_vars.clone());
+        }
+        vars.extend(java_repository_variables(body, repositories));
+        for (var, repo) in vars {
+            for (kind, strategy) in java_repository_accesses(body, &var) {
+                out.push(TableAccessDetection {
+                    table: TableAccessRef {
+                        table_id: repo.table_id.clone(),
+                        table_name: repo.table_name.clone(),
+                    },
+                    node_id: node.aka_id.clone(),
+                    kind,
+                    strategy: strategy.into(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn java_class_repository_variables(
+    text: &str,
+    nodes: &[&SynthNode],
+    repositories: &BTreeMap<String, TableAccessRepository>,
+) -> BTreeMap<String, BTreeMap<String, TableAccessRepository>> {
+    let mut out = BTreeMap::new();
+    for node in nodes
+        .iter()
+        .copied()
+        .filter(|node| matches!(node.label.as_str(), "Class" | "Interface"))
+    {
+        let Some(body) = node_text_window(text, node) else {
+            continue;
+        };
+        let vars = java_repository_variables(body, repositories);
+        if !vars.is_empty() {
+            out.insert(node.qn.clone(), vars.clone());
+            out.insert(node.name.clone(), vars);
+        }
+    }
+    out
+}
+
+fn java_repository_variables(
+    body: &str,
+    repositories: &BTreeMap<String, TableAccessRepository>,
+) -> BTreeMap<String, TableAccessRepository> {
+    let mut vars = BTreeMap::new();
+    for repo in repositories.values() {
+        for var in java_variables_of_type(body, &repo.repo_name) {
+            vars.insert(var, repo.clone());
+        }
+    }
+    vars
+}
+
+fn java_variables_of_type(body: &str, type_name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(pos) = body[offset..].find(type_name) {
+        let start = offset + pos;
+        if !java_identifier_boundary_ok(body, start, type_name) {
+            offset = start + type_name.len();
+            continue;
+        }
+        let Some(var) = java_identifier_after_type(body, start + type_name.len()) else {
+            offset = start + type_name.len();
+            continue;
+        };
+        out.push(var.to_string());
+        offset = start + type_name.len();
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn java_identifier_after_type(text: &str, mut idx: usize) -> Option<&str> {
+    while idx < text.len() {
+        let ch = text[idx..].chars().next()?;
+        if ch.is_ascii_whitespace() || matches!(ch, '<' | '>' | ',' | '?' | '&') {
+            idx += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let start = idx;
+    let mut chars = text[start..].char_indices();
+    let (_, first) = chars.next()?;
+    if !is_java_ident_start(first) {
+        return None;
+    }
+    idx = start + first.len_utf8();
+    for (rel, ch) in chars {
+        if !is_java_ident_continue(ch) {
+            break;
+        }
+        idx = start + rel + ch.len_utf8();
+    }
+    Some(&text[start..idx])
+}
+
+fn java_repository_accesses(body: &str, var: &str) -> Vec<(TableAccessKind, &'static str)> {
+    let mut out = Vec::new();
+    let marker = format!("{var}.");
+    let mut offset = 0usize;
+    while let Some(pos) = body[offset..].find(&marker) {
+        let start = offset + pos;
+        if !java_var_reference_boundary_ok(body, start) {
+            offset = start + marker.len();
+            continue;
+        }
+        let method_start = start + marker.len();
+        if let Some((method, end)) = read_java_identifier(body, method_start) {
+            if body[end..].trim_start().starts_with('(') {
+                if java_repository_write_method(method) {
+                    out.push((TableAccessKind::Write, "java-spring-data-repository-write"));
+                } else if java_repository_read_method(method) {
+                    out.push((TableAccessKind::Read, "java-spring-data-repository-read"));
+                }
+            }
+        }
+        offset = start + marker.len();
+    }
+    out.sort_by(|a, b| {
+        a.0.edge_type()
+            .cmp(b.0.edge_type())
+            .then_with(|| a.1.cmp(b.1))
+    });
+    out.dedup();
+    out
+}
+
+fn java_repository_read_method(method: &str) -> bool {
+    method.starts_with("find")
+        || method.starts_with("get")
+        || method.starts_with("read")
+        || method.starts_with("exists")
+        || method.starts_with("count")
+        || matches!(method, "query" | "search")
+}
+
+fn java_repository_write_method(method: &str) -> bool {
+    method.starts_with("save")
+        || method.starts_with("delete")
+        || method.starts_with("remove")
+        || method.starts_with("insert")
+        || method.starts_with("update")
 }
 
 fn detect_python_instance_table_accesses(
@@ -511,6 +702,54 @@ fn is_type_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|ch| ch.is_ascii_uppercase())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn read_java_identifier(text: &str, start: usize) -> Option<(&str, usize)> {
+    let mut chars = text[start..].char_indices();
+    let (_, first) = chars.next()?;
+    if !is_java_ident_start(first) {
+        return None;
+    }
+    let mut end = start + first.len_utf8();
+    for (rel, ch) in chars {
+        if !is_java_ident_continue(ch) {
+            break;
+        }
+        end = start + rel + ch.len_utf8();
+    }
+    Some((&text[start..end], end))
+}
+
+fn java_identifier_boundary_ok(text: &str, start: usize, ident: &str) -> bool {
+    let before = start
+        .checked_sub(1)
+        .and_then(|idx| text.as_bytes().get(idx))
+        .copied()
+        .map(char::from);
+    let after = text
+        .as_bytes()
+        .get(start + ident.len())
+        .copied()
+        .map(char::from);
+    before.is_none_or(|ch| !is_java_ident_continue(ch))
+        && after.is_none_or(|ch| !is_java_ident_continue(ch))
+}
+
+fn java_var_reference_boundary_ok(text: &str, start: usize) -> bool {
+    start
+        .checked_sub(1)
+        .and_then(|idx| text.as_bytes().get(idx))
+        .copied()
+        .map(char::from)
+        .is_none_or(|ch| !is_java_ident_continue(ch))
+}
+
+fn is_java_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || matches!(ch, '_' | '$')
+}
+
+fn is_java_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')
 }
 
 fn node_text_window<'a>(text: &'a str, node: &SynthNode) -> Option<&'a str> {

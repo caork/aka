@@ -3,10 +3,11 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
+use super::migration_synth::{detect_migrations, ExistingTable, MigrationTableRef, SynthMigration};
 use super::persistence_access_synth::{
     detect_table_access_edges, normalize_table_access_key, TableAccessEntity, TableAccessRef,
+    TableAccessRepository,
 };
-use super::migration_synth::{detect_migrations, ExistingTable, MigrationTableRef, SynthMigration};
 use super::{
     find_matching_paren, project_code_nodes_by_file, read_repo_text, split_top_level_commas,
     stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
@@ -280,6 +281,7 @@ pub(super) fn synthesize_persistence_from_sources(
 
     let table_lookup = table_access_lookup(&tables, &entity_by_name);
     let table_access_entities = table_access_entities(&entity_by_name);
+    let table_access_repositories = table_access_repositories(&repositories, &tables);
     for (file_path, file_nodes) in &by_file {
         let text = read_repo_text(repo, file_path).unwrap_or_default();
         for edge in detect_table_access_edges(
@@ -287,6 +289,7 @@ pub(super) fn synthesize_persistence_from_sources(
             file_nodes,
             &table_lookup,
             &table_access_entities,
+            &table_access_repositories,
         ) {
             edges.entry(edge.id.clone()).or_insert(edge);
         }
@@ -491,7 +494,10 @@ fn table_access_lookup(
             table_id: entity.table_id.clone(),
             table_name: entity.table_name.clone(),
         };
-        lookup.insert(normalize_table_access_key(&entity.entity_name), table.clone());
+        lookup.insert(
+            normalize_table_access_key(&entity.entity_name),
+            table.clone(),
+        );
         lookup.insert(normalize_table_access_key(&entity.table_name), table);
     }
     lookup
@@ -514,6 +520,30 @@ fn table_access_entities(
             )
         })
         .collect()
+}
+
+fn table_access_repositories(
+    repositories: &BTreeMap<String, SynthRepository>,
+    tables: &BTreeMap<String, SynthTable>,
+) -> BTreeMap<String, TableAccessRepository> {
+    let mut out = BTreeMap::new();
+    for repo in repositories.values() {
+        let Some(table_id) = &repo.table_id else {
+            continue;
+        };
+        let table_name = tables
+            .get(table_id)
+            .map(|table| table.name.clone())
+            .unwrap_or_else(|| repo.entity_name.clone());
+        let value = TableAccessRepository {
+            repo_name: repo.name.clone(),
+            table_id: table_id.clone(),
+            table_name,
+        };
+        out.insert(repo.name.clone(), value.clone());
+        out.insert(strip_package(&repo.name).to_string(), value);
+    }
+    out
 }
 
 fn migration_table_placeholder(
