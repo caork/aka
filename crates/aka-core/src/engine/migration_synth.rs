@@ -115,10 +115,9 @@ pub(super) fn detect_migrations(
     let mut out = Vec::new();
     let table_lookup = table_lookup(existing_tables);
     if project_sources.has_git_listing() {
-        for file_path in project_sources
-            .iter()
-            .filter(|path| is_migration_path(path) && project_sources.contains_project_file(repo, path))
-        {
+        for file_path in project_sources.iter().filter(|path| {
+            is_migration_path(path) && project_sources.contains_project_file(repo, path)
+        }) {
             let Some(text) = read_repo_text(repo, file_path) else {
                 continue;
             };

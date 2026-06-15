@@ -9,6 +9,8 @@ use super::SynthNode;
 pub(super) struct ProjectSourceSet {
     files: BTreeSet<String>,
     has_git_listing: bool,
+    tracked_files: BTreeSet<String>,
+    untracked_files: BTreeSet<String>,
     test_roots: BTreeSet<String>,
 }
 
@@ -16,11 +18,22 @@ impl ProjectSourceSet {
     pub(super) fn discover(repo: &Path) -> Self {
         let git_files = git_project_files(repo);
         let has_git_listing = git_files.is_some();
-        let files = git_files.unwrap_or_else(|| discover_repo_files(repo));
+        let (files, tracked_files, untracked_files) = if let Some(git_files) = git_files {
+            let files = git_files
+                .tracked
+                .union(&git_files.untracked)
+                .cloned()
+                .collect();
+            (files, git_files.tracked, git_files.untracked)
+        } else {
+            (discover_repo_files(repo), BTreeSet::new(), BTreeSet::new())
+        };
         let test_roots = discover_project_test_roots(repo, &files);
         Self {
             has_git_listing,
             files,
+            tracked_files,
+            untracked_files,
             test_roots,
         }
     }
@@ -34,7 +47,8 @@ impl ProjectSourceSet {
             return false;
         }
         if self.has_git_listing {
-            return self.files.contains(&normalized);
+            return self.tracked_files.contains(&normalized)
+                || self.untracked_files.contains(&normalized);
         }
         repo.join(&normalized).is_file()
     }
@@ -57,6 +71,17 @@ impl ProjectSourceSet {
         self.has_git_listing
     }
 
+    #[cfg(test)]
+    fn is_git_tracked_file(&self, file_path: &str) -> bool {
+        self.tracked_files.contains(&normalize_repo_path(file_path))
+    }
+
+    #[cfg(test)]
+    fn is_git_untracked_file(&self, file_path: &str) -> bool {
+        self.untracked_files
+            .contains(&normalize_repo_path(file_path))
+    }
+
     fn is_project_test_root_file(&self, file_path: &str) -> bool {
         self.test_roots
             .iter()
@@ -64,15 +89,26 @@ impl ProjectSourceSet {
     }
 }
 
-fn git_project_files(repo: &Path) -> Option<BTreeSet<String>> {
+#[derive(Debug)]
+struct GitProjectFiles {
+    tracked: BTreeSet<String>,
+    untracked: BTreeSet<String>,
+}
+
+fn git_project_files(repo: &Path) -> Option<GitProjectFiles> {
+    Some(GitProjectFiles {
+        tracked: git_ls_files(repo, &["--cached"])?,
+        untracked: git_ls_files(repo, &["--others", "--exclude-standard"])?,
+    })
+}
+
+fn git_ls_files(repo: &Path, args: &[&str]) -> Option<BTreeSet<String>> {
     let Ok(output) = GitCommand::new("git")
         .arg("-C")
         .arg(repo)
         .arg("ls-files")
         .arg("-z")
-        .arg("--cached")
-        .arg("--others")
-        .arg("--exclude-standard")
+        .args(args)
         .output()
     else {
         return None;
@@ -416,4 +452,59 @@ pub(super) fn stable_hash(s: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_repo(tag: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aka-source-scan-{tag}-{nonce}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = GitCommand::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    #[test]
+    fn project_source_set_uses_tracked_files_with_untracked_overlay() {
+        let repo = temp_repo("git-overlay");
+        run_git(&repo, &["init"]);
+        std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();
+        std::fs::create_dir_all(repo.join("src/test/java/com/example/ops")).unwrap();
+        std::fs::create_dir_all(repo.join("scratch")).unwrap();
+        std::fs::write(repo.join(".gitignore"), "scratch/\n").unwrap();
+        std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+        let tracked = "src/main/java/com/example/ops/TrackedMaintenance.java";
+        let untracked = "src/main/java/com/example/ops/UntrackedMaintenance.java";
+        let test = "src/test/java/com/example/ops/TestMaintenance.java";
+        let ignored = "scratch/IgnoredMaintenance.java";
+        for file in [tracked, untracked, test, ignored] {
+            std::fs::write(repo.join(file), "class Maintenance {}\n").unwrap();
+        }
+        run_git(&repo, &["add", ".gitignore", "pom.xml", tracked, test]);
+
+        let sources = ProjectSourceSet::discover(&repo);
+
+        assert!(sources.has_git_listing());
+        assert!(sources.is_git_tracked_file(tracked));
+        assert!(sources.is_git_untracked_file(untracked));
+        assert!(sources.contains_project_file(&repo, tracked));
+        assert!(sources.contains_project_file(&repo, untracked));
+        assert!(!sources.contains_project_file(&repo, test));
+        assert!(!sources.contains_project_file(&repo, ignored));
+    }
 }

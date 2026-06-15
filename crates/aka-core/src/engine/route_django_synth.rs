@@ -43,7 +43,10 @@ pub(super) fn django_urlconf_routes_from_repo(
         let Some(text) = read_repo_text(repo, &file_path) else {
             continue;
         };
-        let prefixes = include_prefixes.get(&file_path).cloned().unwrap_or_default();
+        let prefixes = include_prefixes
+            .get(&file_path)
+            .cloned()
+            .unwrap_or_default();
         let mut candidates = django_urlconf_routes_with_handlers(&text, &handlers);
         candidates.extend(drf_router_routes_with_handlers(&text, &handlers));
         if !prefixes.is_empty() {
@@ -286,13 +289,7 @@ fn collect_include_prefixes(
     if let Some(edges) = include_edges.get(file_path) {
         for edge in edges {
             let next_prefix = join_django_routes(prefix, &edge.prefix);
-            collect_include_prefixes(
-                &edge.target_file,
-                &next_prefix,
-                include_edges,
-                stack,
-                out,
-            );
+            collect_include_prefixes(&edge.target_file, &next_prefix, include_edges, stack, out);
         }
     }
     stack.remove(file_path);

@@ -295,12 +295,8 @@ pub(super) fn synthesize_persistence_from_sources(
             edges.entry(edge.id.clone()).or_insert(edge);
         }
     }
-    for edge in detect_mybatis_xml_table_access_edges(
-        repo,
-        &project_sources,
-        nodes,
-        &table_lookup,
-    ) {
+    for edge in detect_mybatis_xml_table_access_edges(repo, &project_sources, nodes, &table_lookup)
+    {
         edges.entry(edge.id.clone()).or_insert(edge);
     }
 

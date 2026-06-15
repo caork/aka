@@ -1462,7 +1462,10 @@ fn analyze_repo_name(summary: &str) -> Option<String> {
         .strip_prefix("indexing scheduled: ")
         .or_else(|| summary.strip_prefix("update scheduled: "))
         .and_then(|rest| rest.split_whitespace().next())
-        .map(|name| name.trim_matches(|ch: char| matches!(ch, ':' | ',' | ';')).to_string())
+        .map(|name| {
+            name.trim_matches(|ch: char| matches!(ch, ':' | ',' | ';'))
+                .to_string()
+        })
         .filter(|name| !name.is_empty())
 }
 
