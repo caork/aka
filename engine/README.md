@@ -16,6 +16,6 @@ scripts/sync-engine.sh
 
 解析能力改动直接在 `engine/codebase-memory-mcp-src/` 里做，并提交到
 `caork/codebase-memory-mcp`。日常不要维护 aka 仓库内的 patch 堆；只有月度或显式
-上游同步时，才用 `scripts/sync-engine.sh --refresh-upstream` 抓取 origin/upstream，
+上游同步时，才用 `scripts/sync-engine.sh --refresh-upstream` 抓取 `aka` fork 和 `upstream`，
 随后手工 merge/rebase/cherry-pick 选择性吸收上游 feature。脚本不会 reset 或 clean
 维护中的 checkout。不要把大体积源码或构建产物塞进本仓库。
