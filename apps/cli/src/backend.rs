@@ -54,6 +54,7 @@ const DEFINITION_LABELS: &[&str] = &[
     "Trait",
     "Route",
     "Tool",
+    "Job",
     "Resource",
 ];
 

@@ -614,7 +614,7 @@ fn symbol_score(member: &ClusterMember) -> u32 {
     let label_weight = match member.label.as_str() {
         "Process" => 22,
         "Class" | "Interface" | "Struct" | "Enum" | "Trait" | "Type" => 18,
-        "Function" | "Method" | "Route" | "Tool" => 14,
+        "Function" | "Method" | "Route" | "Tool" | "Job" => 14,
         _ => 5,
     };
     let source_weight = if member.start_line.is_some() { 4 } else { 0 };

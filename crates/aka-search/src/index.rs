@@ -667,6 +667,7 @@ fn is_symbol_label(label: &str) -> bool {
             | "Variable"
             | "Route"
             | "Tool"
+            | "Job"
             | "Resource"
     )
 }
@@ -684,6 +685,7 @@ fn is_primary_code_symbol(label: &str) -> bool {
             | "Type"
             | "Route"
             | "Tool"
+            | "Job"
     )
 }
 
@@ -697,7 +699,7 @@ fn is_container_label(label: &str) -> bool {
 fn node_search_text(node: &NodeRec) -> String {
     if !matches!(
         node.label.as_str(),
-        "Process" | "Route" | "Tool" | "Community" | "Resource"
+        "Process" | "Route" | "Tool" | "Job" | "Community" | "Resource"
     ) {
         return String::new();
     }
@@ -706,6 +708,10 @@ fn node_search_text(node: &NodeRec) -> String {
     push_prop_str(&mut parts, &node.properties, "summary");
     push_prop_str(&mut parts, &node.properties, "description");
     push_prop_str(&mut parts, &node.properties, "processType");
+    push_prop_str(&mut parts, &node.properties, "jobType");
+    push_prop_str(&mut parts, &node.properties, "schedule");
+    push_prop_str(&mut parts, &node.properties, "handlerName");
+    push_prop_str(&mut parts, &node.properties, "strategy");
     push_prop_str(&mut parts, &node.properties, "route");
     push_prop_str(&mut parts, &node.properties, "tool");
     push_prop_array(&mut parts, &node.properties, "trace");
@@ -839,7 +845,9 @@ fn truncate_utf8(s: &str, limit: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_utf8;
+    use super::{truncate_utf8, SearchIndex, SearchIndexWriter};
+    use aka_core::types::NodeRec;
+    use serde_json::{Map, Value};
 
     #[test]
     fn truncate_respects_char_boundary() {
@@ -848,5 +856,44 @@ mod tests {
         assert!(t.len() <= 4);
         assert_eq!(t, "a中");
         assert_eq!(truncate_utf8("short", 2048), "short");
+    }
+
+    #[test]
+    fn indexes_job_application_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut props = Map::new();
+        props.insert("name".into(), Value::String("orders.cleanup".into()));
+        props.insert("jobType".into(), Value::String("apscheduler-job".into()));
+        props.insert(
+            "schedule".into(),
+            Value::String("trigger=cron,hour=3".into()),
+        );
+        props.insert("handlerName".into(), Value::String("cleanup_orders".into()));
+        props.insert(
+            "strategy".into(),
+            Value::String("python-apscheduler-scheduled-job".into()),
+        );
+        props.insert("filePath".into(), Value::String("tasks.py".into()));
+
+        let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
+        writer
+            .add_nodes(
+                [NodeRec {
+                    id: "job:orders-cleanup".into(),
+                    label: "Job".into(),
+                    properties: props,
+                }]
+                .into_iter(),
+            )
+            .unwrap();
+        writer.commit().unwrap();
+        drop(writer);
+
+        let index = SearchIndex::open(dir.path()).unwrap();
+        let hits = index.search("orders cleanup hour 3", 5).unwrap();
+        let hit = hits.first().expect("job search hit");
+        assert_eq!(hit.node_id, "job:orders-cleanup");
+        assert_eq!(hit.label, "Job");
+        assert_eq!(hit.name, "orders.cleanup");
     }
 }
