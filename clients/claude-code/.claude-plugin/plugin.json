@@ -1,14 +1,14 @@
 {
   "name": "aka",
-  "version": "0.1.0",
-  "description": "aka 代码知识引擎：BM25 代码检索 + 调用图（定义/引用/影响面）。捆绑 aka MCP server（stdio）与使用策略 skill。需要本机已安装 aka 二进制并加入 PATH。",
+  "version": "0.1.12",
+  "description": "aka 代码知识引擎：BM25 代码检索 + 调用图（定义/引用/影响面）。捆绑 AKA 桌面端本地 HTTP MCP 配置与使用策略 skill。",
   "author": {
     "name": "caork",
     "url": "https://github.com/caork/aka"
   },
   "homepage": "https://github.com/caork/aka",
   "repository": "https://github.com/caork/aka",
-  "license": "PolyForm-Noncommercial-1.0.0",
+  "license": "MIT",
   "keywords": ["code-search", "knowledge-graph", "mcp", "tree-sitter", "bm25"],
   "mcpServers": "./.mcp.json"
 }
