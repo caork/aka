@@ -334,6 +334,123 @@ def load_manifest():
 }
 
 #[test]
+fn synthesizes_java_aws_s3_resources() {
+    let repo = temp_repo("java-aws-s3-resources");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/storage")).unwrap();
+    let file = "src/main/java/com/example/storage/ReceiptStorage.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.storage;
+
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+
+class ReceiptStorage {
+    private final AmazonS3 amazonS3;
+    private final S3Client s3;
+
+    void writeLegacy(String orderId, java.io.File file) {
+        amazonS3.putObject("order-artifacts", "legacy/" + orderId + ".json", file);
+    }
+
+    Object readLegacy(String key) {
+        return amazonS3.getObject(new GetObjectRequest("order-artifacts", "manifests/latest.json"));
+    }
+
+    void writeSdk2(String orderId) {
+        PutObjectRequest request = PutObjectRequest.builder()
+            .bucket("order-artifacts")
+            .key("receipts/" + orderId + ".json")
+            .build();
+        s3.putObject(request, software.amazon.awssdk.core.sync.RequestBody.empty());
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Method",
+            "writeLegacy",
+            "com.example.storage.ReceiptStorage.writeLegacy",
+            file,
+        ),
+        (12, 14),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "readLegacy",
+            "com.example.storage.ReceiptStorage.readLegacy",
+            file,
+        ),
+        (16, 18),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
+            "writeSdk2",
+            "com.example.storage.ReceiptStorage.writeSdk2",
+            file,
+        ),
+        (20, 26),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let legacy_write = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "s3://order-artifacts/legacy/{param}.json")
+        .expect("legacy S3 put resource");
+    assert_eq!(legacy_write.resource_type, "s3");
+    let legacy_edge = legacy_write
+        .edge_recs()
+        .into_iter()
+        .find(|edge| edge.source_id == "cbm:1:com.example.storage.ReceiptStorage.writeLegacy")
+        .expect("legacy S3 put edge");
+    assert_eq!(legacy_edge.edge_type, "ACCESSES_RESOURCE");
+    assert_eq!(
+        legacy_edge.evidence.as_ref().unwrap()["strategy"],
+        "java-aws-s3-put-object"
+    );
+
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "s3://order-artifacts/manifests/latest.json"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.source_id == "cbm:2:com.example.storage.ReceiptStorage.readLegacy"
+                    && edge.evidence.as_ref().unwrap()["strategy"] == "java-aws-s3-get-object"
+            })
+    }));
+
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "s3://order-artifacts/receipts/{param}.json"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.source_id == "cbm:3:com.example.storage.ReceiptStorage.writeSdk2"
+                    && edge.evidence.as_ref().unwrap()["strategy"] == "java-aws-s3-put-object"
+            })
+    }));
+}
+
+#[test]
 fn synthesizes_java_external_http_resources() {
     let repo = temp_repo("java-resources");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/inventory")).unwrap();
