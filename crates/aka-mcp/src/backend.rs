@@ -215,6 +215,28 @@ pub struct SymbolRef {
     pub depth: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameEdit {
+    pub file_path: String,
+    pub line: u32,
+    pub column: u32,
+    pub before: String,
+    pub after: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenamePlan {
+    pub status: String,
+    pub target: String,
+    pub replacement: String,
+    pub dry_run: bool,
+    pub edits: Vec<RenameEdit>,
+    pub changed_files: usize,
+    pub applied: bool,
+    pub message: Option<String>,
+    pub candidates: Vec<SearchHit>,
+}
+
 /// 符号所属的执行流程（图里 label = `Process` 的合成节点，调用链「入口→终点」）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcessHit {
@@ -509,6 +531,21 @@ pub trait Backend: Send + Sync + 'static {
                 Ok(out)
             }
         }
+    }
+
+    /// Graph-aware rename. Implementations should use the indexed definition +
+    /// reference graph to restrict candidate files/locations, return
+    /// `status="ambiguous"` with candidates when the selector is not narrow
+    /// enough, and only write files when `dry_run=false`.
+    fn rename_symbol(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        replacement: &str,
+        dry_run: bool,
+    ) -> anyhow::Result<RenamePlan> {
+        let _ = (repo, selector, replacement, dry_run);
+        anyhow::bail!("rename not supported by this backend")
     }
 
     /// 节点所属的执行流程（沿 `符号-[STEP_IN_PROCESS]->Process` 边查归属）。

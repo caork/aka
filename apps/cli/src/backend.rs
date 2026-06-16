@@ -24,6 +24,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use crate::rename;
 use aka_core::{
     aka_home, clamp_render_nodes, load_index_state, repo_dir_name, ArtifactStats, EngineEvent,
     IndexState, Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
@@ -32,8 +33,9 @@ use aka_graph::{Adjacency, GraphStore, NodeRow};
 use aka_mcp::{
     backend::dedup_symbol_refs, Backend, ChangeDetection, ChangedRange, ChangedSymbol,
     CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, GraphqlMapEntry,
-    ImpactDirection, ProcessHit, QueryEnrichment, RepoInfo, RepoProgress, RepoSettingsUpdate,
-    RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
+    ImpactDirection, ProcessHit, QueryEnrichment, RenamePlan, RepoInfo, RepoProgress,
+    RepoSettingsUpdate, RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector,
+    ToolMapEntry,
 };
 use aka_search::SearchIndex;
 use git2::{
@@ -71,6 +73,7 @@ const DEFINITION_LABELS: &[&str] = &[
 const JOB_LOG_LIMIT: usize = 80;
 const AUTO_INDEX_SCAN_INTERVAL: Duration = Duration::from_secs(4);
 const AUTO_INDEX_DEBOUNCE: Duration = Duration::from_secs(3);
+const RENAME_REFERENCE_LIMIT: usize = 500;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -1121,6 +1124,10 @@ fn read_source_slice(
         "lines": lines,
         "truncated": truncated,
     }))
+}
+
+fn should_disambiguate_for_backend(selector: &SymbolSelector, defs: &[SearchHit]) -> bool {
+    defs.len() > 1 && !selector.is_narrowed()
 }
 
 /// `/api/file/symbols` 合同：`rows`（已按 start_line 升序）滤掉无行号节点
@@ -2203,6 +2210,127 @@ impl Backend for AkaBackend {
         dedup_symbol_refs(&mut out);
         out.truncate(limit);
         Ok(out)
+    }
+
+    fn rename_symbol(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        replacement: &str,
+        dry_run: bool,
+    ) -> Result<RenamePlan> {
+        rename::validate_identifier_name(replacement)?;
+        if !dry_run && repo.is_none() {
+            bail!("rename dry_run=false requires an explicit repo or repo_path");
+        }
+        let defs = self.find_definition_by_selector(repo, selector)?;
+        if should_disambiguate_for_backend(selector, &defs) {
+            return Ok(RenamePlan {
+                status: "ambiguous".into(),
+                target: selector.label().to_string(),
+                replacement: replacement.to_string(),
+                dry_run,
+                edits: Vec::new(),
+                changed_files: 0,
+                applied: false,
+                message: Some("Multiple definitions match; pass uid/file_path/kind.".into()),
+                candidates: defs,
+            });
+        }
+        let Some(target) = selector
+            .symbol
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| defs.first().map(|h| h.name.as_str()))
+        else {
+            bail!("rename requires a symbol name or a uid resolving to a named symbol");
+        };
+        if target == replacement {
+            return Ok(RenamePlan {
+                status: "ok".into(),
+                target: target.to_string(),
+                replacement: replacement.to_string(),
+                dry_run,
+                edits: Vec::new(),
+                changed_files: 0,
+                applied: false,
+                message: Some("Replacement is identical to target.".into()),
+                candidates: Vec::new(),
+            });
+        }
+
+        let mut edits = Vec::new();
+        let mut changed_files = 0usize;
+        for handle in self.targets(repo)? {
+            let handle_defs = handle
+                .definition_rows_by_selector(selector)?
+                .into_iter()
+                .map(|r| row_to_hit(&r, 1.0))
+                .collect::<Vec<_>>();
+            let handle_refs = if handle_defs.is_empty() {
+                Vec::new()
+            } else {
+                let mut out = Vec::new();
+                for node in handle.resolve_selector(selector)? {
+                    for nb in handle.adj.neighbors(node) {
+                        if nb.outgoing {
+                            continue;
+                        }
+                        if let Some(row) = handle.node_row(nb.node)? {
+                            out.push(SymbolRef {
+                                node_id: row.id.clone(),
+                                name: row.name.clone().unwrap_or_default(),
+                                label: row.label.clone(),
+                                file_path: row.file_path.clone().unwrap_or_default(),
+                                start_line: row.start_line.unwrap_or(0),
+                                edge_type: nb.edge_type.to_string(),
+                                depth: 1,
+                            });
+                        }
+                        if out.len() >= RENAME_REFERENCE_LIMIT {
+                            break;
+                        }
+                    }
+                    if out.len() >= RENAME_REFERENCE_LIMIT {
+                        break;
+                    }
+                }
+                out
+            };
+            let ranges_by_file = rename::collect_file_ranges(&handle_defs, &handle_refs);
+            for (file_path, ranges) in &ranges_by_file {
+                if let Some(mut file_edits) = rename::apply_file_plan(
+                    &handle.entry.repo_path,
+                    file_path,
+                    ranges,
+                    target,
+                    replacement,
+                    dry_run,
+                )? {
+                    changed_files += 1;
+                    edits.append(&mut file_edits);
+                }
+            }
+        }
+        edits.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then_with(|| a.line.cmp(&b.line))
+                .then_with(|| a.column.cmp(&b.column))
+        });
+        Ok(RenamePlan {
+            status: "ok".into(),
+            target: target.to_string(),
+            replacement: replacement.to_string(),
+            dry_run,
+            changed_files,
+            applied: !dry_run && !edits.is_empty(),
+            message: (edits.is_empty()).then(|| {
+                "No identifier occurrences found in indexed definition/reference windows.".into()
+            }),
+            edits,
+            candidates: Vec::new(),
+        })
     }
 
     fn processes_of(&self, repo: Option<&str>, node_id: &str) -> Result<Vec<ProcessHit>> {

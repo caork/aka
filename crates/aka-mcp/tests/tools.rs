@@ -6,7 +6,7 @@ use aka_mcp::backend::{Backend, RepoInfo, SearchHit, SymbolRef};
 use aka_mcp::service::{
     AkaMcpServer, AnalyzeParams, ApiImpactParams, AugmentParams, CodeSearchParams,
     DetectChangesParams, GraphqlMapParams, ImpactParams, ImportRepoParams, QueryParams,
-    ReferencesParams, RouteMapParams, SymbolParams, ToolMapParams, UpdateRepoParams,
+    ReferencesParams, RenameParams, RouteMapParams, SymbolParams, ToolMapParams, UpdateRepoParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -744,6 +744,60 @@ async fn augment_shape() {
         .map(|r| &r["name"])
         .collect();
     assert_eq!(callees, [&Value::from("handle_request")]);
+}
+
+#[tokio::test]
+async fn rename_shape_defaults_to_dry_run() {
+    let res = server()
+        .rename(Parameters(RenameParams {
+            repo: Some("fixture".into()),
+            symbol: Some("parse_config".into()),
+            new_symbol: "parse_settings".into(),
+            uid: None,
+            file_path: None,
+            kind: None,
+            dry_run: true,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["target"], "parse_config");
+    assert_eq!(v["replacement"], "parse_settings");
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["applied"], false);
+    assert_eq!(v["changed_files"], 1);
+    assert_eq!(v["count"], 1);
+    let edit = &v["edits"].as_array().unwrap()[0];
+    assert_eq!(edit["file"], "src/handler.rs");
+    assert_eq!(edit["line"], 12);
+    assert_eq!(edit["column"], 9);
+    assert!(edit["before"].as_str().unwrap().contains("parse_config"));
+    assert!(edit["after"].as_str().unwrap().contains("parse_settings"));
+}
+
+#[tokio::test]
+async fn rename_reports_ambiguous_candidates() {
+    let res = server()
+        .rename(Parameters(RenameParams {
+            repo: Some("fixture".into()),
+            symbol: Some("duplicate".into()),
+            new_symbol: "deduped".into(),
+            uid: None,
+            file_path: None,
+            kind: None,
+            dry_run: true,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["status"], "ambiguous");
+    assert_eq!(v["count"], 0);
+    assert_eq!(v["candidates"].as_array().unwrap().len(), 2);
+    assert!(v["message"]
+        .as_str()
+        .unwrap()
+        .contains("Multiple definitions"));
 }
 
 // ---- 错误路径：Backend 故障必须变成 in-band tool error，不能炸协议 ----

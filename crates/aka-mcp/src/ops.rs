@@ -9,8 +9,8 @@ use serde::Serialize;
 
 use crate::backend::{
     Backend, ChangeDetection, ChangedRange, ChangedSymbol, CodeLineMatch, CodeSearchHit,
-    DirectoryCount, GraphqlMapEntry, ImpactDirection, ProcessHit, RepoInfo, RepoProgress,
-    RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
+    DirectoryCount, GraphqlMapEntry, ImpactDirection, ProcessHit, RenameEdit, RenamePlan, RepoInfo,
+    RepoProgress, RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
 };
 
 /// 检索命中（短字段名版）。
@@ -344,6 +344,61 @@ pub struct ImpactOut {
     pub by_depth: Vec<DepthSummaryOut>,
     /// 按 affected_symbols 降序；同数按 process_id 升序保证确定性。
     pub affected_processes: Vec<AffectedProcessOut>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct RenameEditOut {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub before: String,
+    pub after: String,
+}
+
+impl From<RenameEdit> for RenameEditOut {
+    fn from(edit: RenameEdit) -> Self {
+        Self {
+            file: edit.file_path,
+            line: edit.line,
+            column: edit.column,
+            before: edit.before,
+            after: edit.after,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RenameOut {
+    pub status: String,
+    pub target: String,
+    pub replacement: String,
+    pub dry_run: bool,
+    pub applied: bool,
+    pub changed_files: usize,
+    pub edits: Vec<RenameEditOut>,
+    pub count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<CandidateOut>,
+}
+
+impl From<RenamePlan> for RenameOut {
+    fn from(plan: RenamePlan) -> Self {
+        let count = plan.edits.len();
+        Self {
+            status: plan.status,
+            target: plan.target,
+            replacement: plan.replacement,
+            dry_run: plan.dry_run,
+            applied: plan.applied,
+            changed_files: plan.changed_files,
+            edits: plan.edits.into_iter().map(Into::into).collect(),
+            count,
+            message: plan.message,
+            candidates: plan.candidates.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -1350,6 +1405,17 @@ pub fn impact_select(
         by_depth,
         affected_processes,
     })
+}
+
+pub fn rename_symbol(
+    b: &dyn Backend,
+    repo: Option<&str>,
+    selector: &SymbolSelector,
+    replacement: &str,
+    dry_run: bool,
+) -> anyhow::Result<RenameOut> {
+    Ok(b.rename_symbol(repo, selector, replacement, dry_run)?
+        .into())
 }
 
 /// definition + callers + callees + references 拼成一个结构化结果。

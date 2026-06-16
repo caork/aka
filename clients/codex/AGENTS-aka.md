@@ -1,6 +1,6 @@
 # aka Code Graph Usage For Codex
 
-Use aka MCP tools when you need codebase-level search, symbol context, impact analysis, route/API mapping, GraphQL/tool mapping, or change-risk checks. Prefer aka over broad manual grep/read loops in large repositories.
+Use aka MCP tools when you need codebase-level search, symbol context, safe rename planning, impact analysis, route/API mapping, GraphQL/tool mapping, or change-risk checks. Prefer aka over broad manual grep/read loops in large repositories.
 
 ## First Step
 
@@ -23,6 +23,7 @@ aka can index the current project without the user opening the desktop import fl
 - Exact symbol definition -> `find_definition`.
 - A symbol's definition, callers, callees, references, and flows in one call -> `context`.
 - Direct references only -> `search_references`.
+- Safe symbol rename -> `rename` with default `dry_run:true`; review `edits/candidates`, optionally run `impact`, then apply with `dry_run:false` only for an explicit `repo`/`repo_path`.
 - Refactor/blast-radius check -> `impact`.
 - Current git diff to touched symbols and affected flows -> `detect_changes`.
 - Route handlers, consumers, middleware, response keys, and API risk -> `route_map`, then `api_impact` or `shape_check`.
@@ -38,6 +39,7 @@ Use code-like query terms. For example, prefer `parse ndjson stream` or `OrderRe
 - `query` returns process groups plus matched symbols. Prefer `processes` and `process_symbols` before the backward-compatible flat `hits`.
 - `search_code` returns raw matched lines and surrounding context. Use it when you need evidence that text actually appears.
 - `impact` and `search_references` return graph refs with `edge` and `depth`; `depth=1` is direct, larger depth is transitive.
+- `rename` returns `{status,target,replacement,dry_run,applied,changed_files,count,edits,candidates?,message?}`. If `status` is `ambiguous`, pass `uid`, `file_path`, or `kind` from `query`/`find_definition`.
 - `detect_changes` maps diff hunks to indexed symbols and affected execution flows.
 - Route/GraphQL/tool/shape tools may return empty or "missing data" results when the index lacks that semantic layer. Treat that as unknown risk, not as proof of no callers or no API risk.
 
@@ -49,4 +51,5 @@ After aka gives `file:line`, read only the relevant local slice around that loca
 - Do not assume a repository must be indexed manually in the desktop UI; prefer automatic roots, then `analyze` as fallback.
 - Do not use `query` for exact symbol lookup when `find_definition` fits.
 - Do not use only one-hop `search_references` for refactor safety; use `impact`.
+- Do not call `rename` with `dry_run:false` before reviewing the dry-run plan and candidates.
 - Do not describe aka as full GitNexus/Cypher equivalence. It has GitNexus-like semantic nodes/edges for many Java/Python business-service cases, but tools should report missing semantic data honestly.

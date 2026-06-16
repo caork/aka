@@ -18,8 +18,9 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use aka_mcp::{
     Backend, ChangeDetection, ChangedRange, ChangedSymbol, CodeLineMatch, CodeSearchHit,
-    CodeSearchResult, DirectoryCount, GraphqlMapEntry, ProcessHit, QueryEnrichment, RepoInfo,
-    RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, ToolMapEntry,
+    CodeSearchResult, DirectoryCount, GraphqlMapEntry, ProcessHit, QueryEnrichment, RenameEdit,
+    RenamePlan, RepoInfo, RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector,
+    ToolMapEntry,
 };
 
 #[derive(Debug, Clone)]
@@ -511,6 +512,51 @@ impl Backend for FixtureBackend {
         let mut refs = Self::walk(repo, symbol, depth, true);
         refs.truncate(limit);
         Ok(refs)
+    }
+
+    fn rename_symbol(
+        &self,
+        repo: Option<&str>,
+        selector: &SymbolSelector,
+        replacement: &str,
+        dry_run: bool,
+    ) -> anyhow::Result<RenamePlan> {
+        let defs = self.find_definition_by_selector(repo, selector)?;
+        if defs.len() > 1 && !selector.is_narrowed() {
+            return Ok(RenamePlan {
+                status: "ambiguous".into(),
+                target: selector.label().into(),
+                replacement: replacement.into(),
+                dry_run,
+                edits: Vec::new(),
+                changed_files: 0,
+                applied: false,
+                message: Some("Multiple definitions match; pass uid/file_path/kind.".into()),
+                candidates: defs,
+            });
+        }
+        let target = selector
+            .symbol
+            .as_deref()
+            .or_else(|| defs.first().map(|h| h.name.as_str()))
+            .unwrap_or_default();
+        Ok(RenamePlan {
+            status: "ok".into(),
+            target: target.into(),
+            replacement: replacement.into(),
+            dry_run,
+            edits: vec![RenameEdit {
+                file_path: "src/handler.rs".into(),
+                line: 12,
+                column: 9,
+                before: format!("let config = {target}(req.path());"),
+                after: format!("let config = {replacement}(req.path());"),
+            }],
+            changed_files: 1,
+            applied: !dry_run,
+            message: None,
+            candidates: Vec::new(),
+        })
     }
 
     fn analyze(&self, repo_path: &str) -> anyhow::Result<String> {

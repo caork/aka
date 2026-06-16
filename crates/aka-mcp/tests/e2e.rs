@@ -15,7 +15,7 @@ mod support;
 
 use support::fixture_backend::FixtureBackend;
 
-const EXPECTED_TOOLS: [&str; 17] = [
+const EXPECTED_TOOLS: [&str; 18] = [
     "list_repos",
     "query",
     "search_code",
@@ -23,6 +23,7 @@ const EXPECTED_TOOLS: [&str; 17] = [
     "find_definition",
     "search_references",
     "impact",
+    "rename",
     "detect_changes",
     "route_map",
     "tool_map",

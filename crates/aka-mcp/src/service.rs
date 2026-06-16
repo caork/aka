@@ -259,6 +259,42 @@ pub struct ImpactParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RenameParams {
+    /// Repository name or local workspace path. Omit when exactly one indexed repository exists.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
+    pub repo: Option<String>,
+    /// Current symbol name. `name`/`target` are accepted for GitNexus parity.
+    #[serde(default, alias = "name", alias = "target")]
+    pub symbol: Option<String>,
+    /// New symbol name.
+    #[serde(alias = "new_name", alias = "replacement")]
+    pub new_symbol: String,
+    /// Direct graph node id returned as `id` by query/find/context.
+    #[serde(default, alias = "target_uid")]
+    pub uid: Option<String>,
+    /// Optional repo-relative file path for disambiguating common names.
+    #[serde(default)]
+    pub file_path: Option<String>,
+    /// Optional node kind/label filter, for example Function, Class, Method, Route.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Default true. Set false to apply edits to files.
+    #[serde(default = "default_rename_dry_run")]
+    pub dry_run: bool,
+}
+
+fn default_rename_dry_run() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AnalyzeParams {
     /// Repository path to (re)index. Absolute paths, relative paths, and nested
     /// workspace subdirectories are accepted; aka resolves them to the git or
@@ -456,6 +492,17 @@ impl ImpactParams {
     }
 }
 
+impl RenameParams {
+    fn selector(&self) -> SymbolSelector {
+        SymbolSelector {
+            symbol: self.symbol.clone(),
+            uid: self.uid.clone(),
+            file_path: self.file_path.clone(),
+            kind: self.kind.clone(),
+        }
+    }
+}
+
 // ---- 工具 ----
 
 #[tool_router]
@@ -574,6 +621,26 @@ impl AkaMcpServer {
         let selector = p.selector();
         self.run(move |b| {
             ops::impact_select(b, p.repo.as_deref(), &selector, direction, depth, limit)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Graph-aware rename for an indexed symbol. Defaults to dry_run=true and returns planned file/line edits. If the symbol is ambiguous, pass uid/file_path/kind from query/find_definition. Set dry_run=false only when you want aka to write the edits."
+    )]
+    pub async fn rename(
+        &self,
+        Parameters(p): Parameters<RenameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let selector = p.selector();
+        if selector.is_empty() {
+            return Err(McpError::invalid_params(
+                "rename requires symbol/name/target or uid".to_string(),
+                None,
+            ));
+        }
+        self.run(move |b| {
+            ops::rename_symbol(b, p.repo.as_deref(), &selector, &p.new_symbol, p.dry_run)
         })
         .await
     }

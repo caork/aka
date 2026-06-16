@@ -7,7 +7,7 @@
   如果你的 OpenCode 支持原生 skills（2026-06 起），优先装 skill（按需加载更省 token），不要两者同时启用。
 -->
 
-aka 把仓库解析成「符号节点 + 调用/引用/应用语义边」的图，并建了 BM25 全文索引。MCP server `aka` 提供十七个工具（OpenCode 里显示为 `aka_list_repos`、`aka_query` 等）：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**影响分析**（impact/detect_changes/api_impact/shape_check）、**应用映射**（route_map/graphql_map/tool_map），外加 **管理**（list_repos/analyze/import_repo/update_repo）。在已索引仓库里找符号定义、搜实现、评估改动影响面（blast radius）、检查当前 git 改动、查看 API route/GraphQL/tool 映射时优先用它们，比逐文件 grep/read 更省 token、更准。
+aka 把仓库解析成「符号节点 + 调用/引用/应用语义边」的图，并建了 BM25 全文索引。MCP server `aka` 提供十八个工具（OpenCode 里显示为 `aka_list_repos`、`aka_query` 等）：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**重构/影响分析**（rename/impact/detect_changes/api_impact/shape_check）、**应用映射**（route_map/graphql_map/tool_map），外加 **管理**（list_repos/analyze/import_repo/update_repo）。在已索引仓库里找符号定义、搜实现、安全 rename、评估改动影响面（blast radius）、检查当前 git 改动、查看 API route/GraphQL/tool 映射时优先用它们，比逐文件 grep/read 更省 token、更准。
 
 Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_TABLE/WRITES_TABLE/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/HANDLES_JOB/ENQUEUES_JOB/DEPENDS_ON/USES_CONFIG/MIGRATES_TABLE/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等是 GitNexus-like 的索引语义：可用于流程分组、HTTP API/GraphQL operation/工具入口、CLI/management command、后台任务触发、依赖注入、配置/env/settings、schema migration、表读写影响、事务边界、异步任务影响、依赖关系、消费者和响应字段检查，但不是完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义层。索引缺少相应节点/边/字段时，相关工具会返回空结果或提示缺数据。
 
@@ -32,6 +32,7 @@ Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_T
 | "Foo 是干嘛的、谁调它、它调谁"（陌生符号建立全景） | `context`（一次拿到定义+callers+callees+引用） | 连续调三四个单项工具 |
 | "谁直接用了 Foo"（一跳引用清单） | `search_references` | impact（多跳，结果更大） |
 | "改/删 Foo 会波及哪些代码"（重构前评估） | `impact`（传 `depth`，默认够用，最大 10） | search_references（只看一跳会低估） |
+| "安全重命名 Foo" | `rename` 先 dry-run，看 `edits/candidates`；必要时 `impact`；确认后同一 `repo` 下 `dry_run:false` | 手动全局替换，或跳过 dry-run 直接 apply |
 | "当前 git 改动碰到了哪些符号/流程" | `detect_changes`（scope: unstaged/staged/all/compare） | 手动 diff 后凭感觉判断 |
 | "改 API route 前看 handler、消费者、响应字段、流程" | `route_map`，再 `api_impact` | 只 grep 路由字符串 |
 | "改 GraphQL resolver/schema-facing API 前看 operation、handler、流程" | `graphql_map` | 只搜 resolver 名 |
@@ -46,6 +47,7 @@ Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_T
 - **要 grep-like 证据 → search_code。** 它返回原始匹配行、上下文和顶层目录分布；适合确认字符串/配置/API path 是否真的出现。
 - **探索陌生符号首选 context**，一次调用顶四次，token 最划算。
 - **动手重构前必跑 impact**：结果里 `depth` 是反向依赖的跳数，depth=1 是直接调用方（必须逐个检查），depth≥2 是传递波及（扫一眼判断是否行为变化会穿透）。`count` 很大时说明是热点符号，考虑兼容性包装而非直接改签名。
+- **rename 默认 dry-run**：返回 `status/target/replacement/dry_run/applied/changed_files/count/edits/candidates/message`。`status:"ambiguous"` 时用 `uid/file_path/kind` 缩小目标；只有看过 dry-run 计划后，才在明确 `repo`/`repo_path` 下设置 `dry_run:false` 写文件。
 - **提交前或接手别人改动时跑 detect_changes**：默认看 `unstaged`，也可用 `staged`、`all`、`compare + base_ref`。它把 diff hunk 映射到已索引符号，并列出受影响流程。
 - **API/GraphQL/事务/工具类改动先看应用语义图**：`route_map` 看 Route 节点、handler、middleware、consumers、responseKeys/errorKeys 和 flows；`graphql_map` 看 GraphQL operation、operationType、resolver handlers 和 flows；`tool_map` 看 Tool 节点、定义文件、description、handlers 和 flows；`query/context` 可看 Transaction 事务边界、Table 读写边（READS_TABLE/WRITES_TABLE）、Job 边（HANDLES_JOB/ENQUEUES_JOB）和依赖边（DEPENDS_ON）。`shape_check` 依赖 Route responseKeys/errorKeys 与 FETCHES 访问字段元数据；空结果通常表示索引没有足够应用语义/shape 数据，不等于没有 API 风险。
 
@@ -57,6 +59,7 @@ Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_T
 - **find_definition**：返回 `{defs:[{id, name, label, file, line, score, snip?}]}` — 知道确切符号名时用它定位定义。
 - **源码行命中**（search_code）：`{hits:[{id,name,label,file,line,score,matches:[{line,text,matched}]}], directories:[{dir,count}]}` — `matched=true` 是原始命中行，`matched=false` 是上下文；`directories` 用于判断命中集中在哪个模块。
 - **图引用**（search_references/impact）：`{id, name, label, file, line, edge, depth}` — `edge` 是关系类型（CALLS/IMPORTS…），`depth` 是跳数。
+- **rename**：`{status,target,replacement,dry_run,applied,changed_files,count,edits,candidates?,message?}`；`edits` 是文件/行/列和替换前后行文本，`candidates` 用于歧义选择。
 - **context**：分组返回 `defs` / `callers` / `callees` / `refs` / `processes`。
 - **detect_changes**：返回 `{changed_ranges, changed_symbols, changed_count, affected_processes}`；`affected_processes` 里看 `first_affected_step` 和 `affected_symbols`。
 - **route_map/graphql_map/tool_map**：route 返回 `route/handler/middleware/responseKeys/errorKeys/consumers/flows`；GraphQL 返回 `name/operationType/filePath/handlers/flows`；tool 返回 `name/filePath/description/handlers/flows`。
@@ -70,6 +73,7 @@ Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_T
 - ❌ 用 query 找确切符号名（用 find_definition）。
 - ❌ 用自然语言长句喂 query（用代码里会出现的关键词）。
 - ❌ 重构只看 search_references 一跳就动手（用 impact）。
+- ❌ `rename` 没看 dry-run / candidates 就设置 `dry_run:false`。
 - ❌ 把 应用语义/shape 工具的空结果当成"没有调用方/没有风险"（可能只是索引缺少应用语义数据）。
 - ❌ 把 GitNexus-like 能力描述成完整 GitNexus/Cypher 等价实现。
 - ❌ 拿到命中后仍然整文件 read（只读 file:line 附近）。

@@ -5,7 +5,7 @@
 ## 1. 设计目标与原则
 
 - **一个协议，N 种包装**：所有客户端统一走 MCP 协议。默认连接 AKA 桌面端内置的本地 Streamable HTTP MCP（`http://127.0.0.1:4112/mcp`），让 AI indexing/query 和 GUI 图谱/code 预览天然复用同一份知识库。stdio `AKA mcp` 只作为桌面不常开或客户端不支持 HTTP MCP 时的 fallback，不绕过 `Backend` trait 接缝。
-- **一个本地知识库**：桌面 GUI、桌面 HTTP MCP、桌面包里的 `AKA mcp/analyze/serve` 都指向同一份 app data `AKA_HOME`。不再让 GUI 和 AI 插件各自生成孤岛索引。
+- **一个本地知识库**：桌面 GUI、桌面 HTTP MCP、stdio fallback / headless 调试入口都指向同一份 app data `AKA_HOME`。不再让 GUI 和 AI 插件各自生成孤岛索引。
 - **路径不写死**：仓库内默认配置只写 localhost MCP URL；stdio fallback 才需要 `--bin` 探测（`command -v aka/AKA` → `target/release` → `target/debug`）。
 
 ## 2. 架构：本地 stdio 与远程 HTTP 的演进
@@ -22,7 +22,7 @@ AKA desktop ─▶ http://127.0.0.1:4112/mcp   aka serve :4111 (Docker @ Jensen)
 app data aka-home
   (tantivy + SQLite/CSR)
 
-stdio fallback: agent ─spawn─▶ AKA mcp ──读写同一 app data aka-home
+stdio fallback: agent ─spawn─▶ 桌面包 AKA mcp ──读写同一 app data aka-home
 
 远程模式: agent ─HTTP+token─▶ aka serve :4111 ─▶ /data（服务器侧索引）
 ```
@@ -82,6 +82,6 @@ stdio fallback: agent ─spawn─▶ AKA mcp ──读写同一 app data aka-hom
 
 ## 6. 已知限制 / 待办
 
-- 默认 HTTP MCP 要求 AKA 桌面端已启动。桌面不常开时，Claude Code / Codex 用 `--stdio --bin /path/to/AKA` 配置 fallback；桌面包 CLI 模式会复用 GUI 的 app data `AKA_HOME`。
+- 默认 HTTP MCP 要求 AKA 桌面端已启动。桌面不常开时，Claude Code / Codex 用 `--stdio --bin /path/to/AKA` 配置 fallback；该 fallback 复用 GUI 的 app data `AKA_HOME`，不是独立产品形态。
 - OpenCode 的「装好验证」主要依赖 TUI 交互，没有 `claude mcp list` 这样的一行命令式探针；plugin 会写一条加载日志，但 MCP 是否可用仍以会话里触发 `aka_list_repos` 为准。默认配置要求 AKA 桌面端已启动。
 - 远程模式（M4）落地时：aka-server 挂 rmcp Streamable HTTP、加 token 认证、Docker 镜像；届时在 clients/ 各 README 补远程配置片段。
