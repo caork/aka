@@ -160,6 +160,20 @@ jobs:
           echo "setup_name=aka-desktop-${VERSION}-x86_64-pc-windows-msvc-setup.exe" >> "$GITHUB_OUTPUT"
           echo "portable_name=aka-desktop-${VERSION}-x86_64-pc-windows-msvc-portable.zip" >> "$GITHUB_OUTPUT"
 
+      - name: Smoke Windows portable GUI runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $portableZip = "dist/${{ steps.pkg.outputs.portable_name }}"
+          $portableDir = Join-Path $env:RUNNER_TEMP "aka-portable"
+          Remove-Item -Recurse -Force $portableDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $portableDir | Out-Null
+          Expand-Archive -Force $portableZip $portableDir
+          powershell -NoProfile -ExecutionPolicy Bypass `
+            -File scripts/smoke-windows-portable.ps1 `
+            -PortableDir $portableDir `
+            -WorkDir (Join-Path $env:RUNNER_TEMP "aka-windows-smoke")
+
       - name: Upload to release
         if: github.ref_type == 'tag'
         env:
