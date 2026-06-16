@@ -5,8 +5,8 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_call_args, process_ids_for_entry, project_code_nodes_by_file, read_repo_text,
-    read_string_literal, split_top_level_commas, stable_hash, EdgeRec, NodeRec, ProjectSourceSet,
-    SynthNode, SynthProcess,
+    read_string_literal, source_annotations_before_node, split_top_level_commas, stable_hash,
+    EdgeRec, NodeRec, ProjectSourceSet, SynthNode, SynthProcess,
 };
 
 #[derive(Debug, Clone)]
@@ -746,7 +746,7 @@ fn to_artifact_line(line_1based: i64) -> u32 {
 
 fn detect_python_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDetection> {
     let mut out = Vec::new();
-    for decorator in &node.decorators {
+    for decorator in decorators_for_node(text, node) {
         let normalized = decorator.trim().trim_start_matches('@');
         if is_click_command_decorator(normalized) {
             out.push(CommandDetection {
@@ -791,6 +791,16 @@ fn detect_python_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDe
         }
     }
     out
+}
+
+fn decorators_for_node(text: Option<&str>, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    if let Some(text) = text {
+        decorators.extend(source_annotations_before_node(text, node));
+    }
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn is_click_command_decorator(text: &str) -> bool {

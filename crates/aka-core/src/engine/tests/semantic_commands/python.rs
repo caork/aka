@@ -119,6 +119,69 @@ def main():
 }
 
 #[test]
+fn synthesizes_python_command_entrypoints_from_source_decorators_without_metadata() {
+    let repo = temp_repo("python-command-source-decorators");
+    std::fs::write(
+        repo.join("cli.py"),
+        r#"import click
+import typer
+
+app = typer.Typer()
+
+@click.command(name="sync-orders")
+def sync_orders():
+    pass
+
+@app.command(
+    "ship-orders")
+def ship_orders():
+    pass
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "sync_orders",
+        "cli.sync_orders",
+        "cli.py",
+        (7, 8),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "ship_orders",
+        "cli.ship_orders",
+        "cli.py",
+        (12, 13),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let click = synth
+        .commands
+        .iter()
+        .find(|command| command.name == "sync-orders")
+        .expect("Click command from source decorator");
+    assert_eq!(click.command_type, "click-command");
+    assert_eq!(click.handler_id, "cbm:1:cli.sync_orders");
+    let typer = synth
+        .commands
+        .iter()
+        .find(|command| command.name == "ship-orders")
+        .expect("Typer command from source decorator");
+    assert_eq!(typer.command_type, "typer-command");
+    assert_eq!(typer.handler_id, "cbm:2:cli.ship_orders");
+}
+
+#[test]
 fn python_command_entrypoints_seed_processes() {
     let repo = temp_repo("python-command-process-entry");
     std::fs::create_dir_all(repo.join("orders/management/commands")).unwrap();
