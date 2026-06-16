@@ -18,6 +18,8 @@ mod python_gcs;
 use python_gcs::extract_python_gcs_resources;
 mod python_azure_blob;
 use python_azure_blob::extract_python_azure_blob_resources;
+mod search_index;
+use search_index::extract_search_index_resources;
 
 #[derive(Debug, Clone)]
 pub(super) struct SynthResource {
@@ -183,6 +185,15 @@ impl ResourceDetection {
             strategy: strategy.into(),
         }
     }
+
+    fn search_index(index: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url: format!("search-index:{index}"),
+            resource_type: "search-index".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
 }
 
 fn extract_resource_detections(
@@ -237,6 +248,7 @@ fn extract_resource_detections(
     out.extend(extract_python_azure_blob_resources(text, nodes));
     out.extend(extract_java_aws_s3_resources(text, nodes));
     out.extend(extract_java_azure_blob_resources(text, nodes));
+    out.extend(extract_search_index_resources(text, nodes));
     out.extend(extract_contextual_http_client_calls(
         text,
         nodes,
