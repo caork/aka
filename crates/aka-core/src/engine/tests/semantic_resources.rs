@@ -613,6 +613,126 @@ class ReceiptStorage {
 }
 
 #[test]
+fn synthesizes_java_azure_blob_resources() {
+    let repo = temp_repo("java-azure-blob-resources");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/storage")).unwrap();
+    let file = "src/main/java/com/example/storage/AzureReceiptStorage.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.storage;
+
+import com.azure.storage.blob.BlobClient;
+import com.azure.storage.blob.BlobClientBuilder;
+import com.azure.storage.blob.BlobContainerClient;
+import com.azure.storage.blob.BlobServiceClient;
+
+class AzureReceiptStorage {
+    private final BlobServiceClient service;
+
+    void storeReceipt(String orderId, java.io.InputStream payload) {
+        service.getBlobContainerClient("order-artifacts")
+            .getBlobClient("receipts/" + orderId + ".json")
+            .upload(payload);
+    }
+
+    byte[] loadManifest() {
+        BlobContainerClient container = service.getBlobContainerClient("order-artifacts");
+        BlobClient blob = container.getBlobClient("manifests/latest.json");
+        return blob.downloadContent().toBytes();
+    }
+
+    void deleteLegacy() {
+        BlobClient client = new BlobClientBuilder()
+            .connectionString("...")
+            .containerName("order-artifacts")
+            .blobName("legacy/old.json")
+            .buildClient();
+        client.delete();
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Method",
+            "storeReceipt",
+            "com.example.storage.AzureReceiptStorage.storeReceipt",
+            file,
+        ),
+        (11, 14),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "loadManifest",
+            "com.example.storage.AzureReceiptStorage.loadManifest",
+            file,
+        ),
+        (16, 20),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
+            "deleteLegacy",
+            "com.example.storage.AzureReceiptStorage.deleteLegacy",
+            file,
+        ),
+        (22, 29),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let receipt = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "azblob://order-artifacts/receipts/{param}.json")
+        .expect("Azure Blob receipt resource");
+    assert_eq!(receipt.resource_type, "azure-blob");
+    let receipt_edge = receipt
+        .edge_recs()
+        .into_iter()
+        .find(|edge| edge.source_id == "cbm:1:com.example.storage.AzureReceiptStorage.storeReceipt")
+        .expect("Azure Blob upload edge");
+    assert_eq!(receipt_edge.edge_type, "ACCESSES_RESOURCE");
+    assert_eq!(
+        receipt_edge.evidence.as_ref().unwrap()["strategy"],
+        "java-azure-blob-upload"
+    );
+
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "azblob://order-artifacts/manifests/latest.json"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.source_id == "cbm:2:com.example.storage.AzureReceiptStorage.loadManifest"
+                    && edge.evidence.as_ref().unwrap()["strategy"] == "java-azure-blob-download"
+            })
+    }));
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "azblob://order-artifacts/legacy/old.json"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.source_id == "cbm:3:com.example.storage.AzureReceiptStorage.deleteLegacy"
+                    && edge.evidence.as_ref().unwrap()["strategy"] == "java-azure-blob-delete"
+            })
+    }));
+}
+
+#[test]
 fn synthesizes_java_external_http_resources() {
     let repo = temp_repo("java-resources");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/inventory")).unwrap();

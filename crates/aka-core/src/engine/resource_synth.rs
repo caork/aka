@@ -11,6 +11,8 @@ use super::{
 
 mod java_s3;
 use java_s3::extract_java_aws_s3_resources;
+mod java_azure_blob;
+use java_azure_blob::extract_java_azure_blob_resources;
 mod python_gcs;
 use python_gcs::extract_python_gcs_resources;
 mod python_azure_blob;
@@ -232,6 +234,7 @@ fn extract_resource_detections(
     out.extend(extract_python_gcs_resources(text, nodes));
     out.extend(extract_python_azure_blob_resources(text, nodes));
     out.extend(extract_java_aws_s3_resources(text, nodes));
+    out.extend(extract_java_azure_blob_resources(text, nodes));
     out.extend(extract_contextual_http_client_calls(
         text,
         nodes,
