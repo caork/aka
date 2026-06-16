@@ -34,6 +34,7 @@ mod job_synth;
 mod migration_synth;
 mod persistence_access_synth;
 mod persistence_java_synth;
+mod persistence_model_synth;
 mod persistence_mybatis_synth;
 mod persistence_pymongo_synth;
 mod persistence_synth;
