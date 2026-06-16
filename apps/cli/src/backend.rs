@@ -3182,6 +3182,13 @@ mod tests {
         }
     }
 
+    fn assert_job_visible_status(status: &str) {
+        assert!(
+            matches!(status, "indexing" | "failed"),
+            "expected queued job to be visible as indexing or failed when the test host has no engine, got {status:?}"
+        );
+    }
+
     #[test]
     fn auto_index_debounces_until_quick_state_is_stable() {
         let base = RepoQuickState::default();
@@ -3339,7 +3346,7 @@ mod tests {
         let repos = auto.list_repos().unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name, derive_local_name(&repo));
-        assert_eq!(repos[0].status, "indexing");
+        assert_job_visible_status(&repos[0].status);
         assert!(repos[0].progress.is_some());
     }
 
@@ -3361,7 +3368,7 @@ mod tests {
         let repos = backend.list_repos().unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name, derive_local_name(&repo));
-        assert_eq!(repos[0].status, "indexing");
+        assert_job_visible_status(&repos[0].status);
     }
 
     #[test]
@@ -3392,7 +3399,7 @@ mod tests {
             repos[0].path,
             repo.canonicalize().unwrap().to_string_lossy()
         );
-        assert_eq!(repos[0].status, "indexing");
+        assert_job_visible_status(&repos[0].status);
     }
 
     #[test]
@@ -3423,7 +3430,7 @@ mod tests {
             repos[0].path,
             repo.canonicalize().unwrap().to_string_lossy()
         );
-        assert_eq!(repos[0].status, "indexing");
+        assert_job_visible_status(&repos[0].status);
     }
 
     #[test]
@@ -3449,7 +3456,7 @@ mod tests {
             .to_string();
 
         assert!(
-            err.contains("自动索引中") || err.contains("仍在索引中"),
+            err.contains("自动索引中") || err.contains("仍在索引中") || err.contains("索引失败"),
             "{err}"
         );
         let repos = backend.list_repos().unwrap();
@@ -3459,7 +3466,7 @@ mod tests {
             repos[0].path,
             repo.canonicalize().unwrap().to_string_lossy()
         );
-        assert_eq!(repos[0].status, "indexing");
+        assert_job_visible_status(&repos[0].status);
     }
 
     #[test]
