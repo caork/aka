@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 
 mod semantic_cache;
 mod semantic_commands;
+mod semantic_dependencies;
 mod semantic_events;
 mod semantic_graphql;
 mod semantic_messaging;

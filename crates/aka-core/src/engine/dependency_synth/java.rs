@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::super::{
     find_call_args, find_matching_paren, is_ident_continue, node_at_offset, skip_ws,
-    split_top_level_commas, stable_hash, EdgeRec, SynthNode,
+    source_annotations_before_node, split_top_level_commas, stable_hash, EdgeRec, SynthNode,
 };
 use super::dependency_edge;
 use super::lookup::{is_meaningful_java_type, simple_type_name, NodeLookup};
@@ -331,7 +331,7 @@ fn detect_java_constructor_injections(text: &str, class_name: &str) -> Vec<JavaD
 }
 
 fn detect_java_bean_method_dependencies(text: &str, node: &SynthNode) -> Vec<JavaDependency> {
-    if !node.decorators.iter().any(|decorator| {
+    if !decorators_for_node(text, node).iter().any(|decorator| {
         let normalized = decorator.trim().trim_start_matches('@');
         normalized == "Bean" || normalized.starts_with("Bean(") || normalized.ends_with(".Bean")
     }) {
@@ -341,7 +341,7 @@ fn detect_java_bean_method_dependencies(text: &str, node: &SynthNode) -> Vec<Jav
         return Vec::new();
     };
     let declaration = &text[decl_start..decl_end];
-    let Some(name_pos) = declaration.find(&node.name) else {
+    let Some(name_pos) = declaration.rfind(&node.name) else {
         return Vec::new();
     };
     let open = skip_ws(declaration, name_pos + node.name.len());
@@ -359,6 +359,14 @@ fn detect_java_bean_method_dependencies(text: &str, node: &SynthNode) -> Vec<Jav
             strategy: "java-bean-method-parameter".into(),
         })
         .collect()
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn is_java_like_file(file_path: &str, nodes: &[&SynthNode]) -> bool {

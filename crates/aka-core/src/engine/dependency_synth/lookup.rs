@@ -39,7 +39,7 @@ impl<'a> NodeLookup<'a> {
         let simple = simple_type_name(type_name)?;
         self.by_simple
             .get(&(language.to_string(), simple))
-            .and_then(|nodes| (nodes.len() == 1).then_some(nodes[0]))
+            .and_then(|nodes| resolve_unambiguous_node(nodes))
     }
 
     pub(super) fn resolve_python_callable(
@@ -57,6 +57,18 @@ impl<'a> NodeLookup<'a> {
                     .and_then(|nodes| (nodes.len() == 1).then_some(nodes[0]))
             })
     }
+}
+
+fn resolve_unambiguous_node<'a>(nodes: &[&'a SynthNode]) -> Option<&'a SynthNode> {
+    let native: Vec<_> = nodes
+        .iter()
+        .copied()
+        .filter(|node| !node.aka_id.starts_with("source:"))
+        .collect();
+    if native.len() == 1 {
+        return Some(native[0]);
+    }
+    (native.is_empty() && nodes.len() == 1).then_some(nodes[0])
 }
 
 pub(super) fn simple_type_name(type_name: &str) -> Option<String> {
