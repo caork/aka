@@ -2,6 +2,111 @@ use super::super::*;
 use serde_json::json;
 
 #[test]
+fn synthesizes_configured_payment_resources() {
+    let repo = temp_repo("configured-payment-resources");
+    std::fs::create_dir_all(repo.join("src/main/resources")).unwrap();
+    let file = "src/main/resources/application.yml";
+    std::fs::write(
+        repo.join(file),
+        r#"payments:
+  stripe:
+    api-key: sk_live_redacted
+  paypal:
+    client-id: paypal-client
+  square:
+    access-token: sq-token
+disabled:
+  adyen:
+    api-key: ${ADYEN_API_KEY}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("settings.py"),
+        r#"ADYEN_MERCHANT_ACCOUNT = "merchant"
+BRAINTREE_MERCHANT_ID = "bt-merchant"
+RAZORPAY_KEY_ID = "rzp"
+"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join(".env"), "PAYPAL_SECRET=secret\n").unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Config", "application.yml", file, file),
+        (1, 10),
+        json!({"language": "yaml"}),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        ("Config", "settings.py", "settings.py", "settings.py"),
+        (1, 3),
+        json!({"language": "python"}),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        ("Config", ".env", ".env", ".env"),
+        (1, 1),
+        json!({"language": "dotenv"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert_payment_config_edge(
+        &synth,
+        "payment:stripe",
+        &config_id("payments.stripe.api.key"),
+        "stripe-config",
+    );
+    assert_payment_config_edge(
+        &synth,
+        "payment:paypal",
+        &config_id("payments.paypal.client.id"),
+        "paypal-config",
+    );
+    assert_payment_config_edge(
+        &synth,
+        "payment:square",
+        &config_id("payments.square.access.token"),
+        "square-config",
+    );
+    assert_payment_config_edge(
+        &synth,
+        "payment:adyen",
+        &config_id("adyen.merchant.account"),
+        "adyen-config",
+    );
+    assert_payment_config_edge(
+        &synth,
+        "payment:braintree",
+        &config_id("braintree.merchant.id"),
+        "braintree-config",
+    );
+    assert_payment_config_edge(
+        &synth,
+        "payment:razorpay",
+        &config_id("razorpay.key.id"),
+        "razorpay-config",
+    );
+    assert_payment_config_edge(
+        &synth,
+        "payment:paypal",
+        &config_id("paypal.secret"),
+        "paypal-config",
+    );
+    assert!(!synth.resources.iter().any(|resource| {
+        resource.url == "payment:adyen"
+            && resource
+                .edge_recs()
+                .iter()
+                .any(|edge| edge.source_id == config_id("disabled.adyen.api.key"))
+    }));
+}
+
+#[test]
 fn synthesizes_python_payment_resources() {
     let repo = temp_repo("python-payment-resources");
     std::fs::write(
@@ -107,6 +212,24 @@ def ordinary_create(service):
         .iter()
         .flat_map(|resource| resource.edge_recs())
         .any(|edge| edge.source_id == "cbm:4:billing.ordinary_create"));
+}
+
+fn assert_payment_config_edge(synth: &SynthGraph, url: &str, source_id: &str, strategy: &str) {
+    let resource = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == url)
+        .unwrap_or_else(|| panic!("expected payment config resource {url}"));
+    assert_eq!(resource.resource_type, "payment");
+    assert!(resource.edge_recs().iter().any(|edge| {
+        edge.source_id == source_id
+            && edge.edge_type == "ACCESSES_RESOURCE"
+            && edge.evidence.as_ref().unwrap()["strategy"] == strategy
+    }));
+}
+
+fn config_id(key: &str) -> String {
+    format!("config:heuristic:{:016x}", stable_hash(key))
 }
 
 #[test]

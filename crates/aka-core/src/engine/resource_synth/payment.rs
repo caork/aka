@@ -1,4 +1,4 @@
-use super::ResourceDetection;
+use super::{infra_config, ResourceDetection};
 use crate::engine::{find_call_args, node_at_offset, SynthNode};
 
 pub(super) fn extract_payment_resources(
@@ -13,6 +13,31 @@ pub(super) fn extract_payment_resources(
         out.extend(extract_java_payments(text, nodes));
     }
     out.sort_by(|a, b| a.url.cmp(&b.url).then_with(|| a.node_id.cmp(&b.node_id)));
+    out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id && a.strategy == b.strategy);
+    out
+}
+
+pub(super) fn extract_payment_config_resources(text: &str) -> Vec<ResourceDetection> {
+    let mut out = Vec::new();
+    for (key, value) in infra_config::config_pairs(text) {
+        let Some(provider) = payment_provider_for_config_key(&key) else {
+            continue;
+        };
+        if !payment_config_value_is_present(&value) {
+            continue;
+        }
+        out.push(ResourceDetection::payment(
+            provider.into(),
+            infra_config::config_id(&key),
+            payment_config_strategy(provider),
+        ));
+    }
+    out.sort_by(|a, b| {
+        a.url
+            .cmp(&b.url)
+            .then_with(|| a.node_id.cmp(&b.node_id))
+            .then_with(|| a.strategy.cmp(&b.strategy))
+    });
     out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id && a.strategy == b.strategy);
     out
 }
@@ -178,4 +203,51 @@ fn receiver_before_dot(text: &str, dot_start: usize) -> Option<&str> {
     }
     let receiver = text[start..dot_start].trim_matches('.');
     (!receiver.is_empty()).then_some(receiver)
+}
+
+fn payment_provider_for_config_key(key: &str) -> Option<&'static str> {
+    if key_contains_any(key, &["stripe"]) {
+        Some("stripe")
+    } else if key_contains_any(key, &["paypal", "pay.pal"]) {
+        Some("paypal")
+    } else if key_contains_any(key, &["square"]) {
+        Some("square")
+    } else if key_contains_any(key, &["adyen"]) {
+        Some("adyen")
+    } else if key_contains_any(key, &["braintree"]) {
+        Some("braintree")
+    } else if key_contains_any(key, &["razorpay"]) {
+        Some("razorpay")
+    } else {
+        None
+    }
+}
+
+fn payment_config_value_is_present(value: &str) -> bool {
+    let value = value.trim().trim_matches(['"', '\'', '`']);
+    !value.is_empty()
+        && !value.starts_with("${")
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "false" | "none" | "null"
+        )
+}
+
+fn payment_config_strategy(provider: &str) -> &'static str {
+    match provider {
+        "stripe" => "stripe-config",
+        "paypal" => "paypal-config",
+        "square" => "square-config",
+        "adyen" => "adyen-config",
+        "braintree" => "braintree-config",
+        "razorpay" => "razorpay-config",
+        _ => "payment-config",
+    }
+}
+
+fn key_contains_any(key: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| {
+        key.split('.')
+            .any(|part| part == *needle || part.contains(needle))
+    })
 }
