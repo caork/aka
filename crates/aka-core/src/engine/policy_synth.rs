@@ -5,7 +5,8 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_call_args, find_matching_paren, project_code_nodes_by_file, read_repo_text,
-    split_top_level_commas, stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
+    source_annotations_before_node, split_top_level_commas, stable_hash, EdgeRec, NodeRec,
+    ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -138,7 +139,7 @@ fn extract_policy_detections(
             )
         })
     {
-        out.extend(extract_jvm_policy_detections(nodes));
+        out.extend(extract_jvm_policy_detections(text, nodes));
     }
     if lower.ends_with(".py")
         || nodes
@@ -156,19 +157,19 @@ fn extract_policy_detections(
     out
 }
 
-fn extract_jvm_policy_detections(nodes: &[&SynthNode]) -> Vec<PolicyDetection> {
+fn extract_jvm_policy_detections(text: &str, nodes: &[&SynthNode]) -> Vec<PolicyDetection> {
     let mut out = Vec::new();
     for node in nodes
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method" | "Class"))
     {
-        for decorator in &node.decorators {
-            let Some(name) = decorator_name(decorator) else {
+        for decorator in decorators_for_node(text, node) {
+            let Some(name) = decorator_name(&decorator) else {
                 continue;
             };
             match name {
                 "PreAuthorize" | "PostAuthorize" => {
-                    for policy in annotation_string_values(decorator, &["value"]) {
+                    for policy in annotation_string_values(&decorator, &["value"]) {
                         out.push(PolicyDetection {
                             name: policy,
                             policy_type: "spring-expression".into(),
@@ -178,7 +179,7 @@ fn extract_jvm_policy_detections(nodes: &[&SynthNode]) -> Vec<PolicyDetection> {
                     }
                 }
                 "Secured" | "RolesAllowed" => {
-                    for role in annotation_string_values(decorator, &["value"]) {
+                    for role in annotation_string_values(&decorator, &["value"]) {
                         out.push(PolicyDetection {
                             name: role,
                             policy_type: "role".into(),
@@ -192,6 +193,14 @@ fn extract_jvm_policy_detections(nodes: &[&SynthNode]) -> Vec<PolicyDetection> {
         }
     }
     out
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn extract_python_policy_detections(text: &str, nodes: &[&SynthNode]) -> Vec<PolicyDetection> {

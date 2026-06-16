@@ -3034,6 +3034,97 @@ class OrderController {
 }
 
 #[test]
+fn synthesizes_java_policies_from_source_annotations_without_metadata() {
+    let repo = temp_repo("java-policy-source-annotations");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/security")).unwrap();
+    let file = "src/main/java/com/example/security/OrderController.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.security;
+
+import jakarta.annotation.security.RolesAllowed;
+import org.springframework.security.access.prepost.PreAuthorize;
+
+@PreAuthorize("hasAuthority('orders:read')")
+class OrderController {
+    public String list() { return "ok"; }
+
+    @RolesAllowed({
+        "ROLE_ADMIN",
+        "ROLE_SUPPORT"})
+    public void delete() {}
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderController",
+            "com.example.security.OrderController",
+            file,
+        ),
+        (7, 14),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "list",
+        "com.example.security.OrderController.list",
+        file,
+        (8, 8),
+        json!({
+            "language": "java",
+            "parent_class": "OrderController",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "delete",
+        "com.example.security.OrderController.delete",
+        file,
+        (13, 13),
+        json!({
+            "language": "java",
+            "parent_class": "OrderController",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let preauth = synth
+        .policies
+        .iter()
+        .find(|policy| policy.name == "hasAuthority('orders:read')")
+        .expect("class-level source annotation policy");
+    assert_eq!(preauth.policy_type, "spring-expression");
+    assert_eq!(preauth.subjects.len(), 1);
+    assert!(preauth
+        .edge_recs()
+        .iter()
+        .any(|edge| edge.source_id == "cbm:1:com.example.security.OrderController"));
+
+    for role_name in ["ROLE_ADMIN", "ROLE_SUPPORT"] {
+        let role = synth
+            .policies
+            .iter()
+            .find(|policy| policy.name == role_name)
+            .expect("method-level source annotation role");
+        assert_eq!(role.policy_type, "role");
+        assert!(role
+            .edge_recs()
+            .iter()
+            .any(|edge| edge.source_id == "cbm:3:com.example.security.OrderController.delete"));
+    }
+}
+
+#[test]
 fn synthesizes_python_policy_nodes() {
     let repo = temp_repo("python-policies");
     std::fs::write(
