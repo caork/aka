@@ -23,7 +23,7 @@
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe.sig
 #                                             Windows Tauri updater 签名（存在签名密钥时生成）
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-portable.zip
-#                                             Windows Tauri GUI portable exe（engine 内嵌）
+#                                             Windows Tauri GUI portable app（engine/aka-engine.exe 随包携带）
 #
 # 产物（--checksums-only 子命令，主流程不自动跑）:
 #   dist/SHA256SUMS                         dist/ 下所有产物（含 dist/docker/*）的 sha256
