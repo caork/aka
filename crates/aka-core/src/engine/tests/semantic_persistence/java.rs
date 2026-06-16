@@ -85,6 +85,82 @@ interface OrderRepository extends JpaRepository<Order, Long> {
 }
 
 #[test]
+fn synthesizes_java_persistence_tables_from_source_annotations_without_metadata() {
+    let repo = temp_repo("java-persistence-source-annotations");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let entity_file = "src/main/java/com/example/orders/Order.java";
+    let repo_file = "src/main/java/com/example/orders/OrderRepository.java";
+    std::fs::write(
+        repo.join(entity_file),
+        r#"package com.example.orders;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(
+    name = "orders")
+class Order {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(repo_file),
+        r#"package com.example.orders;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+interface OrderRepository extends JpaRepository<Order, Long> {
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "Order", "com.example.orders.Order", entity_file),
+        (8, 9),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Interface",
+            "OrderRepository",
+            "com.example.orders.OrderRepository",
+            repo_file,
+        ),
+        (5, 6),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let nodes = synth.persistence.node_recs();
+    assert!(nodes.iter().any(|node| {
+        node.label == "Table"
+            && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+    }));
+    assert!(nodes.iter().any(|node| {
+        node.label == "Repository"
+            && node.properties.get("entityName").and_then(Value::as_str) == Some("Order")
+    }));
+    let edge_types: Vec<_> = synth
+        .persistence
+        .edge_recs()
+        .into_iter()
+        .map(|edge| edge.edge_type)
+        .collect();
+    assert!(edge_types.contains(&"MAPS_TO_TABLE".to_string()));
+    assert!(edge_types.contains(&"REPOSITORY_FOR".to_string()));
+}
+
+#[test]
 fn synthesizes_java_table_access_edges() {
     let repo = temp_repo("java-table-access");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();

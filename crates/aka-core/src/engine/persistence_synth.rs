@@ -10,8 +10,9 @@ use super::persistence_access_synth::{
 };
 use super::persistence_mybatis_synth::detect_mybatis_xml_table_access_edges;
 use super::{
-    find_matching_paren, project_code_nodes_by_file, read_repo_text, split_top_level_commas,
-    stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
+    find_matching_paren, project_code_nodes_by_file, read_repo_text,
+    source_annotations_before_node, split_top_level_commas, stable_hash, EdgeRec, NodeRec,
+    ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -321,9 +322,9 @@ pub(super) fn synthesize_persistence_from_sources(
 }
 
 fn detect_entity_table(text: &str, node: &SynthNode) -> Option<SynthTable> {
-    if is_jvm_node(node) && has_decorator_named(&node.decorators, "Entity") {
-        let table_name = node
-            .decorators
+    let decorators = decorators_for_node(text, node);
+    if is_jvm_node(node) && has_decorator_named(&decorators, "Entity") {
+        let table_name = decorators
             .iter()
             .find(|decorator| decorator_name(decorator) == Some("Table"))
             .and_then(|decorator| annotation_arg_string(decorator, &["name", "value"]))
@@ -346,6 +347,14 @@ fn detect_entity_table(text: &str, node: &SynthNode) -> Option<SynthTable> {
         }
     }
     None
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn table_for_node(
