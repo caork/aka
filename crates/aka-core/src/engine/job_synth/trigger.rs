@@ -24,40 +24,45 @@ pub(super) fn attach_job_triggers(
         .iter()
         .enumerate()
         .filter(|(_, job)| job.job_type == "spring-async")
-        .map(|(idx, job)| (idx, job.handler_id.clone(), job.handler_name.clone()))
+        .filter_map(|(idx, job)| Some((idx, job.handler_id.clone()?, job.handler_name.clone()?)))
         .collect();
     let spring_batch_jobs: BTreeMap<String, usize> = jobs
         .iter()
         .enumerate()
         .filter(|(_, job)| job.job_type == "spring-batch-job")
-        .flat_map(|(idx, job)| {
+        .filter_map(|(idx, job)| Some((idx, job.handler_name.as_ref()?, job.name.as_str())))
+        .flat_map(|(idx, handler_name, job_name)| {
             [
                 (
-                    job.handler_name
+                    handler_name
                         .rsplit('.')
                         .next()
-                        .unwrap_or(&job.handler_name)
+                        .unwrap_or(handler_name)
                         .to_string(),
                     idx,
                 ),
-                (job.name.clone(), idx),
+                (job_name.to_string(), idx),
             ]
         })
         .collect();
     let mut named_jobs: BTreeMap<String, usize> = BTreeMap::new();
     for (idx, job) in jobs.iter().enumerate() {
         named_jobs.insert(job.name.clone(), idx);
-        named_jobs.insert(job.handler_name.clone(), idx);
-        named_jobs.insert(
-            job.handler_name
-                .rsplit('.')
-                .next()
-                .unwrap_or(&job.handler_name)
-                .to_string(),
-            idx,
-        );
+        if let Some(handler_name) = &job.handler_name {
+            named_jobs.insert(handler_name.clone(), idx);
+            named_jobs.insert(
+                handler_name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(handler_name)
+                    .to_string(),
+                idx,
+            );
+        }
         if job.job_type == "fastapi-background-task" {
-            named_jobs.insert(job.handler_id.clone(), idx);
+            if let Some(handler_id) = &job.handler_id {
+                named_jobs.insert(handler_id.clone(), idx);
+            }
         }
     }
     let mut seen: HashSet<(usize, String, String)> = HashSet::new();

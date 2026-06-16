@@ -100,7 +100,10 @@ def enqueue_orders():
         .find(|job| job.name == "orders.sync")
         .expect("celery task job");
     assert_eq!(celery.job_type, "celery-task");
-    assert_eq!(celery.handler_id, "cbm:1:tasks.sync_orders");
+    assert_eq!(
+        celery.handler_id.as_deref(),
+        Some("cbm:1:tasks.sync_orders")
+    );
     assert_eq!(celery.process_ids.len(), 1);
 
     let aps = synth
@@ -185,7 +188,7 @@ def submit_receipt(order_id: str, background_tasks: BackgroundTasks):
     let job = synth
         .jobs
         .iter()
-        .find(|job| job.handler_id == "cbm:1:api.send_receipt")
+        .find(|job| job.handler_id.as_deref() == Some("cbm:1:api.send_receipt"))
         .expect("fastapi background task job");
     assert_eq!(job.job_type, "fastapi-background-task");
     assert_eq!(job.strategy, "python-fastapi-background-task");
@@ -252,7 +255,7 @@ def enqueue_orders(order_id):
         .expect("rq queue job");
     assert_eq!(job.job_type, "rq-job");
     assert_eq!(job.strategy, "python-rq-job");
-    assert_eq!(job.handler_id, "cbm:1:jobs.rebuild_orders");
+    assert_eq!(job.handler_id.as_deref(), Some("cbm:1:jobs.rebuild_orders"));
     let edges = job.edge_recs();
     assert!(edges.iter().any(|edge| {
         edge.edge_type == "HANDLES_JOB" && edge.source_id == "cbm:1:jobs.rebuild_orders"
@@ -326,7 +329,10 @@ def enqueue_orders(order_id):
         .find(|job| job.name == "orders.rebuild")
         .expect("dramatiq actor job");
     assert_eq!(job.job_type, "dramatiq-actor");
-    assert_eq!(job.handler_id, "cbm:1:actors.rebuild_orders");
+    assert_eq!(
+        job.handler_id.as_deref(),
+        Some("cbm:1:actors.rebuild_orders")
+    );
     let edges = job.edge_recs();
     assert!(edges.iter().any(|edge| {
         edge.edge_type == "HANDLES_JOB" && edge.source_id == "cbm:1:actors.rebuild_orders"
@@ -387,7 +393,10 @@ def enqueue_orders(order_id):
         .find(|job| job.name == "orders.rebuild")
         .expect("huey task job");
     assert_eq!(job.job_type, "huey-task");
-    assert_eq!(job.handler_id, "cbm:1:huey_tasks.rebuild_orders");
+    assert_eq!(
+        job.handler_id.as_deref(),
+        Some("cbm:1:huey_tasks.rebuild_orders")
+    );
     assert!(job.edge_recs().iter().any(|edge| {
         edge.edge_type == "ENQUEUES_JOB" && edge.source_id == "cbm:2:huey_tasks.enqueue_orders"
     }));

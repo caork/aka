@@ -12,17 +12,19 @@ pub(super) fn attach_spring_batch_step_refs(
     let step_jobs: BTreeMap<String, (String, String)> = jobs
         .iter()
         .filter(|job| job.job_type == "spring-batch-step")
+        .filter_map(|job| Some((job, job.handler_id.as_ref()?, job.handler_name.as_ref()?)))
         .flat_map(|job| {
+            let (job, handler_id, handler_name) = job;
             [
                 (
-                    job.handler_name
+                    handler_name
                         .rsplit('.')
                         .next()
-                        .unwrap_or(&job.handler_name)
+                        .unwrap_or(handler_name)
                         .to_string(),
-                    (job.handler_id.clone(), job.name.clone()),
+                    (handler_id.clone(), job.name.clone()),
                 ),
-                (job.name.clone(), (job.handler_id.clone(), job.name.clone())),
+                (job.name.clone(), (handler_id.clone(), job.name.clone())),
             ]
         })
         .collect();
@@ -34,7 +36,10 @@ pub(super) fn attach_spring_batch_step_refs(
         .iter_mut()
         .filter(|job| job.job_type == "spring-batch-job")
     {
-        let Some(handler) = nodes_by_id.get(job.handler_id.as_str()) else {
+        let Some(handler_id) = &job.handler_id else {
+            continue;
+        };
+        let Some(handler) = nodes_by_id.get(handler_id.as_str()) else {
             continue;
         };
         let Some(text) = read_repo_text(repo, &handler.file_path) else {

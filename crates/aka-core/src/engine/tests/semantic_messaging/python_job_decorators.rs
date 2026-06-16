@@ -86,7 +86,7 @@ def cleanup_orders():
             .find(|job| job.name == name)
             .unwrap_or_else(|| panic!("expected source decorator job {name}"));
         assert_eq!(job.job_type, job_type);
-        assert_eq!(job.handler_id, handler);
+        assert_eq!(job.handler_id.as_deref(), Some(handler));
         assert!(job
             .edge_recs()
             .iter()
