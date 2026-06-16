@@ -10,6 +10,8 @@ use super::{
 
 mod http;
 use http::extract_http_resources;
+mod identity;
+use identity::extract_identity_resources;
 mod notification;
 use notification::extract_notification_resources;
 mod payment;
@@ -227,6 +229,15 @@ impl ResourceDetection {
             strategy: strategy.into(),
         }
     }
+
+    fn identity(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url: format!("identity:{provider}"),
+            resource_type: "identity".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
 }
 
 fn extract_resource_detections(
@@ -244,6 +255,7 @@ fn extract_resource_detections(
     out.extend(extract_java_azure_blob_resources(text, nodes));
     out.extend(extract_search_index_resources(text, nodes));
     out.extend(extract_feature_flag_resources(text, nodes));
+    out.extend(extract_identity_resources(text, nodes));
     out.extend(extract_notification_resources(text, nodes));
     out.extend(extract_payment_resources(text, nodes));
     out.sort_by(|a, b| {
