@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::{
     find_matching_paren, join_route_paths, normalize_route_literal, read_repo_text,
-    read_string_literal, ProjectSourceSet, SynthNode,
+    read_string_literal, ProjectSourceSet,
 };
 
 #[derive(Debug, Default)]
@@ -12,9 +12,9 @@ pub(super) struct PythonRoutePrefixes {
     pub(super) local_by_router: HashMap<String, String>,
 }
 
-pub(super) fn python_route_prefixes_for_node(
+pub(super) fn python_route_prefixes_for_decorators(
     python_prefixes: Option<&PythonRoutePrefixes>,
-    node: &SynthNode,
+    decorators: &[String],
 ) -> Vec<String> {
     let Some(prefixes) = python_prefixes else {
         return vec![String::new()];
@@ -24,7 +24,7 @@ pub(super) fn python_route_prefixes_for_node(
     } else {
         prefixes.include.clone()
     };
-    let local_prefix = python_route_local_prefix(prefixes, node);
+    let local_prefix = python_route_local_prefix(prefixes, decorators);
     include_prefixes
         .into_iter()
         .map(|prefix| {
@@ -39,9 +39,9 @@ pub(super) fn python_route_prefixes_for_node(
 
 fn python_route_local_prefix<'a>(
     prefixes: &'a PythonRoutePrefixes,
-    node: &SynthNode,
+    decorators: &[String],
 ) -> Option<&'a str> {
-    router_name_from_python_decorators(&node.decorators)
+    router_name_from_python_decorators(decorators)
         .and_then(|router| prefixes.local_by_router.get(router))
         .map(String::as_str)
 }
