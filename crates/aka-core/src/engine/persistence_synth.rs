@@ -8,6 +8,9 @@ use super::persistence_access_synth::{
     detect_table_access_edges, normalize_table_access_key, TableAccessEntity, TableAccessRef,
     TableAccessRepository,
 };
+use super::persistence_java_synth::{
+    java_column_names as java_persistence_column_names, java_relationship_targets,
+};
 use super::persistence_mybatis_synth::detect_mybatis_xml_table_access_edges;
 use super::{
     find_matching_paren, project_code_nodes_by_file, read_repo_text,
@@ -266,6 +269,9 @@ pub(super) fn synthesize_persistence_from_sources(
         for edge in detect_python_relationships(&text, file_nodes, &entity_by_name) {
             edges.entry(edge.id.clone()).or_insert(edge);
         }
+        for edge in detect_java_relationships(&text, file_nodes, &entity_by_name) {
+            edges.entry(edge.id.clone()).or_insert(edge);
+        }
     }
 
     let existing_tables = tables.values().map(|table| ExistingTable {
@@ -333,7 +339,7 @@ fn detect_entity_table(text: &str, node: &SynthNode) -> Option<SynthTable> {
             node,
             table_name,
             "java-jpa-entity",
-            java_column_names(text),
+            java_column_names(text, node),
         ));
     }
     if is_python_node(node) {
@@ -457,6 +463,41 @@ fn detect_python_relationships(
                 target,
                 "python-sqlalchemy-relationship",
             ));
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out.dedup_by(|a, b| a.id == b.id);
+    out
+}
+
+fn detect_java_relationships(
+    text: &str,
+    nodes: &[&SynthNode],
+    entities: &BTreeMap<String, EntityInfo>,
+) -> Vec<EdgeRec> {
+    let mut out = Vec::new();
+    for node in nodes
+        .iter()
+        .copied()
+        .filter(|node| matches!(node.label.as_str(), "Class") && is_jvm_node(node))
+    {
+        let Some(source) = entities.get(&node.name).or_else(|| entities.get(&node.qn)) else {
+            continue;
+        };
+        let Some(class_body) = class_body_text(text, node) else {
+            continue;
+        };
+        for target_name in java_relationship_targets(class_body) {
+            let Some(target) = entities
+                .get(&target_name)
+                .or_else(|| entities.get(strip_package(&target_name)))
+            else {
+                continue;
+            };
+            if source.entity_id == target.entity_id {
+                continue;
+            }
+            out.push(relation_edge(source, target, "java-jpa-relationship"));
         }
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -880,18 +921,11 @@ fn python_django_foreign_key_field(field_kind: &str) -> bool {
     matches!(field_kind, "ForeignKey" | "OneToOneField")
 }
 
-fn java_column_names(text: &str) -> Vec<String> {
-    let mut columns = BTreeSet::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if !trimmed.contains("@Column") {
-            continue;
-        }
-        if let Some(name) = annotation_arg_string(trimmed, &["name", "value"]) {
-            columns.insert(name);
-        }
-    }
-    columns.into_iter().collect()
+fn java_column_names(text: &str, node: &SynthNode) -> Vec<String> {
+    let Some(body) = class_body_text(text, node) else {
+        return Vec::new();
+    };
+    java_persistence_column_names(body)
 }
 
 fn class_body_text<'a>(text: &'a str, node: &SynthNode) -> Option<&'a str> {

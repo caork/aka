@@ -161,6 +161,183 @@ interface OrderRepository extends JpaRepository<Order, Long> {
 }
 
 #[test]
+fn synthesizes_java_jpa_relationships_and_join_columns() {
+    let repo = temp_repo("java-jpa-relationships");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let customer_file = "src/main/java/com/example/orders/Customer.java";
+    let invoice_file = "src/main/java/com/example/orders/Invoice.java";
+    let order_file = "src/main/java/com/example/orders/Order.java";
+    let tag_file = "src/main/java/com/example/orders/Tag.java";
+    std::fs::write(
+        repo.join(customer_file),
+        r#"package com.example.orders;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "customers")
+class Customer {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(invoice_file),
+        r#"package com.example.orders;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "invoices")
+class Invoice {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(tag_file),
+        r#"package com.example.orders;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "tags")
+class Tag {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(order_file),
+        r#"package com.example.orders;
+
+import java.util.Set;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToMany;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.OneToOne;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "orders")
+class Order {
+    @Column(name = "status")
+    String status;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "customer_id")
+    private Customer customer;
+
+    @OneToOne
+    @JoinColumn(name = "invoice_id")
+    private com.example.orders.Invoice invoice;
+
+    @ManyToMany
+    private Set<Tag> tags;
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "Customer",
+            "com.example.orders.Customer",
+            customer_file,
+        ),
+        (7, 8),
+        json!({
+            "decorators": ["@Entity", "@Table(name = \"customers\")"],
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Class",
+            "Invoice",
+            "com.example.orders.Invoice",
+            invoice_file,
+        ),
+        (7, 8),
+        json!({
+            "decorators": ["@Entity", "@Table(name = \"invoices\")"],
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        ("Class", "Tag", "com.example.orders.Tag", tag_file),
+        (7, 8),
+        json!({
+            "decorators": ["@Entity", "@Table(name = \"tags\")"],
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        4,
+        ("Class", "Order", "com.example.orders.Order", order_file),
+        (13, 29),
+        json!({
+            "decorators": ["@Entity", "@Table(name = \"orders\")"],
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let table = synth
+        .persistence
+        .node_recs()
+        .into_iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders")
+        })
+        .expect("orders table");
+    let columns: Vec<_> = table
+        .properties
+        .get("columns")
+        .and_then(Value::as_array)
+        .expect("columns")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(columns, ["customer_id", "invoice_id", "status"]);
+
+    let edges = synth.persistence.edge_recs();
+    for target in [
+        "cbm:1:com.example.orders.Customer",
+        "cbm:2:com.example.orders.Invoice",
+        "cbm:3:com.example.orders.Tag",
+    ] {
+        assert!(
+            edges.iter().any(|edge| {
+                edge.edge_type == "HAS_RELATION"
+                    && edge.source_id == "cbm:4:com.example.orders.Order"
+                    && edge.target_id == target
+                    && edge
+                        .evidence
+                        .as_ref()
+                        .and_then(|v| v.get("strategy"))
+                        .and_then(Value::as_str)
+                        == Some("java-jpa-relationship")
+            }),
+            "expected Order relationship to {target}"
+        );
+    }
+}
+
+#[test]
 fn synthesizes_java_table_access_edges() {
     let repo = temp_repo("java-table-access");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
