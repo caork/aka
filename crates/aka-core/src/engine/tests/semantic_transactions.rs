@@ -41,11 +41,8 @@ def submit_order(order):
         edge.edge_type == "HAS_TRANSACTION_BOUNDARY"
             && edge.source_id == "cbm:1:services.submit_order"
             && edge.target_id == tx.id
-            && edge
-                .evidence
-                .as_ref()
-                .is_some_and(|evidence| {
-                    evidence["strategy"] == json!("python-django-transaction-decorator")
-                })
+            && edge.evidence.as_ref().is_some_and(|evidence| {
+                evidence["strategy"] == json!("python-django-transaction-decorator")
+            })
     }));
 }
