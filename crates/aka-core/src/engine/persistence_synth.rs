@@ -639,7 +639,9 @@ fn python_repository_entity(text: &str, node: &SynthNode) -> Option<String> {
 
 fn python_class_table_name(text: &str, node: &SynthNode) -> Option<String> {
     let body = class_body_text(text, node)?;
-    python_sqlalchemy_table_name(body).or_else(|| python_django_meta_table_name(body))
+    python_sqlalchemy_table_name(body)
+        .or_else(|| python_django_meta_table_name(body))
+        .or_else(|| python_django_default_table_name(text, node))
 }
 
 fn python_sqlalchemy_table_name(body: &str) -> Option<String> {
@@ -682,6 +684,74 @@ fn python_django_meta_table_name(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn python_django_default_table_name(text: &str, node: &SynthNode) -> Option<String> {
+    let declaration = python_class_declaration(text, node)?;
+    if !python_extends_django_model(declaration) {
+        return None;
+    }
+    let app_label = python_django_app_label(&node.file_path)?;
+    Some(format!("{}_{}", app_label, camel_to_snake(&node.name)))
+}
+
+fn python_class_declaration<'a>(text: &'a str, node: &SynthNode) -> Option<&'a str> {
+    let line = text
+        .lines()
+        .nth(node.start_line_key().max(1) as usize - 1)?
+        .trim();
+    if line.starts_with("class ") {
+        return Some(line);
+    }
+    class_body_text(text, node)?
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("class "))
+}
+
+fn python_extends_django_model(declaration: &str) -> bool {
+    let Some(open) = declaration.find('(') else {
+        return false;
+    };
+    let close = find_matching_paren(declaration, open).unwrap_or(declaration.len());
+    let bases = &declaration[open + 1..close];
+    split_top_level_commas(bases).into_iter().any(|base| {
+        let base = base.trim();
+        matches!(base, "Model" | "models.Model" | "django.db.models.Model")
+    })
+}
+
+fn python_django_app_label(file_path: &str) -> Option<String> {
+    let normalized = file_path.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let models_idx = parts.iter().position(|part| *part == "models.py");
+    if let Some(idx) = models_idx {
+        return idx
+            .checked_sub(1)
+            .and_then(|app_idx| django_app_label_part(parts.get(app_idx).copied()));
+    }
+    let models_dir_idx = parts.iter().position(|part| *part == "models")?;
+    models_dir_idx
+        .checked_sub(1)
+        .and_then(|app_idx| django_app_label_part(parts.get(app_idx).copied()))
+}
+
+fn django_app_label_part(part: Option<&str>) -> Option<String> {
+    let label = part?
+        .trim()
+        .trim_end_matches(".py")
+        .trim_matches(['.', '-', '_']);
+    if label.is_empty() || matches!(label, "src" | "app" | "apps" | "project") {
+        return None;
+    }
+    let label = label.replace('-', "_");
+    label
+        .chars()
+        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        .then_some(label)
 }
 
 fn leading_space_count(line: &str) -> usize {

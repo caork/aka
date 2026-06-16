@@ -2,6 +2,129 @@ use super::super::*;
 use serde_json::json;
 
 #[test]
+fn synthesizes_python_django_default_table_name() {
+    let repo = temp_repo("python-django-default-table-name");
+    std::fs::create_dir_all(repo.join("orders")).unwrap();
+    std::fs::write(repo.join("orders/__init__.py"), "").unwrap();
+    std::fs::write(
+        repo.join("orders/models.py"),
+        r#"from django.db import models
+
+class Order(models.Model):
+    status = models.CharField(max_length=32)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("orders/services.py"),
+        r#"from .models import Order
+
+def load_order(order_id):
+    return Order.objects.get(id=order_id)
+
+def create_order(payload):
+    return Order.objects.create(**payload)
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Class", "Order", "orders.models.Order", "orders/models.py"),
+        (3, 4),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "load_order",
+        "orders.services.load_order",
+        "orders/services.py",
+        (3, 4),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "create_order",
+        "orders.services.create_order",
+        "orders/services.py",
+        (6, 7),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let table_id = synth
+        .persistence
+        .node_recs()
+        .into_iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders_order")
+        })
+        .expect("orders_order table")
+        .id;
+    let edges = synth.persistence.edge_recs();
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "READS_TABLE"
+            && edge.source_id == "cbm:2:orders.services.load_order"
+            && edge.target_id == table_id
+    }));
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "WRITES_TABLE"
+            && edge.source_id == "cbm:3:orders.services.create_order"
+            && edge.target_id == table_id
+    }));
+}
+
+#[test]
+fn synthesizes_python_django_default_table_name_from_models_package() {
+    let repo = temp_repo("python-django-default-table-name-models-package");
+    std::fs::create_dir_all(repo.join("orders/models")).unwrap();
+    std::fs::write(repo.join("orders/__init__.py"), "").unwrap();
+    std::fs::write(repo.join("orders/models/__init__.py"), "").unwrap();
+    std::fs::write(
+        repo.join("orders/models/order_item.py"),
+        r#"from django.db.models import Model
+
+class OrderItem(Model):
+    sku = "demo"
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderItem",
+            "orders.models.order_item.OrderItem",
+            "orders/models/order_item.py",
+        ),
+        (3, 4),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth.persistence.node_recs().into_iter().any(|node| {
+        node.label == "Table"
+            && node.properties.get("tableName").and_then(Value::as_str) == Some("orders_order_item")
+    }));
+}
+
+#[test]
 fn synthesizes_python_django_orm_write_table_access_edges() {
     let repo = temp_repo("python-django-orm-table-access");
     std::fs::write(
