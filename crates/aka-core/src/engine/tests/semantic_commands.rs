@@ -587,6 +587,52 @@ class IgnoredMaintenance implements CommandLineRunner {
 }
 
 #[test]
+fn command_synthesis_uses_git_tracked_java_in_noisy_named_dirs() {
+    let repo = temp_repo("git-tracked-noisy-dir-command-sources");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("vendor/acme/src/main/java/com/example/ops")).unwrap();
+    let file = "vendor/acme/src/main/java/com/example/ops/StartupMaintenance.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.ops;
+import org.springframework.boot.ApplicationRunner;
+class StartupMaintenance implements ApplicationRunner {
+    public void run(org.springframework.boot.ApplicationArguments args) {
+        warmCache();
+    }
+}
+"#,
+    )
+    .unwrap();
+    run_git(&repo, &["add", file]);
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "StartupMaintenance",
+            "com.example.ops.StartupMaintenance",
+            file,
+        ),
+        (3, 7),
+        json!({"language": "java"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let handlers: BTreeSet<_> = synth
+        .commands
+        .iter()
+        .map(|command| command.handler_name.as_str())
+        .collect();
+    assert!(
+        handlers.contains("StartupMaintenance"),
+        "Git-tracked Java source should not be excluded by generic directory names"
+    );
+}
+
+#[test]
 fn command_synthesis_falls_back_to_repo_files_without_git() {
     let repo = temp_repo("filesystem-project-command-sources");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/ops")).unwrap();

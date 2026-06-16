@@ -45,10 +45,7 @@ impl ProjectSourceSet {
 
     pub(super) fn contains_project_file(&self, repo: &Path, file_path: &str) -> bool {
         let normalized = normalize_repo_path(file_path);
-        if normalized.is_empty()
-            || is_noisy_source_path(&normalized)
-            || self.is_project_test_root_file(&normalized)
-        {
+        if normalized.is_empty() || self.is_project_test_root_file(&normalized) {
             return false;
         }
         if self.has_git_listing {
@@ -56,7 +53,7 @@ impl ProjectSourceSet {
                 && (self.tracked_files.contains(&normalized)
                     || self.untracked_files.contains(&normalized));
         }
-        repo.join(&normalized).is_file()
+        repo.join(&normalized).is_file() && !is_noisy_source_path(&normalized)
     }
 
     pub(super) fn iter(&self) -> impl Iterator<Item = &str> {
@@ -153,7 +150,7 @@ fn git_ls_files(repo: &Path, args: &[&str]) -> Option<BTreeSet<String>> {
         String::from_utf8_lossy(&output.stdout)
             .split('\0')
             .map(normalize_repo_path)
-            .filter(|path| !path.is_empty() && !is_noisy_source_path(path))
+            .filter(|path| !path.is_empty())
             .collect(),
     )
 }
@@ -349,7 +346,7 @@ pub(super) fn nodes_by_file(
 ) -> BTreeMap<String, Vec<&SynthNode>> {
     let mut by_file: BTreeMap<String, Vec<&SynthNode>> = BTreeMap::new();
     for node in nodes.values() {
-        if node.file_path.is_empty() || is_noisy_source_path(&node.file_path) {
+        if node.file_path.is_empty() {
             continue;
         }
         by_file
@@ -537,6 +534,22 @@ mod tests {
         assert!(sources.contains_project_file(&repo, untracked));
         assert!(!sources.contains_project_file(&repo, test));
         assert!(!sources.contains_project_file(&repo, ignored));
+    }
+
+    #[test]
+    fn project_source_set_trusts_git_for_noisy_named_tracked_dirs() {
+        let repo = temp_repo("git-tracked-noisy-name");
+        run_git(&repo, &["init"]);
+        std::fs::create_dir_all(repo.join("vendor/acme/src/main/java")).unwrap();
+        let tracked = "vendor/acme/src/main/java/StartupMaintenance.java";
+        std::fs::write(repo.join(tracked), "class StartupMaintenance {}\n").unwrap();
+        run_git(&repo, &["add", tracked]);
+
+        let sources = ProjectSourceSet::discover(&repo);
+
+        assert!(sources.has_git_listing());
+        assert!(sources.is_git_tracked_file(tracked));
+        assert!(sources.contains_project_file(&repo, tracked));
     }
 
     #[test]
