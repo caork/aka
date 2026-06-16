@@ -72,3 +72,81 @@ class OrderEvents {
             })
     }));
 }
+
+#[test]
+fn detects_spring_event_listeners_from_source_annotations_without_metadata() {
+    let repo = temp_repo("spring-event-source-annotations");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/events")).unwrap();
+    let file = "src/main/java/com/example/events/OrderEvents.java";
+    std::fs::write(
+        repo.join(file),
+        r##"package com.example.events;
+
+import org.springframework.context.event.EventListener;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
+
+class OrderPaidEvent {}
+
+class OrderEvents {
+    @EventListener(
+        classes = OrderPaidEvent.class,
+        condition = "#event.total > 0")
+    public void onPaid(OrderPaidEvent event) {}
+
+    @TransactionalEventListener(
+        classes = OrderPaidEvent.class,
+        phase = TransactionPhase.AFTER_COMMIT)
+    public void afterCommit(OrderPaidEvent event) {}
+}"##,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "onPaid",
+        "com.example.events.OrderEvents.onPaid",
+        file,
+        (12, 12),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "afterCommit",
+        "com.example.events.OrderEvents.afterCommit",
+        file,
+        (17, 17),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let event = synth
+        .events
+        .iter()
+        .find(|event| event.name == "OrderPaidEvent")
+        .expect("spring event from source annotations");
+    assert_eq!(event.bus, "spring-application-event");
+    assert_eq!(event.handlers.len(), 2);
+    let edges = event.edge_recs();
+    assert!(edges.iter().any(|edge| {
+        edge.source_id == "cbm:1:com.example.events.OrderEvents.onPaid"
+            && edge.edge_type == "HANDLES_EVENT"
+            && edge.evidence.as_ref().is_some_and(|evidence| {
+                evidence["metadata"]["condition"] == json!("#event.total > 0")
+            })
+    }));
+    assert!(edges.iter().any(|edge| {
+        edge.source_id == "cbm:2:com.example.events.OrderEvents.afterCommit"
+            && edge.edge_type == "HANDLES_EVENT"
+            && edge.evidence.as_ref().is_some_and(|evidence| {
+                evidence["metadata"]["phase"] == json!("TransactionPhase.AFTER_COMMIT")
+            })
+    }));
+}
