@@ -2,6 +2,113 @@ use super::super::*;
 use serde_json::json;
 
 #[test]
+fn synthesizes_configured_feature_flag_resources() {
+    let repo = temp_repo("configured-feature-flag-resources");
+    std::fs::create_dir_all(repo.join("src/main/resources")).unwrap();
+    let file = "src/main/resources/application.yml";
+    std::fs::write(
+        repo.join(file),
+        r#"features:
+  checkout:
+    flag: checkout-v2
+  experiments:
+    flags: search-v2,pricing-v3
+launchdarkly:
+  migration:
+    flag-key: ledger-migration
+dynamic:
+  feature-flag: ${DYNAMIC_FLAG}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("settings.py"),
+        r#"UNLEASH_CHECKOUT_FLAG = "checkout-rollout"
+SPLITIO_FLAGS = "catalog-grid,loyalty-offers"
+"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join(".env"), "WAFFLE_FLAG=beta-discount\n").unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Config", "application.yml", file, file),
+        (1, 10),
+        json!({"language": "yaml"}),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        ("Config", "settings.py", "settings.py", "settings.py"),
+        (1, 2),
+        json!({"language": "python"}),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        ("Config", ".env", ".env", ".env"),
+        (1, 1),
+        json!({"language": "dotenv"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert_config_flag(
+        &synth,
+        "feature-flag:checkout-v2",
+        &config_id("features.checkout.flag"),
+        "feature-flag-config",
+    );
+    assert_config_flag(
+        &synth,
+        "feature-flag:search-v2",
+        &config_id("features.experiments.flags"),
+        "feature-flag-config",
+    );
+    assert_config_flag(
+        &synth,
+        "feature-flag:pricing-v3",
+        &config_id("features.experiments.flags"),
+        "feature-flag-config",
+    );
+    assert_config_flag(
+        &synth,
+        "feature-flag:ledger-migration",
+        &config_id("launchdarkly.migration.flag.key"),
+        "launchdarkly-config-flag",
+    );
+    assert_config_flag(
+        &synth,
+        "feature-flag:checkout-rollout",
+        &config_id("unleash.checkout.flag"),
+        "unleash-config-flag",
+    );
+    assert_config_flag(
+        &synth,
+        "feature-flag:catalog-grid",
+        &config_id("splitio.flags"),
+        "split-config-flag",
+    );
+    assert_config_flag(
+        &synth,
+        "feature-flag:loyalty-offers",
+        &config_id("splitio.flags"),
+        "split-config-flag",
+    );
+    assert_config_flag(
+        &synth,
+        "feature-flag:beta-discount",
+        &config_id("waffle.flag"),
+        "waffle-config-flag",
+    );
+    assert!(synth
+        .resources
+        .iter()
+        .all(|resource| resource.url != "feature-flag:${DYNAMIC_FLAG}"));
+}
+
+#[test]
 fn synthesizes_python_feature_flag_resources() {
     let repo = temp_repo("python-feature-flag-resources");
     std::fs::write(
@@ -76,6 +183,24 @@ def loyalty_enabled(user_id):
                 && edge.evidence.as_ref().unwrap()["strategy"] == strategy
         }));
     }
+}
+
+fn assert_config_flag(synth: &SynthGraph, url: &str, source_id: &str, strategy: &str) {
+    let resource = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == url)
+        .unwrap_or_else(|| panic!("expected feature flag resource {url}"));
+    assert_eq!(resource.resource_type, "feature-flag");
+    assert!(resource.edge_recs().iter().any(|edge| {
+        edge.source_id == source_id
+            && edge.edge_type == "ACCESSES_RESOURCE"
+            && edge.evidence.as_ref().unwrap()["strategy"] == strategy
+    }));
+}
+
+fn config_id(key: &str) -> String {
+    format!("config:heuristic:{:016x}", stable_hash(key))
 }
 
 #[test]
