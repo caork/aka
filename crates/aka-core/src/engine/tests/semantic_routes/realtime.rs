@@ -102,6 +102,106 @@ class OrderSocket {
 }
 
 #[test]
+fn synthesizes_spring_stomp_routes_from_source_annotations_without_metadata() {
+    let repo = temp_repo("spring-stomp-routes-source-annotations");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/realtime")).unwrap();
+    let file = "src/main/java/com/example/realtime/OrderSocket.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.realtime;
+
+import org.springframework.messaging.handler.annotation.MessageMapping;
+import org.springframework.messaging.simp.annotation.SubscribeMapping;
+
+@MessageMapping(
+    "/ws")
+class OrderSocket {
+    @MessageMapping(
+        "/orders")
+    public OrderAck handleOrder(OrderMessage message) {
+        return new OrderAck();
+    }
+
+    @SubscribeMapping(
+        "/orders/status")
+    public OrderStatus subscribeStatus() {
+        return new OrderStatus();
+    }
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderSocket",
+            "com.example.realtime.OrderSocket",
+            file,
+        ),
+        (8, 20),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "handleOrder",
+            "com.example.realtime.OrderSocket.handleOrder",
+            file,
+        ),
+        (11, 13),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.realtime.OrderSocket",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
+            "subscribeStatus",
+            "com.example.realtime.OrderSocket.subscribeStatus",
+            file,
+        ),
+        (17, 19),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.realtime.OrderSocket",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let message_route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/ws/orders")
+        .expect("message mapping route from source annotation");
+    assert_eq!(message_route.method.as_deref(), Some("STOMP"));
+    assert_eq!(
+        message_route.handler_id.as_deref(),
+        Some("cbm:2:com.example.realtime.OrderSocket.handleOrder")
+    );
+
+    let subscribe_route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/ws/orders/status")
+        .expect("subscribe mapping route from source annotation");
+    assert_eq!(subscribe_route.method.as_deref(), Some("STOMP_SUBSCRIBE"));
+    assert_eq!(
+        subscribe_route.handler_id.as_deref(),
+        Some("cbm:3:com.example.realtime.OrderSocket.subscribeStatus")
+    );
+}
+
+#[test]
 fn synthesizes_python_fastapi_websocket_routes() {
     let repo = temp_repo("python-fastapi-websocket-routes");
     std::fs::write(
@@ -138,6 +238,49 @@ async def order_socket(websocket: WebSocket, order_id: str):
         .iter()
         .find(|route| route.route == "/ws/orders/{order_id}")
         .expect("fastapi websocket route");
+    assert_eq!(route.method.as_deref(), Some("WEBSOCKET"));
+    assert_eq!(
+        route.handler_id.as_deref(),
+        Some("cbm:1:realtime.order_socket")
+    );
+}
+
+#[test]
+fn synthesizes_python_fastapi_websocket_routes_from_source_decorators_without_metadata() {
+    let repo = temp_repo("python-fastapi-websocket-routes-source-decorators");
+    std::fs::write(
+        repo.join("realtime.py"),
+        r#"from fastapi import FastAPI, WebSocket
+
+app = FastAPI()
+
+@app.websocket("/ws/orders/{order_id}")
+async def order_socket(websocket: WebSocket, order_id: str):
+    await websocket.accept()
+    await websocket.send_json({"orderId": order_id})
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "order_socket",
+        "realtime.order_socket",
+        "realtime.py",
+        (6, 8),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/ws/orders/{order_id}")
+        .expect("fastapi websocket route from source decorator");
     assert_eq!(route.method.as_deref(), Some("WEBSOCKET"));
     assert_eq!(
         route.handler_id.as_deref(),

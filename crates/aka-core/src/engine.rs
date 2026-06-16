@@ -2630,7 +2630,7 @@ fn synthesize_routes_from_sources(
     let django_routes_by_file = django_urlconf_routes_from_repo(repo, &project_sources, &by_file);
     let spring_functional_routes_by_file =
         spring_functional_routes_from_repo(repo, &project_sources, nodes);
-    let realtime_routes_by_file = realtime_routes_by_file(&by_file, &python_prefixes);
+    let realtime_routes_by_file = realtime_routes_by_file(repo, &by_file, &python_prefixes);
     let mut routes: BTreeMap<(String, String, Option<String>), SynthRoute> = BTreeMap::new();
     for native in native_routes {
         let route = route_from_path(&native.file_path)

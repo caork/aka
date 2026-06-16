@@ -1,17 +1,19 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use super::{
-    join_route_paths, normalize_route_literal, python_route_prefixes_for_node, PythonRoutePrefixes,
-    RouteCandidate, SynthNode,
+    join_route_paths, normalize_route_literal, python_route_prefixes_for_node, read_repo_text,
+    source_annotations_before_node, PythonRoutePrefixes, RouteCandidate, SynthNode,
 };
 
 pub(super) fn realtime_routes_by_file(
+    repo: &Path,
     nodes_by_file: &BTreeMap<String, Vec<&SynthNode>>,
     python_prefixes_by_file: &BTreeMap<String, PythonRoutePrefixes>,
 ) -> BTreeMap<String, Vec<RouteCandidate>> {
     let mut out = BTreeMap::new();
     for (file_path, nodes) in nodes_by_file {
-        let routes = realtime_routes(nodes, python_prefixes_by_file.get(file_path));
+        let text = read_repo_text(repo, file_path).unwrap_or_default();
+        let routes = realtime_routes(&text, nodes, python_prefixes_by_file.get(file_path));
         if !routes.is_empty() {
             out.insert(file_path.clone(), routes);
         }
@@ -20,6 +22,7 @@ pub(super) fn realtime_routes_by_file(
 }
 
 fn realtime_routes(
+    text: &str,
     nodes: &[&SynthNode],
     python_prefixes: Option<&PythonRoutePrefixes>,
 ) -> Vec<RouteCandidate> {
@@ -29,7 +32,7 @@ fn realtime_routes(
         .copied()
         .filter(|node| matches!(node.label.as_str(), "Class" | "Interface"))
     {
-        let Some(prefix) = realtime_mapping_path(&node.decorators) else {
+        let Some(prefix) = realtime_mapping_path(&decorators_for_node(text, node)) else {
             continue;
         };
         class_prefixes.insert(node.aka_id.clone(), prefix.clone());
@@ -42,7 +45,7 @@ fn realtime_routes(
         .copied()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
     {
-        for mapping in realtime_method_mappings(&node.decorators) {
+        for mapping in realtime_method_mappings(&decorators_for_node(text, node)) {
             let prefixes = realtime_prefixes_for_node(node, &class_prefixes, python_prefixes);
             for prefix in prefixes {
                 routes.push(RouteCandidate {
@@ -57,6 +60,14 @@ fn realtime_routes(
     routes.sort_by(|a, b| a.route.cmp(&b.route).then_with(|| a.method.cmp(&b.method)));
     routes.dedup_by(|a, b| a.route == b.route && a.method == b.method);
     routes
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn realtime_prefixes_for_node(
