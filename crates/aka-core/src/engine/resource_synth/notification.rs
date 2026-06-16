@@ -1,11 +1,16 @@
 use super::ResourceDetection;
 use crate::engine::SynthNode;
 
+mod config;
 mod java;
 mod python;
 
 use java::{extract_java_notifications, has_java_notification_context};
 use python::{extract_python_notifications, has_python_notification_context};
+
+pub(super) fn extract_notification_config_resources(text: &str) -> Vec<ResourceDetection> {
+    config::extract_notification_config_resources(text)
+}
 
 pub(super) fn extract_notification_resources(
     text: &str,

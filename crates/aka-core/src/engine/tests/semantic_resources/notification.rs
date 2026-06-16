@@ -2,6 +2,128 @@ use super::super::*;
 use serde_json::json;
 
 #[test]
+fn synthesizes_configured_notification_resources() {
+    let repo = temp_repo("configured-notification-resources");
+    std::fs::create_dir_all(repo.join("src/main/resources")).unwrap();
+    let file = "src/main/resources/application.yml";
+    std::fs::write(
+        repo.join(file),
+        r#"sendgrid:
+  api-key: sg-redacted
+mailgun:
+  api-key: mg-redacted
+aws:
+  ses:
+    region: us-east-1
+spring:
+  mail:
+    host: smtp.example.com
+slack:
+  webhook-url: https://hooks.slack.com/services/T000/B000/XXX
+disabled:
+  twilio:
+    auth-token: ${TWILIO_TOKEN}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("settings.py"),
+        r#"TWILIO_ACCOUNT_SID = "ACxxx"
+FCM_SERVER_KEY = "fcm"
+APNS_KEY_ID = "apns"
+"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join(".env"), "SLACK_BOT_TOKEN=xoxb-redacted\n").unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Config", "application.yml", file, file),
+        (1, 16),
+        json!({"language": "yaml"}),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        ("Config", "settings.py", "settings.py", "settings.py"),
+        (1, 3),
+        json!({"language": "python"}),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        ("Config", ".env", ".env", ".env"),
+        (1, 1),
+        json!({"language": "dotenv"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert_notification_edge(
+        &synth,
+        "notification:email:sendgrid",
+        &config_id("sendgrid.api.key"),
+        "sendgrid-config",
+    );
+    assert_notification_edge(
+        &synth,
+        "notification:email:mailgun",
+        &config_id("mailgun.api.key"),
+        "mailgun-config",
+    );
+    assert_notification_edge(
+        &synth,
+        "notification:email:aws-ses",
+        &config_id("aws.ses.region"),
+        "aws-ses-config",
+    );
+    assert_notification_edge(
+        &synth,
+        "notification:email:smtp",
+        &config_id("spring.mail.host"),
+        "smtp-config",
+    );
+    assert_notification_edge(
+        &synth,
+        "notification:chat:slack",
+        &config_id("slack.webhook.url"),
+        "slack-config",
+    );
+    assert_notification_edge(
+        &synth,
+        "notification:sms:twilio",
+        &config_id("twilio.account.sid"),
+        "twilio-config",
+    );
+    assert_notification_edge(
+        &synth,
+        "notification:push:firebase",
+        &config_id("fcm.server.key"),
+        "firebase-config",
+    );
+    assert_notification_edge(
+        &synth,
+        "notification:push:apns",
+        &config_id("apns.key.id"),
+        "apns-config",
+    );
+    assert_notification_edge(
+        &synth,
+        "notification:chat:slack",
+        &config_id("slack.bot.token"),
+        "slack-config",
+    );
+    assert!(!synth.resources.iter().any(|resource| {
+        resource.url == "notification:sms:twilio"
+            && resource
+                .edge_recs()
+                .iter()
+                .any(|edge| edge.source_id == config_id("disabled.twilio.auth.token"))
+    }));
+}
+
+#[test]
 fn synthesizes_python_notification_resources() {
     let repo = temp_repo("python-notification-resources");
     std::fs::write(
@@ -403,4 +525,8 @@ fn assert_notification_edge(synth: &SynthGraph, url: &str, source_id: &str, stra
             && edge.edge_type == "ACCESSES_RESOURCE"
             && edge.evidence.as_ref().unwrap()["strategy"] == strategy
     }));
+}
+
+fn config_id(key: &str) -> String {
+    format!("config:heuristic:{:016x}", stable_hash(key))
 }

@@ -182,6 +182,7 @@ fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
     out.extend(extract_storage_config_resources(text));
     out.extend(feature_flag::extract_feature_flag_config_resources(text));
     out.extend(payment::extract_payment_config_resources(text));
+    out.extend(notification::extract_notification_config_resources(text));
     out
 }
 
