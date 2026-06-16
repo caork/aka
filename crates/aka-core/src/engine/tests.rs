@@ -2665,6 +2665,110 @@ class OrderService {
 }
 
 #[test]
+fn synthesizes_java_transactions_from_source_annotations_without_metadata() {
+    let repo = temp_repo("java-transaction-source-annotations");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/OrderService.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+@Transactional(readOnly = true)
+class OrderService {
+    public Order loadOrder(String id) {
+        return repo.findById(id).orElseThrow();
+    }
+
+    @Transactional(
+        propagation = Propagation.REQUIRES_NEW,
+        readOnly = false)
+    public void submitOrder(Order order) {
+        repo.save(order);
+    }
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderService",
+            "com.example.orders.OrderService",
+            file,
+        ),
+        (7, 18),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "loadOrder",
+        "com.example.orders.OrderService.loadOrder",
+        file,
+        (8, 10),
+        json!({
+            "language": "java",
+            "parent_class": "OrderService",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "submitOrder",
+        "com.example.orders.OrderService.submitOrder",
+        file,
+        (15, 17),
+        json!({
+            "language": "java",
+            "parent_class": "OrderService",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let load_tx = synth
+        .transactions
+        .iter()
+        .find(|tx| tx.name == "loadOrder transaction")
+        .expect("class-level source annotation transaction should apply to method");
+    assert_eq!(load_tx.manager, "spring-transaction");
+    assert_eq!(load_tx.read_only, Some(true));
+    assert_eq!(
+        load_tx.endpoints[0].node_id,
+        "cbm:2:com.example.orders.OrderService.loadOrder"
+    );
+    assert!(load_tx.edge_recs().iter().any(|edge| {
+        edge.evidence.as_ref().is_some_and(|evidence| {
+            evidence["strategy"] == json!("java-spring-class-transactional")
+        })
+    }));
+
+    let submit_tx = synth
+        .transactions
+        .iter()
+        .find(|tx| tx.name == "submitOrder transaction")
+        .expect("method-level source annotation transaction");
+    assert_eq!(submit_tx.propagation.as_deref(), Some("REQUIRES_NEW"));
+    assert_eq!(submit_tx.read_only, Some(false));
+    assert_eq!(
+        submit_tx.endpoints[0].node_id,
+        "cbm:3:com.example.orders.OrderService.submitOrder"
+    );
+    assert!(submit_tx.edge_recs().iter().any(|edge| {
+        edge.evidence
+            .as_ref()
+            .is_some_and(|evidence| evidence["strategy"] == json!("java-spring-transactional"))
+    }));
+}
+
+#[test]
 fn synthesizes_python_transaction_boundaries() {
     let repo = temp_repo("python-transactions");
     std::fs::write(

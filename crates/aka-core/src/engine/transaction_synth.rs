@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_call_args, node_at_offset, pick_handler_node, project_code_nodes_by_file, read_repo_text,
-    stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
+    source_annotations_before_node, stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -153,7 +153,7 @@ fn extract_transaction_detections(
             )
         })
     {
-        out.extend(extract_jvm_transactions(nodes));
+        out.extend(extract_jvm_transactions(text, nodes));
     }
     if lower.ends_with(".py")
         || nodes
@@ -172,23 +172,23 @@ fn extract_transaction_detections(
     out
 }
 
-fn extract_jvm_transactions(nodes: &[&SynthNode]) -> Vec<TransactionDetection> {
+fn extract_jvm_transactions(text: &str, nodes: &[&SynthNode]) -> Vec<TransactionDetection> {
     let mut out = Vec::new();
-    let class_tx = class_transaction_annotations(nodes);
+    let class_tx = class_transaction_annotations(text, nodes);
     for node in nodes
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
     {
         let mut own = false;
-        for decorator in &node.decorators {
-            let Some(name) = decorator_name(decorator) else {
+        for decorator in decorators_for_node(text, node) {
+            let Some(name) = decorator_name(&decorator) else {
                 continue;
             };
             if name != "Transactional" {
                 continue;
             }
             own = true;
-            out.push(jvm_detection(node, decorator, "java-spring-transactional"));
+            out.push(jvm_detection(node, &decorator, "java-spring-transactional"));
         }
         if !own {
             if let Some(decorator) = node
@@ -207,20 +207,28 @@ fn extract_jvm_transactions(nodes: &[&SynthNode]) -> Vec<TransactionDetection> {
     out
 }
 
-fn class_transaction_annotations(nodes: &[&SynthNode]) -> BTreeMap<String, String> {
+fn class_transaction_annotations(text: &str, nodes: &[&SynthNode]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for node in nodes
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Class" | "Interface"))
     {
-        for decorator in &node.decorators {
-            if decorator_name(decorator) == Some("Transactional") {
+        for decorator in decorators_for_node(text, node) {
+            if decorator_name(&decorator) == Some("Transactional") {
                 out.insert(node.name.clone(), decorator.clone());
                 out.insert(node.qn.clone(), decorator.clone());
             }
         }
     }
     out
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn jvm_detection(node: &SynthNode, decorator: &str, strategy: &str) -> TransactionDetection {
