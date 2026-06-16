@@ -9,7 +9,8 @@ use super::persistence_access_synth::{
     TableAccessRepository,
 };
 use super::persistence_java_synth::{
-    java_column_names as java_persistence_column_names, java_relationship_targets,
+    java_column_names as java_persistence_column_names,
+    java_mongo_field_names as java_persistence_mongo_field_names, java_relationship_targets,
 };
 use super::persistence_mybatis_synth::detect_mybatis_xml_table_access_edges;
 use super::{
@@ -340,6 +341,21 @@ fn detect_entity_table(text: &str, node: &SynthNode) -> Option<SynthTable> {
             table_name,
             "java-jpa-entity",
             java_column_names(text, node),
+        ));
+    }
+    if is_jvm_node(node) && has_decorator_named(&decorators, "Document") {
+        let collection_name = decorators
+            .iter()
+            .find(|decorator| decorator_name(decorator) == Some("Document"))
+            .and_then(|decorator| {
+                annotation_arg_string(decorator, &["collection", "value", "name"])
+            })
+            .unwrap_or_else(|| camel_to_snake(&node.name));
+        return Some(table_for_node(
+            node,
+            collection_name,
+            "java-spring-data-mongo-document",
+            java_mongo_field_names(text, node),
         ));
     }
     if is_python_node(node) {
@@ -926,6 +942,13 @@ fn java_column_names(text: &str, node: &SynthNode) -> Vec<String> {
         return Vec::new();
     };
     java_persistence_column_names(body)
+}
+
+fn java_mongo_field_names(text: &str, node: &SynthNode) -> Vec<String> {
+    let Some(body) = class_body_text(text, node) else {
+        return Vec::new();
+    };
+    java_persistence_mongo_field_names(body)
 }
 
 fn class_body_text<'a>(text: &'a str, node: &SynthNode) -> Option<&'a str> {

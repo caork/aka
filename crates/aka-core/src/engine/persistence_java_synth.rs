@@ -6,6 +6,10 @@ pub(super) fn java_column_names(body: &str) -> Vec<String> {
     java_annotation_arg_strings(body, &["Column", "JoinColumn"], &["name", "value"])
 }
 
+pub(super) fn java_mongo_field_names(body: &str) -> Vec<String> {
+    java_annotation_arg_strings(body, &["Field"], &["name", "value"])
+}
+
 pub(super) fn java_relationship_targets(body: &str) -> Vec<String> {
     let mut targets = BTreeSet::new();
     for statement in body.split(';') {
