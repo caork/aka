@@ -8,7 +8,7 @@ Always call `list_repos` before search/context tools.
 
 aka can index the current project without the user opening the desktop import flow first:
 
-- HTTP MCP asks the Codex client for workspace roots on every tool call and queues any local repo roots for background indexing.
+- HTTP MCP asks the Codex client for workspace roots on every tool call and queues any local repo roots for background indexing. If roots are unavailable, the server process working directory is used as a fallback, and local path parameters are resolved to the git/project root and queued automatically.
 - stdio fallback (`AKA mcp`) also detects the server process working directory and queues that workspace.
 - For local repositories, follow-up query/analysis tools accept the current workspace path directly. `repo`, `repo_path`, `workspace_path`, `workspace`, `path`, and `repository` may all be a local root or nested path; aka resolves it to the workspace root, queues background indexing when needed, and reports that the repo is indexing. Prefer passing the local path when available instead of asking the user for a repo name.
 - If the target local repo is not listed, call `analyze` with the repo root, a relative path, or any nested directory inside the repo. aka resolves it to the git/project root, registers it in the shared GUI-visible knowledge base, and schedules background indexing.
@@ -49,7 +49,7 @@ After aka gives `file:line`, read only the relevant local slice around that loca
 ## Avoid
 
 - Do not skip `list_repos` at the start of a task.
-- Do not assume a repository must be indexed manually in the desktop UI; prefer automatic roots, then `analyze` as fallback.
+- Do not assume a repository must be indexed manually in the desktop UI; prefer automatic roots, server cwd/path auto-indexing, then `analyze` as fallback.
 - Do not use `query` for exact symbol lookup when `find_definition` fits.
 - Do not use only one-hop `search_references` for refactor safety; use `impact`.
 - Do not call `rename` with `dry_run:false` before reviewing the dry-run plan and candidates.

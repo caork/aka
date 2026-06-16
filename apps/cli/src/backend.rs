@@ -3450,6 +3450,28 @@ mod tests {
     }
 
     #[test]
+    fn engine_dir_backend_can_auto_queue_current_workspace() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let repo = temp_repo("workspace-auto-engine-dir");
+        let home = temp_repo("workspace-auto-engine-dir-home");
+        let engine_dir = temp_repo("workspace-auto-engine-dir-bin");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
+        std::fs::write(repo.join("src/app.py"), "def main(): pass\n").unwrap();
+        std::env::set_var("AKA_HOME", &home);
+        std::env::set_current_dir(&repo).unwrap();
+
+        let backend = AkaBackend::with_engine_dir(engine_dir).with_workspace_auto_index();
+        let repos = backend.list_repos().unwrap();
+
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, derive_local_name(&repo));
+        assert_job_visible_status(&repos[0].status);
+        assert!(repos[0].progress.is_some());
+    }
+
+    #[test]
     fn analyze_queues_unregistered_local_repo_for_mcp_visibility() {
         let _guard = env_lock();
         let _restore = EnvRestore::capture();

@@ -27,7 +27,7 @@ stdio fallback: agent ─spawn─▶ 桌面包 AKA mcp ──读写同一 app da
 远程模式: agent ─HTTP+token─▶ aka serve :4111 ─▶ /data（服务器侧索引）
 ```
 
-- **阶段一（现状）**：本机运行。桌面端负责索引/浏览，并内置 `127.0.0.1:4112/mcp` 给 Claude Code / Codex / OpenCode。`list_repos` 会尝试通过 MCP `roots/list` 获取客户端 workspace roots 并自动排队索引；客户端不暴露 roots 时，skill 指导 agent 用 `analyze` 显式传仓库绝对路径。stdio `AKA mcp` 保留为 fallback，且和 GUI 共用 app data。
+- **阶段一（现状）**：本机运行。桌面端负责索引/浏览，并内置 `127.0.0.1:4112/mcp` 给 Claude Code / Codex / OpenCode。每次工具调用都会优先通过 MCP `roots/list` 获取客户端 workspace roots 并自动排队索引；客户端不暴露 roots 时，服务端会用进程工作目录兜底发现当前工作区，本地路径参数也会提升到 git/project root 并排队索引；最后才需要 agent 用 `analyze` 显式传仓库绝对路径。stdio `AKA mcp` 保留为 fallback，且和 GUI 共用 app data。
 - **阶段二（M4 远程模式）**：`aka serve` 增加 MCP Streamable HTTP 端点（rmcp 已支持该 transport，README 架构图中已预留）。三个客户端 2026 年中均已支持远程 MCP：
   - Claude Code：`claude mcp add --transport http aka https://host/mcp`；
   - Codex：`[mcp_servers.aka]` 里 `url = "..."` + `bearer_token_env_var`；

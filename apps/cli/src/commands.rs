@@ -135,7 +135,16 @@ where
         }),
         Cmd::Serve { addr } => tokio_rt()?.block_on(async {
             eprintln!("aka -> http://{addr}");
-            let backend = AkaBackend::new();
+            let backend = AkaBackend::new().with_workspace_auto_index();
+            match backend.auto_index_current_workspace() {
+                Ok(Some(name)) => {
+                    eprintln!("aka ▸ server detected current workspace; indexing queued as {name}");
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!("aka ▸ server workspace auto-index skipped: {err:#}");
+                }
+            }
             backend.start_auto_indexer();
             aka_server::serve(Arc::new(backend) as Arc<dyn Backend>, addr).await
         }),

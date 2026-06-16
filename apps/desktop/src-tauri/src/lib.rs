@@ -225,13 +225,12 @@ fn configure_backend(
         .path()
         .resource_dir()
         .unwrap_or_else(|_| fallback_resource_dir());
-    Ok(
-        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
-            AkaBackend::with_engine_dir(engine_dir)
-        } else {
-            AkaBackend::new()
-        },
-    )
+    let backend = if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+        AkaBackend::with_engine_dir(engine_dir)
+    } else {
+        AkaBackend::new()
+    };
+    Ok(backend.with_workspace_auto_index())
 }
 
 #[cfg(target_os = "windows")]
@@ -256,13 +255,12 @@ fn configure_backend(
         .path()
         .resource_dir()
         .unwrap_or_else(|_| fallback_resource_dir());
-    Ok(
-        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
-            AkaBackend::with_engine_dir(engine_dir)
-        } else {
-            AkaBackend::new()
-        },
-    )
+    let backend = if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+        AkaBackend::with_engine_dir(engine_dir)
+    } else {
+        AkaBackend::new()
+    };
+    Ok(backend.with_workspace_auto_index())
 }
 
 #[cfg(not(target_os = "windows"))]
