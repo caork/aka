@@ -28,9 +28,6 @@ struct DesktopMcpRuntime {
     _rt: tokio::runtime::Runtime,
 }
 
-#[cfg(target_os = "windows")]
-const EMBEDDED_AKA_ENGINE: &[u8] = include_bytes!("../embedded-engine/aka-engine.exe");
-
 fn fallback_app_data_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
         if let Some(home) = std::env::var_os("HOME") {
@@ -97,7 +94,6 @@ fn log_desktop_event(message: impl AsRef<str>) {
     let _ = writeln!(file, "[{ts}] {}", message.as_ref());
 }
 
-#[cfg(not(target_os = "windows"))]
 fn fallback_resource_dir() -> PathBuf {
     let Ok(exe) = std::env::current_exe() else {
         return std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
@@ -118,23 +114,21 @@ fn fallback_resource_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
-#[cfg(not(target_os = "windows"))]
 fn bundled_engine_bin_name() -> &'static str {
-    "aka-engine"
+    if cfg!(target_os = "windows") {
+        "aka-engine.exe"
+    } else {
+        "aka-engine"
+    }
 }
 
-#[cfg(not(target_os = "windows"))]
 fn has_native_engine(dir: &std::path::Path) -> bool {
     let bin = bundled_engine_bin_name();
     dir.join(bin).is_file()
         || dir.join("bin").join(bin).is_file()
         || dir.join("build/c").join(bin).is_file()
-        || dir.join("codebase-memory-mcp").is_file()
-        || dir.join("bin").join("codebase-memory-mcp").is_file()
-        || dir.join("build/c").join("codebase-memory-mcp").is_file()
 }
 
-#[cfg(not(target_os = "windows"))]
 fn bundled_engine_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
     [
         resource_dir.join("engine"),
@@ -142,22 +136,6 @@ fn bundled_engine_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|dir| has_native_engine(dir))
-}
-
-#[cfg(target_os = "windows")]
-fn ensure_embedded_engine_dir(app_data_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
-    let engine_dir = app_data_dir.join("engine");
-    let engine_bin = engine_dir.join("aka-engine.exe");
-    std::fs::create_dir_all(&engine_dir)?;
-
-    let needs_write = std::fs::read(&engine_bin)
-        .map(|existing| existing != EMBEDDED_AKA_ENGINE)
-        .unwrap_or(true);
-    if needs_write {
-        std::fs::write(&engine_bin, EMBEDDED_AKA_ENGINE)?;
-    }
-
-    Ok(engine_dir)
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,22 +218,31 @@ pub fn configure_cli_runtime() -> anyhow::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn configure_backend(
-    _app: &tauri::App,
-    app_data_dir: &std::path::Path,
+    app: &tauri::App,
+    _app_data_dir: &std::path::Path,
 ) -> anyhow::Result<AkaBackend> {
-    Ok(AkaBackend::with_engine_dir(ensure_embedded_engine_dir(
-        app_data_dir,
-    )?))
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .unwrap_or_else(|_| fallback_resource_dir());
+    Ok(
+        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+            AkaBackend::with_engine_dir(engine_dir)
+        } else {
+            AkaBackend::new()
+        },
+    )
 }
 
 #[cfg(target_os = "windows")]
-fn configure_cli_engine_runtime(app_data_dir: &std::path::Path) -> anyhow::Result<()> {
+fn configure_cli_engine_runtime(_app_data_dir: &std::path::Path) -> anyhow::Result<()> {
     if std::env::var_os("AKA_ENGINE_DIR").is_none()
         && std::env::var_os("AKA_ENGINE_BIN").is_none()
-        && std::env::var_os("AKA_CBM_BIN").is_none()
     {
-        let engine_dir = ensure_embedded_engine_dir(app_data_dir)?;
-        std::env::set_var("AKA_ENGINE_DIR", engine_dir);
+        let resource_dir = fallback_resource_dir();
+        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+            std::env::set_var("AKA_ENGINE_DIR", engine_dir);
+        }
     }
     Ok(())
 }
@@ -282,7 +269,6 @@ fn configure_backend(
 fn configure_cli_engine_runtime(_app_data_dir: &std::path::Path) -> anyhow::Result<()> {
     if std::env::var_os("AKA_ENGINE_DIR").is_none()
         && std::env::var_os("AKA_ENGINE_BIN").is_none()
-        && std::env::var_os("AKA_CBM_BIN").is_none()
     {
         let resource_dir = fallback_resource_dir();
         if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {

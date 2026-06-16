@@ -5,7 +5,7 @@
 //!   registry.json            # 仓库注册表
 //!   repos/<slug>-<hash8>/    # 每仓库数据
 //!     artifact/              # engine 产出的 NDJSON 工件
-//!     engine-cache/           # codebase-memory-mcp SQLite/cache 工作目录
+//!     engine-cache/           # AKA engine SQLite/cache 工作目录
 //!     index-state.json        # 文件哈希/engine/合同版本快照，用于安全复用索引
 //!     parse-cache/            # 预留给 engine adapter 的内容寻址 parse-cache
 //!     graph.db               # aka-graph SQLite
@@ -44,7 +44,7 @@ pub fn repo_dir_name(repo_path: &Path) -> String {
 
 /// Convert Rust/Win32 verbatim paths (for example `\\?\D:\repo`) back to
 /// ordinary absolute paths before passing them to external tools or showing
-/// them to users. Rust file APIs can handle verbatim paths, but the native CBM
+/// them to users. Rust file APIs can handle verbatim paths, but the native AKA
 /// C engine currently discovers zero files when it receives that form.
 pub fn user_facing_path(path: &Path) -> PathBuf {
     strip_windows_verbatim(path).unwrap_or_else(|| path.to_path_buf())

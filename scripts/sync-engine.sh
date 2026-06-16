@@ -15,26 +15,19 @@ if [[ "${1:-}" == "--refresh-upstream" ]]; then
   shift
 fi
 
-FORK_URL="${1:-https://github.com/caork/codebase-memory-mcp.git}"
-UPSTREAM_URL="${AKA_ENGINE_UPSTREAM_URL:-${CBM_UPSTREAM_URL:-https://github.com/DeusData/codebase-memory-mcp.git}}"
+FORK_URL="${1:-https://github.com/caork/aka-engine.git}"
+UPSTREAM_URL="${AKA_ENGINE_UPSTREAM_URL:-https://github.com/DeusData/codebase-memory-mcp.git}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DST="${ROOT}/engine"
 CHECKOUT="${AKA_ENGINE_SRC:-${DST}/aka-engine-src}"
-LEGACY_CHECKOUT="${DST}/codebase-memory-mcp-src"
 BIN_NAME="aka-engine"
-LEGACY_BIN_NAME="codebase-memory-mcp"
 if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
   BIN_NAME="aka-engine.exe"
-  LEGACY_BIN_NAME="codebase-memory-mcp.exe"
 fi
 
 mkdir -p "${DST}"
 
 SHA=""
-if [[ ! -d "${CHECKOUT}/.git" && -d "${LEGACY_CHECKOUT}/.git" ]]; then
-  CHECKOUT="${LEGACY_CHECKOUT}"
-fi
-
 if [[ ! -d "${CHECKOUT}/.git" ]]; then
   if [[ -d "${FORK_URL}/.git" ]]; then
     rm -rf "${CHECKOUT}"
@@ -77,17 +70,12 @@ make -C "${CHECKOUT}" -f Makefile.cbm cbm
 
 BUILT="${CHECKOUT}/build/c/${BIN_NAME}"
 if [[ ! -x "${BUILT}" ]]; then
-  BUILT="${CHECKOUT}/build/c/${LEGACY_BIN_NAME}"
-fi
-if [[ ! -x "${BUILT}" ]]; then
   echo "error: build did not produce ${BUILT}" >&2
   exit 1
 fi
 
 cp "${BUILT}" "${DST}/${BIN_NAME}"
 chmod +x "${DST}/${BIN_NAME}"
-cp "${BUILT}" "${DST}/${LEGACY_BIN_NAME}"
-chmod +x "${DST}/${LEGACY_BIN_NAME}"
 printf '%s\n' "${SHA}" > "${DST}/ENGINE_SHA"
 
 echo "engine checkout: ${CHECKOUT}"

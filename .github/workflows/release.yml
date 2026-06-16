@@ -22,8 +22,8 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/aka
-  AKA_ENGINE_REPO: https://github.com/caork/codebase-memory-mcp.git
-  AKA_ENGINE_REF: c88e0024ff456043771eee25151f7e5c0db15228
+  AKA_ENGINE_REPO: https://github.com/caork/aka-engine.git
+  AKA_ENGINE_REF: 5574a875c07741b66fdd18ae4a3048ad778baeb6
 
 jobs:
   macos-desktop:
@@ -136,12 +136,6 @@ jobs:
           git -C aka-engine-win-src checkout "${AKA_ENGINE_REF}"
           make -C aka-engine-win-src -f Makefile.cbm cbm
           ENGINE_BIN="${PWD}/aka-engine-win-src/build/c/aka-engine.exe"
-          if [[ ! -x "${ENGINE_BIN}" && -x "${PWD}/aka-engine-win-src/build/c/codebase-memory-mcp.exe" ]]; then
-            cp "${PWD}/aka-engine-win-src/build/c/codebase-memory-mcp.exe" "${ENGINE_BIN}"
-          fi
-          if [[ ! -x "${ENGINE_BIN}" && -x "${PWD}/aka-engine-win-src/build/c/codebase-memory-mcp" ]]; then
-            cp "${PWD}/aka-engine-win-src/build/c/codebase-memory-mcp" "${ENGINE_BIN}"
-          fi
           test -x "${ENGINE_BIN}"
           echo "bin=$(cygpath -m "${ENGINE_BIN}")" >> "$GITHUB_OUTPUT"
 

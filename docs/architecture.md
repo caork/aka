@@ -10,9 +10,9 @@ Rust workspace 承担存储、搜索、服务、UI；AKA engine 作为 native C 
 
 ## 解析引擎层（engine/，AKA engine native C）
 
-- 来源：AKA engine 是第一方组件，含 MIT 派生代码；当前维护 fork 仍在 `caork/codebase-memory-mcp`，但不追求和官方仓兼容。
+- 来源：AKA engine 是第一方组件，含 MIT 派生代码；维护仓库为 `caork/aka-engine`，不追求和官方仓兼容。
 - 产物：`engine/aka-engine`（Windows 为 `aka-engine.exe`）是给 Docker/Tauri/内部 runtime 使用的原生二进制；源码 checkout/build 目录为忽略文件，不随 aka 主仓库入 git。
-- 调用：`aka-engine cli --progress --json index_repository <json>`；`AKA_ENGINE_CACHE_DIR` 指向 repo 级 engine cache，`AKA_ENGINE_MODE=fast|moderate|full` 控制解析深度。迁移期仍兼容旧二进制名和旧环境变量。
+- 调用：`aka-engine cli --progress --json index_repository <json>`；`AKA_ENGINE_CACHE_DIR` 指向 repo 级 engine cache，`AKA_ENGINE_MODE=fast|moderate|full` 控制解析深度。
 - Adapter：AKA engine 维护 SQLite graph；`aka-core` 读取 engine SQLite，导出 `manifest.json`、`nodes.ndjson`、`edges.ndjson`、可选 `chunks.ndjson`，再进入既有 Rust ingest。
 - 同步：日常直接在 `engine/aka-engine-src/` 修改 C 源码并提交到维护 fork，`scripts/sync-engine.sh` 默认构建当前 checkout；月度/显式上游评估才用 `scripts/sync-engine.sh --refresh-upstream` 或手工 merge/rebase 上游，再选择性吸收有价值 feature。工件合同不变则 Rust 搜索/图/服务层零改动。
 

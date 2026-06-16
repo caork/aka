@@ -39,8 +39,8 @@ RUN cargo build --release -p aka-cli --target x86_64-unknown-linux-gnu && \
 
 # ---------- Stage 2: native AKA engine ----------
 FROM debian:bookworm AS engine-builder
-ARG AKA_ENGINE_REPO=https://github.com/caork/codebase-memory-mcp.git
-ARG AKA_ENGINE_REF=c88e0024ff456043771eee25151f7e5c0db15228
+ARG AKA_ENGINE_REPO=https://github.com/caork/aka-engine.git
+ARG AKA_ENGINE_REF=5574a875c07741b66fdd18ae4a3048ad778baeb6
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates git build-essential pkg-config zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
@@ -64,7 +64,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-builder /src/target/release/aka /usr/local/bin/aka
-COPY --from=engine-builder /src/aka-engine/build/c/codebase-memory-mcp /opt/aka/engine/aka-engine
+COPY --from=engine-builder /src/aka-engine/build/c/aka-engine /opt/aka/engine/aka-engine
 # 冒烟样本：docker exec <ctr> aka analyze /opt/aka/fixtures-demo
 COPY fixtures/demo-ts /opt/aka/fixtures-demo
 

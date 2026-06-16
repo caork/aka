@@ -191,18 +191,12 @@ impl EngineRunner {
         if let Ok(bin) = std::env::var("AKA_ENGINE_BIN") {
             return Self::new(PathBuf::from(bin));
         }
-        if let Ok(bin) = std::env::var("AKA_CBM_BIN") {
-            return Self::new(PathBuf::from(bin));
-        }
         if let Ok(env_dir) = std::env::var("AKA_ENGINE_DIR") {
             return Self::new(PathBuf::from(env_dir));
         }
 
-        let mut candidates: Vec<PathBuf> = vec![
-            PathBuf::from("engine"),
-            PathBuf::from("/tmp/aka-engine-src"),
-            PathBuf::from("/tmp/codebase-memory-mcp-src"),
-        ];
+        let mut candidates: Vec<PathBuf> =
+            vec![PathBuf::from("engine"), PathBuf::from("/tmp/aka-engine-src")];
         if let Ok(cwd) = std::env::current_dir() {
             candidates.extend(cwd.ancestors().map(|p| p.join("engine")));
         }
@@ -226,7 +220,7 @@ impl EngineRunner {
         ))
     }
 
-    /// Run codebase-memory, convert its SQLite graph into aka artifacts, and
+    /// Run AKA engine, convert its SQLite graph into aka artifacts, and
     /// stream progress events to callers.
     pub fn analyze(
         &self,
@@ -238,8 +232,8 @@ impl EngineRunner {
     ) -> Result<ArtifactStats, EngineError> {
         std::fs::create_dir_all(out_dir)?;
         let cache_root = cache_dir
-            .map(|p| p.join("codebase-memory"))
-            .unwrap_or_else(|| out_dir.join(".codebase-memory-cache"));
+            .map(|p| p.join("aka-engine"))
+            .unwrap_or_else(|| out_dir.join(".aka-engine-cache"));
         std::fs::create_dir_all(&cache_root)?;
 
         emit_phase(&mut on_event, "aka-engine:index", 0, 0);
@@ -263,7 +257,6 @@ impl EngineRunner {
             .arg("index_repository")
             .arg(&args)
             .env("AKA_ENGINE_CACHE_DIR", &cache_root)
-            .env("CBM_CACHE_DIR", &cache_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         hide_child_console(&mut cmd);
@@ -396,9 +389,9 @@ impl EngineRunner {
 
 fn engine_exe_names() -> &'static [&'static str] {
     if cfg!(windows) {
-        &["aka-engine.exe", "codebase-memory-mcp.exe"]
+        &["aka-engine.exe"]
     } else {
-        &["aka-engine", "codebase-memory-mcp"]
+        &["aka-engine"]
     }
 }
 
@@ -426,8 +419,7 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
 }
 
 fn engine_mode() -> String {
-    let mode = std::env::var("AKA_ENGINE_MODE").or_else(|_| std::env::var("AKA_CBM_MODE"));
-    match mode {
+    match std::env::var("AKA_ENGINE_MODE") {
         Ok(mode) if matches!(mode.as_str(), "fast" | "moderate" | "full") => mode,
         _ => DEFAULT_ENGINE_MODE.to_string(),
     }
@@ -1076,7 +1068,7 @@ fn export_edges(
             reason: props
                 .get("reason")
                 .and_then(Value::as_str)
-                .unwrap_or("codebase-memory")
+                .unwrap_or("aka-engine")
                 .to_string(),
             step: props.get("step").and_then(Value::as_u64).map(|v| v as u32),
             evidence: if props.is_null() { None } else { Some(props) },
@@ -1301,7 +1293,7 @@ impl SemanticEdgeSynthesizer {
         let evidence = json!({
             "source": "aka-cbm-synth",
             "kind": "semantic-compat",
-            "from": "codebase-memory"
+            "from": "aka-engine"
         });
         self.out.push(EdgeRec {
             id: format!(

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const CONTRACT_VERSION: u32 = 0;
 
-/// nodes.ndjson 的一行 — CBM graph node 经 aka adapter 规范化后的记录。
+/// nodes.ndjson 的一行 — engine graph node 经 aka adapter 规范化后的记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeRec {
     pub id: String,
@@ -54,7 +54,7 @@ impl NodeRec {
     }
 }
 
-/// edges.ndjson 的一行 — CBM graph edge 经 aka adapter 规范化后的记录。
+/// edges.ndjson 的一行 — engine graph edge 经 aka adapter 规范化后的记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EdgeRec {

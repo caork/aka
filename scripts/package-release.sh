@@ -109,14 +109,6 @@ engine_exe_for_platform() {
   esac
 }
 
-legacy_engine_exe_for_platform() {
-  case "$1" in
-    darwin-arm64|darwin-x64) echo "codebase-memory-mcp" ;;
-    win-x64) echo "codebase-memory-mcp.exe" ;;
-    *) echo "error: 不支持的 AKA engine 平台 $1" >&2; return 1 ;;
-  esac
-}
-
 env_var_for_platform() {
   tr '[:lower:]-' '[:upper:]_' <<< "$1"
 }
@@ -203,30 +195,18 @@ create_zip_archive() {
 }
 
 find_engine_binary() {
-  local platform exe legacy_exe platform_env legacy_platform_env
+  local platform exe platform_env
   platform="$1"
   exe="$(engine_exe_for_platform "${platform}")"
-  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
   platform_env="AKA_ENGINE_BIN_$(env_var_for_platform "${platform}")"
-  legacy_platform_env="AKA_CBM_BIN_$(env_var_for_platform "${platform}")"
 
   first_existing_file \
     "${!platform_env:-}" \
     "${AKA_ENGINE_BIN:-}" \
-    "${!legacy_platform_env:-}" \
-    "${AKA_CBM_BIN:-}" \
     "${REPO_ROOT}/engine/${exe}" \
-    "${REPO_ROOT}/engine/${legacy_exe}" \
     "${REPO_ROOT}/engine/aka-engine-src/build/c/${exe}" \
-    "${REPO_ROOT}/engine/aka-engine-src/build/c/${legacy_exe}" \
-    "${REPO_ROOT}/engine/codebase-memory-mcp-src/build/c/${exe}" \
-    "${REPO_ROOT}/engine/codebase-memory-mcp-src/build/c/${legacy_exe}" \
     "/tmp/aka-engine-src/build/c/${exe}" \
-    "/tmp/aka-engine-src/build/c/${legacy_exe}" \
-    "/tmp/codebase-memory-mcp-src/build/c/${exe}" \
-    "/tmp/codebase-memory-mcp-src/build/c/${legacy_exe}" \
-    "$(command -v "${exe}" 2>/dev/null || true)" \
-    "$(command -v "${legacy_exe}" 2>/dev/null || true)"
+    "$(command -v "${exe}" 2>/dev/null || true)"
 }
 
 copy_engine_resource() {
@@ -267,18 +247,14 @@ assert_engine_file_nonempty() {
 }
 
 find_engine_resource_bin() {
-  local platform dir exe legacy_exe
+  local platform dir exe
   platform="$1"
   dir="$2"
   exe="$(engine_exe_for_platform "${platform}")"
-  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
   first_existing_file \
     "${dir}/${exe}" \
     "${dir}/bin/${exe}" \
-    "${dir}/build/c/${exe}" \
-    "${dir}/${legacy_exe}" \
-    "${dir}/bin/${legacy_exe}" \
-    "${dir}/build/c/${legacy_exe}"
+    "${dir}/build/c/${exe}"
 }
 
 assert_engine_resource_dir() {
@@ -321,22 +297,19 @@ assert_app_bundle_engine() {
 }
 
 assert_zip_has_engine() {
-  local zip_path platform prefix exe legacy_exe listing base entry candidate_exe
+  local zip_path platform prefix exe listing base entry
   zip_path="$1"
   platform="$2"
   prefix="$3"
   exe="$(engine_exe_for_platform "${platform}")"
-  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
   [[ -f "${zip_path}" ]] || { echo "error: 找不到 zip: ${zip_path}" >&2; return 1; }
   listing="$(unzip -Z1 "${zip_path}")"
   for base in "engine" "resources/engine" "engine/bin" "resources/engine/bin" "engine/build/c" "resources/engine/build/c"; do
-    for candidate_exe in "${exe}" "${legacy_exe}"; do
-      entry="${prefix:+${prefix}/}${base}/${candidate_exe}"
-      if grep -qxF "${entry}" <<< "${listing}"; then
-        echo "==> 校验 zip 包内 engine: ${entry}"
-        return 0
-      fi
-    done
+    entry="${prefix:+${prefix}/}${base}/${exe}"
+    if grep -qxF "${entry}" <<< "${listing}"; then
+      echo "==> 校验 zip 包内 engine: ${entry}"
+      return 0
+    fi
   done
   echo "error: zip 包内缺少 native AKA engine: ${zip_path}" >&2
   return 1
@@ -707,15 +680,7 @@ package_windows_desktop() {
   win_triple="x86_64-pc-windows-msvc"
 
   if [[ "${SKIP_BUILD}" -eq 0 ]]; then
-    local embed_dir
     prepare_desktop_resources "${win_triple}"
-    embed_dir="${TAURI_DIR}/embedded-engine"
-    rm -rf "${embed_dir}"
-    mkdir -p "${embed_dir}"
-    assert_engine_file_nonempty "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe"
-    cp "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe" "${embed_dir}/aka-engine.exe"
-    assert_engine_file_nonempty "${embed_dir}/aka-engine.exe"
-    echo "==> 内嵌 Windows AKA engine: ${TAURI_RESOURCES_DIR}/engine/aka-engine.exe -> ${embed_dir}/aka-engine.exe"
     rm -rf "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/engine"
     local tauri_args=(build --target "${win_triple}" --bundles nsis --ci)
     if command -v cargo-xwin >/dev/null 2>&1 && [[ "$(uname -s)" = "Darwin" ]]; then

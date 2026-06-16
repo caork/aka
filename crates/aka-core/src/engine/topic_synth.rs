@@ -274,7 +274,7 @@ pub(super) fn merge_native_channel_topics(
             node_id: detection.node_id,
             file_path: detection.file_path,
             strategy: "native-channel".into(),
-            evidence_source: "codebase-memory-mcp".into(),
+            evidence_source: "aka-engine".into(),
             native_edge_type: Some(detection.native_edge_type),
         };
         match detection.kind {
