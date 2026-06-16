@@ -2,6 +2,7 @@ use super::*;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod java;
 mod python;
 
 #[test]

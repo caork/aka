@@ -242,16 +242,16 @@ fn detect_node_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDete
     out
 }
 
-fn detect_jvm_commands(_text: Option<&str>, node: &SynthNode) -> Vec<CommandDetection> {
+fn detect_jvm_commands(text: Option<&str>, node: &SynthNode) -> Vec<CommandDetection> {
     let mut out = Vec::new();
-    for decorator in &node.decorators {
-        if decorator_name(decorator) != Some("Command") {
+    for decorator in decorators_for_node(text, node) {
+        if decorator_name(&decorator) != Some("Command") {
             continue;
         }
         out.push(CommandDetection {
-            name: annotation_string_value(decorator, "name")
-                .or_else(|| annotation_string_value(decorator, "value"))
-                .or_else(|| annotation_array_first_value(decorator, "aliases"))
+            name: annotation_string_value(&decorator, "name")
+                .or_else(|| annotation_string_value(&decorator, "value"))
+                .or_else(|| annotation_array_first_value(&decorator, "aliases"))
                 .unwrap_or_else(|| node.display_name().to_string()),
             command_type: "picocli-command".into(),
             strategy: "java-picocli-command".into(),
