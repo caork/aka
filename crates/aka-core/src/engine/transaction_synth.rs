@@ -249,7 +249,7 @@ fn extract_python_transactions(text: &str, nodes: &[&SynthNode]) -> Vec<Transact
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
     {
-        for decorator in &node.decorators {
+        for decorator in decorators_for_node(text, node) {
             let normalized = decorator.trim().trim_start_matches('@');
             if normalized == "transaction.atomic" || normalized.starts_with("transaction.atomic(") {
                 out.push(TransactionDetection {
@@ -265,6 +265,9 @@ fn extract_python_transactions(text: &str, nodes: &[&SynthNode]) -> Vec<Transact
         }
     }
     for call in find_call_args(text, "transaction.atomic") {
+        if is_python_decorator_call(text, call.start) {
+            continue;
+        }
         let Some(node) =
             node_at_offset(text, nodes, call.start).or_else(|| pick_handler_node(nodes))
         else {
@@ -281,6 +284,11 @@ fn extract_python_transactions(text: &str, nodes: &[&SynthNode]) -> Vec<Transact
         });
     }
     out
+}
+
+fn is_python_decorator_call(text: &str, call_start: usize) -> bool {
+    let line_start = text[..call_start].rfind('\n').map_or(0, |idx| idx + 1);
+    text[line_start..call_start].trim_start().starts_with('@')
 }
 
 fn decorator_name(decorator: &str) -> Option<&str> {

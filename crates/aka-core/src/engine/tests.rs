@@ -11,6 +11,7 @@ mod semantic_process;
 mod semantic_resources;
 mod semantic_routes;
 mod semantic_stream;
+mod semantic_transactions;
 mod source_symbols;
 
 fn test_conn() -> Connection {
