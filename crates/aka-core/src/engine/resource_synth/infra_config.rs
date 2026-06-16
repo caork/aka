@@ -49,7 +49,7 @@ pub(super) fn extract_infra_config_resources(text: &str) -> Vec<ResourceDetectio
     out
 }
 
-fn config_pairs(text: &str) -> Vec<(String, String)> {
+pub(super) fn config_pairs(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut yaml_stack: Vec<(usize, String)> = Vec::new();
     for line in text.lines() {
@@ -352,6 +352,6 @@ fn is_host_like(value: &str) -> bool {
         && (value.contains('.') || value.contains(':') || value == "localhost")
 }
 
-fn config_id(key: &str) -> String {
+pub(super) fn config_id(key: &str) -> String {
     format!("config:heuristic:{:016x}", stable_hash(key))
 }

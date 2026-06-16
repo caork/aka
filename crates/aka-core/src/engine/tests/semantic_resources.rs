@@ -1,5 +1,6 @@
 mod feature_flag;
 mod http;
+mod http_config;
 mod identity;
 mod infra_config;
 mod notification;

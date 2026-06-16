@@ -10,6 +10,8 @@ use super::{
 
 mod http;
 use http::extract_http_resources;
+mod http_config;
+use http_config::extract_http_config_resources;
 mod identity;
 use identity::extract_identity_resources;
 mod infra_config;
@@ -174,6 +176,7 @@ fn ingest_resource_detection(
 fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
     let mut out = identity::extract_identity_config_resources(text);
     out.extend(extract_infra_config_resources(text));
+    out.extend(extract_http_config_resources(text));
     out
 }
 
