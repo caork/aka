@@ -2511,7 +2511,7 @@ impl Backend for AkaBackend {
     fn queue_workspaces(&self, roots: &[PathBuf]) -> Result<Vec<String>> {
         let mut queued = Vec::new();
         for root in roots {
-            let Some(repo) = discover_workspace_root(root)? else {
+            let Ok(Some(repo)) = discover_workspace_root(root) else {
                 continue;
             };
             if let Some(name) = self.auto_index_workspace(repo)? {
@@ -3587,6 +3587,38 @@ mod tests {
             "plain repo names must not be treated as filesystem paths: {err}"
         );
         assert!(backend.list_repos().unwrap().is_empty());
+    }
+
+    #[test]
+    fn queue_workspaces_skips_stale_roots_and_indexes_valid_ones() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let repo = temp_repo("workspace-roots-stale-valid");
+        let home = temp_repo("workspace-roots-stale-valid-home");
+        std::fs::create_dir_all(repo.join("src/app/api")).unwrap();
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
+        std::fs::write(
+            repo.join("src/app/api/views.py"),
+            "def list_orders(): pass\n",
+        )
+        .unwrap();
+        std::env::set_var("AKA_HOME", &home);
+
+        let backend = AkaBackend::new();
+        let stale = home.join("missing-workspace");
+        let queued = backend
+            .queue_workspaces(&[stale, repo.join("src/app/api")])
+            .unwrap();
+
+        assert_eq!(queued, vec![derive_local_name(&repo)]);
+        let repos = backend.list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, derive_local_name(&repo));
+        assert_eq!(
+            repos[0].path,
+            repo.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_job_visible_status(&repos[0].status);
     }
 
     #[test]
