@@ -40,7 +40,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "resources/engine": "engine"
+      "resources/engine": "engine",
+      "resources/client-integrations": "client-integrations"
     }
   }
 }

@@ -1,5 +1,8 @@
 {
   "bundle": {
-    "resources": {}
+    "resources": {
+      "resources/engine": "engine",
+      "resources/client-integrations": "client-integrations"
+    }
   }
 }

@@ -123,6 +123,50 @@ first_existing_file() {
   return 1
 }
 
+assert_client_integrations_resource() {
+  local dir skill
+  dir="$1"
+  skill="${dir}/clients/claude-code/skills/aka-code-graph/SKILL.md"
+
+  for entry in \
+    "clients/README.md" \
+    "clients/claude-code/.claude-plugin/plugin.json" \
+    "clients/claude-code/skills/aka-code-graph/SKILL.md" \
+    "clients/opencode/skills/aka-code-graph/SKILL.md" \
+    "clients/codex/AGENTS-aka.md"; do
+    if [[ ! -f "${dir}/${entry}" ]]; then
+      echo "error: 桌面 client integration 资源缺少 ${entry}" >&2
+      return 1
+    fi
+  done
+
+  if ! grep -q "18 个 MCP 工具" "${skill}"; then
+    echo "error: 桌面内置 Claude Code skill 不是最新版 18 工具说明: ${skill}" >&2
+    return 1
+  fi
+  if ! grep -q "workspace roots 自动排队索引" "${skill}"; then
+    echo "error: 桌面内置 skill 缺少 workspace roots 自动索引说明: ${skill}" >&2
+    return 1
+  fi
+  if ! grep -q "import_repo" "${skill}"; then
+    echo "error: 桌面内置 skill 缺少 GitHub/Git import_repo fallback 说明: ${skill}" >&2
+    return 1
+  fi
+  echo "==> 校验桌面 client integrations 资源: ${dir}"
+}
+
+sync_client_integrations_resource() {
+  local dst
+  dst="${TAURI_RESOURCES_DIR}/client-integrations"
+  rm -rf "${dst}"
+  mkdir -p "${dst}"
+  rsync -a --delete \
+    --exclude ".DS_Store" \
+    --exclude "._*" \
+    "${REPO_ROOT}/clients/" "${dst}/clients/"
+  assert_client_integrations_resource "${dst}"
+}
+
 create_zip_archive() {
   local archive exclude_patterns=()
   archive="$1"
@@ -314,6 +358,7 @@ prepare_desktop_resources() {
   platform="$(platform_from_triple "${triple}")"
   echo "==> 准备桌面内置资源 (${platform})"
   copy_engine_resource "${platform}"
+  sync_client_integrations_resource
 }
 
 macos_notarization_credentials_present() {
@@ -661,19 +706,13 @@ package_windows_desktop() {
   win_triple="x86_64-pc-windows-msvc"
 
   if [[ "${SKIP_BUILD}" -eq 0 ]]; then
-    local platform engine_bin embed_dir
-    platform="$(platform_from_triple "${win_triple}")"
-    engine_bin="$(find_cbm_binary "${platform}" || true)"
-    if [[ -z "${engine_bin}" ]]; then
-      echo "error: 找不到 ${platform} 的 codebase-memory-mcp 二进制。" >&2
-      echo "       请设置 AKA_CBM_BIN_WIN_X64 / AKA_CBM_BIN，或在 Windows runner 上先下载 engine。" >&2
-      return 1
-    fi
+    local embed_dir
+    prepare_desktop_resources "${win_triple}"
     embed_dir="${TAURI_DIR}/embedded-engine"
-    rm -rf "${embed_dir}" "${TAURI_RESOURCES_DIR}/engine"
-    mkdir -p "${embed_dir}" "${TAURI_RESOURCES_DIR}/engine"
-    cp "${engine_bin}" "${embed_dir}/codebase-memory-mcp.exe"
-    echo "==> 内嵌 Windows CBM engine: ${engine_bin} -> ${embed_dir}/codebase-memory-mcp.exe"
+    rm -rf "${embed_dir}"
+    mkdir -p "${embed_dir}"
+    cp "${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe" "${embed_dir}/codebase-memory-mcp.exe"
+    echo "==> 内嵌 Windows CBM engine: ${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe -> ${embed_dir}/codebase-memory-mcp.exe"
     rm -rf "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/engine"
     local tauri_args=(build --target "${win_triple}" --bundles nsis --ci)
     if command -v cargo-xwin >/dev/null 2>&1 && [[ "$(uname -s)" = "Darwin" ]]; then
