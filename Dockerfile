@@ -4,7 +4,7 @@
 # 多阶段：
 #   rust-builder   — cargo release 构建 aka 二进制（native arch）
 #   rust-cross     — （可选，--target rust-cross 单独构建）交叉编译 x86_64 linux 二进制
-#   engine-builder — 构建 codebase-memory-mcp 原生二进制
+#   engine-builder — 构建 AKA engine 原生二进制
 #   runtime        — git + aka + native engine；非 root，数据卷 /data
 #
 # 构建 / 运行：
@@ -37,23 +37,23 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
 RUN cargo build --release -p aka-cli --target x86_64-unknown-linux-gnu && \
     x86_64-linux-gnu-strip target/x86_64-unknown-linux-gnu/release/aka
 
-# ---------- Stage 2: native CBM engine ----------
+# ---------- Stage 2: native AKA engine ----------
 FROM debian:bookworm AS engine-builder
-ARG CBM_REPO=https://github.com/caork/codebase-memory-mcp.git
-ARG CBM_REF=133958e20a9bff0301d15dc12740361461bbdecb
+ARG AKA_ENGINE_REPO=https://github.com/caork/codebase-memory-mcp.git
+ARG AKA_ENGINE_REF=c88e0024ff456043771eee25151f7e5c0db15228
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates git build-essential pkg-config zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-RUN git clone "${CBM_REPO}" codebase-memory-mcp && \
-    cd codebase-memory-mcp && \
-    git checkout "${CBM_REF}" && \
+RUN git clone "${AKA_ENGINE_REPO}" aka-engine && \
+    cd aka-engine && \
+    git checkout "${AKA_ENGINE_REF}" && \
     make -f Makefile.cbm cbm
 
 # ---------- Stage 3: runtime ----------
 FROM debian:bookworm-slim AS runtime
 LABEL org.opencontainers.image.title="aka" \
-      org.opencontainers.image.description="Code-omniscient knowledge engine (codebase-memory-mcp parse -> tantivy BM25 + SQLite/CSR graph; CLI/MCP/HTTP)." \
+      org.opencontainers.image.description="Code-omniscient knowledge engine (AKA engine parse -> tantivy BM25 + SQLite/CSR graph; internal runtime/MCP/HTTP)." \
       org.opencontainers.image.source="https://github.com/caork/aka" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="0.1.0"
@@ -64,7 +64,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-builder /src/target/release/aka /usr/local/bin/aka
-COPY --from=engine-builder /src/codebase-memory-mcp/build/c/codebase-memory-mcp /opt/aka/engine/codebase-memory-mcp
+COPY --from=engine-builder /src/aka-engine/build/c/codebase-memory-mcp /opt/aka/engine/aka-engine
 # 冒烟样本：docker exec <ctr> aka analyze /opt/aka/fixtures-demo
 COPY fixtures/demo-ts /opt/aka/fixtures-demo
 

@@ -6,6 +6,10 @@ apps/desktop/src-tauri/resources/
 engine/vendor/**/build/
 /engine/gitnexus/
 /engine/gitnexus-shared/
+/engine/aka-engine
+/engine/aka-engine.exe
+/engine/aka-engine-src
+/engine/aka-engine-src/
 /engine/codebase-memory-mcp/
 /engine/codebase-memory-mcp
 /engine/codebase-memory-mcp-src/

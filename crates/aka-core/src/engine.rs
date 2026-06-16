@@ -1,8 +1,7 @@
-//! Engine runner backed by codebase-memory-mcp.
+//! Engine runner backed by AKA engine.
 //!
 //! `aka` still consumes the artifact contract in `docs/contracts/artifacts.md`,
-//! but the producer is now the native C codebase-memory indexer instead of the
-//! previous parser sidecar.
+//! but the producer is now the first-party native AKA engine.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -97,7 +96,7 @@ use topic_synth::{
 };
 use transaction_synth::{synthesize_transactions_from_sources, SynthTransaction};
 
-const DEFAULT_CBM_MODE: &str = "fast";
+const DEFAULT_ENGINE_MODE: &str = "fast";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const PROCESS_MAX_STARTS: usize = 200;
@@ -121,7 +120,7 @@ fn hide_child_console(_cmd: &mut Command) {}
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error(
-        "codebase-memory-mcp engine not found: {0} (set --engine-dir, AKA_ENGINE_DIR, or AKA_CBM_BIN)"
+        "AKA engine not found: {0} (set --engine-dir, AKA_ENGINE_DIR, or AKA_ENGINE_BIN)"
     )]
     EngineDirMissing(PathBuf),
     #[error("failed to spawn engine ({cmd}): {source}")]
@@ -145,10 +144,10 @@ pub enum EngineError {
     MissingProject(PathBuf),
 }
 
-/// Native codebase-memory-mcp runner.
+/// Native AKA engine runner.
 pub struct EngineRunner {
     engine_dir: PathBuf,
-    cbm_bin: PathBuf,
+    engine_bin: PathBuf,
 }
 
 enum EngineLine {
@@ -159,11 +158,11 @@ enum EngineLine {
 impl EngineRunner {
     const DONE_EXIT_GRACE: Duration = Duration::from_secs(5);
 
-    /// `engine_dir` may be a directory containing `codebase-memory-mcp`, a CBM
-    /// source checkout with `build/c/codebase-memory-mcp`, or the binary path.
+    /// `engine_dir` may be a directory containing `aka-engine`, an AKA engine
+    /// source checkout with `build/c/aka-engine`, or the binary path.
     pub fn new(engine_dir: impl Into<PathBuf>) -> Result<Self, EngineError> {
         let requested = engine_dir.into();
-        let cbm_bin = resolve_cbm_binary(&requested)
+        let engine_bin = resolve_engine_binary(&requested)
             .ok_or_else(|| EngineError::EngineDirMissing(requested.clone()))?;
         let engine_dir = if requested.is_file() {
             requested
@@ -175,7 +174,7 @@ impl EngineRunner {
         };
         Ok(Self {
             engine_dir,
-            cbm_bin,
+            engine_bin,
         })
     }
 
@@ -183,11 +182,14 @@ impl EngineRunner {
         &self.engine_dir
     }
 
-    /// Discover the native CBM engine from explicit path, env, local engine/,
+    /// Discover the native AKA engine from explicit path, env, local engine/,
     /// source checkout, or PATH.
     pub fn discover(explicit: Option<&Path>) -> Result<Self, EngineError> {
         if let Some(dir) = explicit {
             return Self::new(dir);
+        }
+        if let Ok(bin) = std::env::var("AKA_ENGINE_BIN") {
+            return Self::new(PathBuf::from(bin));
         }
         if let Ok(bin) = std::env::var("AKA_CBM_BIN") {
             return Self::new(PathBuf::from(bin));
@@ -198,6 +200,7 @@ impl EngineRunner {
 
         let mut candidates: Vec<PathBuf> = vec![
             PathBuf::from("engine"),
+            PathBuf::from("/tmp/aka-engine-src"),
             PathBuf::from("/tmp/codebase-memory-mcp-src"),
         ];
         if let Ok(cwd) = std::env::current_dir() {
@@ -207,13 +210,15 @@ impl EngineRunner {
             candidates.extend(exe.ancestors().skip(1).map(|p| p.join("engine")));
         }
         for c in &candidates {
-            if resolve_cbm_binary(c).is_some() {
+            if resolve_engine_binary(c).is_some() {
                 return Self::new(c.clone());
             }
         }
 
-        if let Some(path_bin) = find_in_path(cbm_exe_name()) {
-            return Self::new(path_bin);
+        for name in engine_exe_names() {
+            if let Some(path_bin) = find_in_path(name) {
+                return Self::new(path_bin);
+            }
         }
 
         Err(EngineError::EngineDirMissing(
@@ -237,8 +242,8 @@ impl EngineRunner {
             .unwrap_or_else(|| out_dir.join(".codebase-memory-cache"));
         std::fs::create_dir_all(&cache_root)?;
 
-        emit_phase(&mut on_event, "codebase-memory:index", 0, 0);
-        let mode = cbm_mode();
+        emit_phase(&mut on_event, "aka-engine:index", 0, 0);
+        let mode = engine_mode();
         let engine_repo = user_facing_path(repo);
         let engine_repo = engine_repo
             .canonicalize()
@@ -251,19 +256,20 @@ impl EngineRunner {
         })
         .to_string();
 
-        let mut cmd = Command::new(&self.cbm_bin);
+        let mut cmd = Command::new(&self.engine_bin);
         cmd.arg("cli")
             .arg("--progress")
             .arg("--json")
             .arg("index_repository")
             .arg(&args)
+            .env("AKA_ENGINE_CACHE_DIR", &cache_root)
             .env("CBM_CACHE_DIR", &cache_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         hide_child_console(&mut cmd);
         let cmd_display = format!(
             "{} cli --progress --json index_repository <args>",
-            self.cbm_bin.display()
+            self.engine_bin.display()
         );
         on_event(&EngineEvent::Log {
             stream: "engine".into(),
@@ -272,7 +278,7 @@ impl EngineRunner {
                 engine_repo.display(),
                 cache_root.display(),
                 mode,
-                self.cbm_bin.display()
+                self.engine_bin.display()
             ),
         });
         let mut child = cmd.spawn().map_err(|source| EngineError::Spawn {
@@ -320,7 +326,7 @@ impl EngineRunner {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    if let Some(phase) = parse_cbm_progress_phase(&line) {
+                    if let Some(phase) = parse_engine_progress_phase(&line) {
                         emit_phase(&mut on_event, phase, 0, 0);
                     }
                     push_tail(&mut stderr_tail, line.clone(), 120);
@@ -349,7 +355,7 @@ impl EngineRunner {
                     });
                 }
                 EngineLine::Stderr(line) if !line.trim().is_empty() => {
-                    if let Some(phase) = parse_cbm_progress_phase(&line) {
+                    if let Some(phase) = parse_engine_progress_phase(&line) {
                         emit_phase(&mut on_event, phase, 0, 0);
                     }
                     push_tail(&mut stderr_tail, line.clone(), 120);
@@ -369,7 +375,7 @@ impl EngineRunner {
                 stderr_tail: engine_failure_context(
                     &engine_repo,
                     &cache_root,
-                    &self.cbm_bin,
+                    &self.engine_bin,
                     &mode,
                     &stdout_tail,
                     &stderr_tail,
@@ -377,7 +383,7 @@ impl EngineRunner {
             });
         }
 
-        emit_phase(&mut on_event, "codebase-memory:export-artifacts", 0, 0);
+        emit_phase(&mut on_event, "aka-engine:export-artifacts", 0, 0);
         let (project, db_path) = find_single_project_db(&cache_root)?;
         let stats = export_artifacts(repo, out_dir, &db_path, &project, no_chunks, &mut on_event)?;
         let done = EngineEvent::Done {
@@ -388,24 +394,26 @@ impl EngineRunner {
     }
 }
 
-fn cbm_exe_name() -> &'static str {
+fn engine_exe_names() -> &'static [&'static str] {
     if cfg!(windows) {
-        "codebase-memory-mcp.exe"
+        &["aka-engine.exe", "codebase-memory-mcp.exe"]
     } else {
-        "codebase-memory-mcp"
+        &["aka-engine", "codebase-memory-mcp"]
     }
 }
 
-fn resolve_cbm_binary(base: &Path) -> Option<PathBuf> {
+fn resolve_engine_binary(base: &Path) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if base.is_file() {
         candidates.push(base.to_path_buf());
     } else {
-        candidates.extend([
-            base.join(cbm_exe_name()),
-            base.join("bin").join(cbm_exe_name()),
-            base.join("build/c").join(cbm_exe_name()),
-        ]);
+        for name in engine_exe_names() {
+            candidates.extend([
+                base.join(name),
+                base.join("bin").join(name),
+                base.join("build/c").join(name),
+            ]);
+        }
     }
     candidates.into_iter().find(|p| p.is_file())
 }
@@ -417,10 +425,11 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn cbm_mode() -> String {
-    match std::env::var("AKA_CBM_MODE") {
+fn engine_mode() -> String {
+    let mode = std::env::var("AKA_ENGINE_MODE").or_else(|_| std::env::var("AKA_CBM_MODE"));
+    match mode {
         Ok(mode) if matches!(mode.as_str(), "fast" | "moderate" | "full") => mode,
-        _ => DEFAULT_CBM_MODE.to_string(),
+        _ => DEFAULT_ENGINE_MODE.to_string(),
     }
 }
 
@@ -448,7 +457,7 @@ fn push_tail(tail: &mut Vec<String>, line: String, limit: usize) {
 fn engine_failure_context(
     repo: &Path,
     cache_root: &Path,
-    cbm_bin: &Path,
+    engine_bin: &Path,
     mode: &str,
     stdout_tail: &[String],
     stderr_tail: &[String],
@@ -457,7 +466,7 @@ fn engine_failure_context(
         format!("repo_path={}", repo.display()),
         format!("cache_dir={}", cache_root.display()),
         format!("mode={mode}"),
-        format!("cbm_bin={}", cbm_bin.display()),
+        format!("engine_bin={}", engine_bin.display()),
     ];
     if !stdout_tail.is_empty() {
         out.push("stdout tail:".into());
@@ -470,22 +479,22 @@ fn engine_failure_context(
     out.join("\n")
 }
 
-fn parse_cbm_progress_phase(line: &str) -> Option<String> {
+fn parse_engine_progress_phase(line: &str) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
     }
     if trimmed == "Starting incremental index" {
-        return Some("codebase-memory:incremental-index".into());
+        return Some("aka-engine:incremental-index".into());
     }
     if trimmed == "Starting full index" {
-        return Some("codebase-memory:full-index".into());
+        return Some("aka-engine:full-index".into());
     }
     if trimmed.starts_with('[') {
-        return Some(format!("codebase-memory:{trimmed}"));
+        return Some(format!("aka-engine:{trimmed}"));
     }
     if trimmed.starts_with("Discovering files") || trimmed.starts_with("Extracting:") {
-        return Some(format!("codebase-memory:{trimmed}"));
+        return Some(format!("aka-engine:{trimmed}"));
     }
     None
 }
@@ -502,7 +511,7 @@ fn find_single_project_db(cache_root: &Path) -> Result<(String, PathBuf), Engine
     candidates.sort();
 
     for db_path in candidates {
-        let conn = open_cbm_db(&db_path)?;
+        let conn = open_engine_db(&db_path)?;
         let project: Result<String, rusqlite::Error> =
             conn.query_row("SELECT name FROM projects LIMIT 1", [], |row| row.get(0));
         match project {
@@ -515,7 +524,7 @@ fn find_single_project_db(cache_root: &Path) -> Result<(String, PathBuf), Engine
     Err(EngineError::MissingProject(cache_root.to_path_buf()))
 }
 
-fn open_cbm_db(path: &Path) -> Result<Connection, rusqlite::Error> {
+fn open_engine_db(path: &Path) -> Result<Connection, rusqlite::Error> {
     Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -532,10 +541,10 @@ fn export_artifacts(
     no_chunks: bool,
     on_event: &mut impl FnMut(&EngineEvent),
 ) -> Result<ArtifactStats, EngineError> {
-    let conn = open_cbm_db(db_path)?;
+    let conn = open_engine_db(db_path)?;
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:inspect-db",
+        "aka-engine:export-artifacts:inspect-db",
         0,
         0,
     );
@@ -554,7 +563,7 @@ fn export_artifacts(
     emit_phase(
         on_event,
         format!(
-            "codebase-memory:export-artifacts:synthesize-graph ({} nodes / {} edges)",
+            "aka-engine:export-artifacts:synthesize-graph ({} nodes / {} edges)",
             db_counts.nodes, db_counts.edges
         ),
         0,
@@ -564,7 +573,7 @@ fn export_artifacts(
 
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:nodes",
+        "aka-engine:export-artifacts:nodes",
         0,
         db_counts.nodes,
     );
@@ -578,7 +587,7 @@ fn export_artifacts(
     )?;
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:edges",
+        "aka-engine:export-artifacts:edges",
         0,
         db_counts.edges,
     );
@@ -601,7 +610,7 @@ fn export_artifacts(
     } else {
         emit_phase(
             on_event,
-            "codebase-memory:export-artifacts:chunks",
+            "aka-engine:export-artifacts:chunks",
             0,
             db_counts.chunks,
         );
@@ -615,10 +624,10 @@ fn export_artifacts(
         )?;
     }
 
-    emit_phase(on_event, "codebase-memory:export-artifacts:manifest", 0, 0);
+    emit_phase(on_event, "aka-engine:export-artifacts:manifest", 0, 0);
     let manifest = Manifest {
         contract_version: CONTRACT_VERSION,
-        engine_version: format!("codebase-memory-mcp+aka ({})", db_path.display()),
+        engine_version: format!("aka-engine ({})", db_path.display()),
         repo_path: repo.display().to_string(),
         commit: git_head(repo),
         generated_at: Utc::now().to_rfc3339(),
@@ -697,7 +706,7 @@ fn warn_missing_source_extensions(
         if repo_exts.contains(ext) && !indexed_exts.contains(ext) {
             on_event(&EngineEvent::Warning {
                 message: format!(
-                    "CBM indexed 0 {language} source files even though the repository contains .{ext} files; graph/search may be incomplete. Try AKA_CBM_MODE=full or sync/fix the CBM engine discovery rules."
+                    "AKA engine indexed 0 {language} source files even though the repository contains .{ext} files; graph/search may be incomplete. Try AKA_ENGINE_MODE=full or fix the AKA engine discovery rules."
                 ),
             });
         }
@@ -1134,7 +1143,7 @@ fn emit_export_progress(
     if count == 0 || count.is_multiple_of(1_000) || (total > 0 && count >= total) {
         emit_phase(
             on_event,
-            format!("codebase-memory:export-artifacts:{name}"),
+            format!("aka-engine:export-artifacts:{name}"),
             count,
             total,
         );
@@ -1696,7 +1705,7 @@ fn synthesize_graph_with_progress(
 ) -> Result<SynthGraph, EngineError> {
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:native-labels",
+        "aka-engine:export-artifacts:synthesize:native-labels",
         0,
         0,
     );
@@ -1706,7 +1715,7 @@ fn synthesize_graph_with_progress(
     let native_tools = load_native_app_nodes(conn, project, "Tool")?;
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:nodes",
+        "aka-engine:export-artifacts:synthesize:nodes",
         0,
         0,
     );
@@ -1761,7 +1770,7 @@ fn synthesize_graph_with_progress(
     emit_phase(
         on_event,
         format!(
-            "codebase-memory:export-artifacts:synthesize:calls ({} process-step nodes)",
+            "aka-engine:export-artifacts:synthesize:calls ({} process-step nodes)",
             nodes.len()
         ),
         0,
@@ -1783,7 +1792,7 @@ fn synthesize_graph_with_progress(
 
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:communities",
+        "aka-engine:export-artifacts:synthesize:communities",
         0,
         0,
     );
@@ -1794,7 +1803,7 @@ fn synthesize_graph_with_progress(
     };
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:community-memberships",
+        "aka-engine:export-artifacts:synthesize:community-memberships",
         0,
         0,
     );
@@ -1805,7 +1814,7 @@ fn synthesize_graph_with_progress(
     };
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:processes",
+        "aka-engine:export-artifacts:synthesize:processes",
         0,
         0,
     );
@@ -1824,42 +1833,42 @@ fn synthesize_graph_with_progress(
     };
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:routes",
+        "aka-engine:export-artifacts:synthesize:routes",
         0,
         0,
     );
     let routes = synthesize_routes_from_sources(repo, &nodes, &processes, &native_routes);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:tools",
+        "aka-engine:export-artifacts:synthesize:tools",
         0,
         0,
     );
     let tools = synthesize_tools_from_sources(repo, &nodes, &processes, &native_tools);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:commands",
+        "aka-engine:export-artifacts:synthesize:commands",
         0,
         0,
     );
     let commands = synthesize_commands_from_sources(repo, &nodes, &processes);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:configs",
+        "aka-engine:export-artifacts:synthesize:configs",
         0,
         0,
     );
     let configs = synthesize_configs_from_sources(repo, &nodes);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:jobs",
+        "aka-engine:export-artifacts:synthesize:jobs",
         0,
         0,
     );
     let jobs = synthesize_jobs_from_sources(repo, &nodes, &processes);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:topics",
+        "aka-engine:export-artifacts:synthesize:topics",
         0,
         0,
     );
@@ -1870,49 +1879,49 @@ fn synthesize_graph_with_progress(
     );
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:caches",
+        "aka-engine:export-artifacts:synthesize:caches",
         0,
         0,
     );
     let caches = synthesize_caches_from_sources(repo, &nodes);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:events",
+        "aka-engine:export-artifacts:synthesize:events",
         0,
         0,
     );
     let events = synthesize_events_from_sources(repo, &nodes);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:policies",
+        "aka-engine:export-artifacts:synthesize:policies",
         0,
         0,
     );
     let policies = synthesize_policies_from_sources(repo, &nodes);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:resources",
+        "aka-engine:export-artifacts:synthesize:resources",
         0,
         0,
     );
     let resources = synthesize_resources_from_sources(repo, &nodes);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:graphql",
+        "aka-engine:export-artifacts:synthesize:graphql",
         0,
         0,
     );
     let graphql = synthesize_graphql_from_sources(repo, &nodes, &processes);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:persistence",
+        "aka-engine:export-artifacts:synthesize:persistence",
         0,
         0,
     );
     let persistence = synthesize_persistence_from_sources(repo, &nodes);
     emit_phase(
         on_event,
-        "codebase-memory:export-artifacts:synthesize:transactions",
+        "aka-engine:export-artifacts:synthesize:transactions",
         0,
         0,
     );

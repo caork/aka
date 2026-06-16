@@ -101,11 +101,19 @@ host_resource_platform() {
   esac
 }
 
-cbm_exe_for_platform() {
+engine_exe_for_platform() {
+  case "$1" in
+    darwin-arm64|darwin-x64) echo "aka-engine" ;;
+    win-x64) echo "aka-engine.exe" ;;
+    *) echo "error: 不支持的 AKA engine 平台 $1" >&2; return 1 ;;
+  esac
+}
+
+legacy_engine_exe_for_platform() {
   case "$1" in
     darwin-arm64|darwin-x64) echo "codebase-memory-mcp" ;;
     win-x64) echo "codebase-memory-mcp.exe" ;;
-    *) echo "error: 不支持的 CBM 平台 $1" >&2; return 1 ;;
+    *) echo "error: 不支持的 AKA engine 平台 $1" >&2; return 1 ;;
   esac
 }
 
@@ -194,38 +202,50 @@ create_zip_archive() {
   return 1
 }
 
-find_cbm_binary() {
-  local platform exe platform_env
+find_engine_binary() {
+  local platform exe legacy_exe platform_env legacy_platform_env
   platform="$1"
-  exe="$(cbm_exe_for_platform "${platform}")"
-  platform_env="AKA_CBM_BIN_$(env_var_for_platform "${platform}")"
+  exe="$(engine_exe_for_platform "${platform}")"
+  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
+  platform_env="AKA_ENGINE_BIN_$(env_var_for_platform "${platform}")"
+  legacy_platform_env="AKA_CBM_BIN_$(env_var_for_platform "${platform}")"
 
   first_existing_file \
     "${!platform_env:-}" \
+    "${AKA_ENGINE_BIN:-}" \
+    "${!legacy_platform_env:-}" \
     "${AKA_CBM_BIN:-}" \
     "${REPO_ROOT}/engine/${exe}" \
+    "${REPO_ROOT}/engine/${legacy_exe}" \
+    "${REPO_ROOT}/engine/aka-engine-src/build/c/${exe}" \
+    "${REPO_ROOT}/engine/aka-engine-src/build/c/${legacy_exe}" \
     "${REPO_ROOT}/engine/codebase-memory-mcp-src/build/c/${exe}" \
+    "${REPO_ROOT}/engine/codebase-memory-mcp-src/build/c/${legacy_exe}" \
+    "/tmp/aka-engine-src/build/c/${exe}" \
+    "/tmp/aka-engine-src/build/c/${legacy_exe}" \
     "/tmp/codebase-memory-mcp-src/build/c/${exe}" \
-    "$(command -v "${exe}" 2>/dev/null || true)"
+    "/tmp/codebase-memory-mcp-src/build/c/${legacy_exe}" \
+    "$(command -v "${exe}" 2>/dev/null || true)" \
+    "$(command -v "${legacy_exe}" 2>/dev/null || true)"
 }
 
 copy_engine_resource() {
   local platform exe bin dst host_platform
   platform="$1"
-  exe="$(cbm_exe_for_platform "${platform}")"
+  exe="$(engine_exe_for_platform "${platform}")"
   dst="${TAURI_RESOURCES_DIR}/engine"
 
-  bin="$(find_cbm_binary "${platform}" || true)"
+  bin="$(find_engine_binary "${platform}" || true)"
   host_platform="$(host_resource_platform)"
   if [[ -z "${bin}" && "${platform}" = "${host_platform}" ]]; then
-    echo "==> 本地未找到 CBM engine，运行 scripts/sync-engine.sh 构建 (${platform})"
+    echo "==> 本地未找到 AKA engine，运行 scripts/sync-engine.sh 构建 (${platform})"
     "${REPO_ROOT}/scripts/sync-engine.sh"
-    bin="$(find_cbm_binary "${platform}" || true)"
+    bin="$(find_engine_binary "${platform}" || true)"
   fi
 
   if [[ -z "${bin}" ]]; then
-    echo "error: 找不到 ${platform} 的 codebase-memory-mcp 二进制。" >&2
-    echo "       请先运行 scripts/sync-engine.sh，或设置 AKA_CBM_BIN / AKA_CBM_BIN_$(env_var_for_platform "${platform}")。" >&2
+    echo "error: 找不到 ${platform} 的 AKA engine 二进制。" >&2
+    echo "       请先运行 scripts/sync-engine.sh，或设置 AKA_ENGINE_BIN / AKA_ENGINE_BIN_$(env_var_for_platform "${platform}")。" >&2
     return 1
   fi
 
@@ -236,7 +256,7 @@ copy_engine_resource() {
   if [[ -f "${REPO_ROOT}/engine/ENGINE_SHA" ]]; then
     cp "${REPO_ROOT}/engine/ENGINE_SHA" "${dst}/ENGINE_SHA"
   fi
-  echo "==> 内置 CBM engine: ${bin} -> ${dst}/${exe}"
+  echo "==> 内置 AKA engine: ${bin} -> ${dst}/${exe}"
   assert_engine_resource_dir "${platform}" "${dst}"
 }
 
@@ -247,14 +267,18 @@ assert_engine_file_nonempty() {
 }
 
 find_engine_resource_bin() {
-  local platform dir exe
+  local platform dir exe legacy_exe
   platform="$1"
   dir="$2"
-  exe="$(cbm_exe_for_platform "${platform}")"
+  exe="$(engine_exe_for_platform "${platform}")"
+  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
   first_existing_file \
     "${dir}/${exe}" \
     "${dir}/bin/${exe}" \
-    "${dir}/build/c/${exe}"
+    "${dir}/build/c/${exe}" \
+    "${dir}/${legacy_exe}" \
+    "${dir}/bin/${legacy_exe}" \
+    "${dir}/build/c/${legacy_exe}"
 }
 
 assert_engine_resource_dir() {
@@ -263,8 +287,8 @@ assert_engine_resource_dir() {
   dir="$2"
   engine_bin="$(find_engine_resource_bin "${platform}" "${dir}" || true)"
   if [[ -z "${engine_bin}" ]]; then
-    echo "error: 桌面 engine 资源缺少 native CBM 二进制: ${dir}" >&2
-    echo "       需要 $(cbm_exe_for_platform "${platform}")，不要打入旧的 JS/node engine 目录。" >&2
+    echo "error: 桌面 engine 资源缺少 native AKA engine 二进制: ${dir}" >&2
+    echo "       需要 $(engine_exe_for_platform "${platform}")，不要打入旧的 JS/node engine 目录。" >&2
     return 1
   fi
   if [[ "${platform}" != "win-x64" && ! -x "${engine_bin}" ]]; then
@@ -292,26 +316,29 @@ assert_app_bundle_engine() {
       return 0
     fi
   done
-  echo "error: app 包内缺少 native CBM engine: ${resources}/{engine,resources/engine}" >&2
+  echo "error: app 包内缺少 native AKA engine: ${resources}/{engine,resources/engine}" >&2
   return 1
 }
 
 assert_zip_has_engine() {
-  local zip_path platform prefix exe listing base entry
+  local zip_path platform prefix exe legacy_exe listing base entry candidate_exe
   zip_path="$1"
   platform="$2"
   prefix="$3"
-  exe="$(cbm_exe_for_platform "${platform}")"
+  exe="$(engine_exe_for_platform "${platform}")"
+  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
   [[ -f "${zip_path}" ]] || { echo "error: 找不到 zip: ${zip_path}" >&2; return 1; }
   listing="$(unzip -Z1 "${zip_path}")"
   for base in "engine" "resources/engine" "engine/bin" "resources/engine/bin" "engine/build/c" "resources/engine/build/c"; do
-    entry="${prefix:+${prefix}/}${base}/${exe}"
-    if grep -qxF "${entry}" <<< "${listing}"; then
-      echo "==> 校验 zip 包内 engine: ${entry}"
-      return 0
-    fi
+    for candidate_exe in "${exe}" "${legacy_exe}"; do
+      entry="${prefix:+${prefix}/}${base}/${candidate_exe}"
+      if grep -qxF "${entry}" <<< "${listing}"; then
+        echo "==> 校验 zip 包内 engine: ${entry}"
+        return 0
+      fi
+    done
   done
-  echo "error: zip 包内缺少 native CBM engine: ${zip_path}" >&2
+  echo "error: zip 包内缺少 native AKA engine: ${zip_path}" >&2
   return 1
 }
 
@@ -685,10 +712,10 @@ package_windows_desktop() {
     embed_dir="${TAURI_DIR}/embedded-engine"
     rm -rf "${embed_dir}"
     mkdir -p "${embed_dir}"
-    assert_engine_file_nonempty "${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe"
-    cp "${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe" "${embed_dir}/codebase-memory-mcp.exe"
-    assert_engine_file_nonempty "${embed_dir}/codebase-memory-mcp.exe"
-    echo "==> 内嵌 Windows CBM engine: ${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe -> ${embed_dir}/codebase-memory-mcp.exe"
+    assert_engine_file_nonempty "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe"
+    cp "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe" "${embed_dir}/aka-engine.exe"
+    assert_engine_file_nonempty "${embed_dir}/aka-engine.exe"
+    echo "==> 内嵌 Windows AKA engine: ${TAURI_RESOURCES_DIR}/engine/aka-engine.exe -> ${embed_dir}/aka-engine.exe"
     rm -rf "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/engine"
     local tauri_args=(build --target "${win_triple}" --bundles nsis --ci)
     if command -v cargo-xwin >/dev/null 2>&1 && [[ "$(uname -s)" = "Darwin" ]]; then
@@ -740,10 +767,10 @@ package_windows_desktop() {
   stage="$(mktemp -d)"
   cp "${exe_path}" "${stage}/AKA.exe"
   mkdir -p "${stage}/engine"
-  assert_engine_file_nonempty "${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe"
-  cp "${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe" "${stage}/engine/codebase-memory-mcp.exe"
-  assert_engine_file_nonempty "${stage}/engine/codebase-memory-mcp.exe"
-  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe engine/codebase-memory-mcp.exe)
+  assert_engine_file_nonempty "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe"
+  cp "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe" "${stage}/engine/aka-engine.exe"
+  assert_engine_file_nonempty "${stage}/engine/aka-engine.exe"
+  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe engine/aka-engine.exe)
   rm -rf "${stage}"
   assert_zip_has_engine "${portable_zip}" "win-x64" ""
   echo "==> ${portable_zip}"

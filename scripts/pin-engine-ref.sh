@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sync Docker / release CBM pins from engine/ENGINE_SHA.
+# Sync Docker / release AKA engine pins from engine/ENGINE_SHA.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,7 +22,7 @@ replace_ref() {
   perl -0pi -e "s/${pattern}/${SHA}/g" "${file}"
 }
 
-replace_ref "${ROOT}/Dockerfile" 'ARG CBM_REF=\K[0-9a-f]{40}'
-replace_ref "${ROOT}/.github/workflows/release.yml" 'CBM_REF: \K[0-9a-f]{40}'
+replace_ref "${ROOT}/Dockerfile" 'ARG AKA_ENGINE_REF=\K[0-9a-f]{40}'
+replace_ref "${ROOT}/.github/workflows/release.yml" 'AKA_ENGINE_REF: \K[0-9a-f]{40}'
 
-echo "Pinned CBM_REF=${SHA}"
+echo "Pinned AKA_ENGINE_REF=${SHA}"

@@ -1,14 +1,14 @@
 # 部署（Docker）
 
-> 许可提醒：解析引擎 `codebase-memory-mcp` 为 MIT，aka 镜像 OCI label 使用
+> 许可提醒：解析引擎 AKA engine 为 MIT，aka 镜像 OCI label 使用
 > `org.opencontainers.image.licenses=MIT`。
 
-镜像内容：`aka` 二进制（serve / analyze / mcp 等八命令）+ `codebase-memory-mcp` 原生 C 解析引擎 + git（git 导入用）。CBM 负责解析并写入 SQLite，aka-core adapter 导出 NDJSON 后进入 Rust 索引。默认启动 `aka serve`，HTTP API 在 4111。
+镜像内容：`aka` 二进制（serve / analyze / mcp 等八命令）+ AKA engine 原生 C 解析引擎 + git（git 导入用）。AKA engine 负责解析并写入 SQLite，aka-core adapter 导出 NDJSON 后进入 Rust 索引。默认启动 `aka serve`，HTTP API 在 4111。
 
 ## 构建
 
 ```bash
-# 仓库根目录（Dockerfile 会拉取/构建 codebase-memory-mcp native engine）
+# 仓库根目录（Dockerfile 会拉取/构建 AKA engine）
 docker build -t aka:0.1.0 .
 ```
 
@@ -18,10 +18,10 @@ docker build -t aka:0.1.0 .
 |---|---|
 | `rust-builder` | `cargo build --release -p aka-cli`（native arch） |
 | `rust-cross` | 可选：`--target rust-cross` 单独构建 x86_64 linux 二进制（不在默认链路） |
-| `engine-builder` | Debian build 环境里拉取 `codebase-memory-mcp` 并 `make -f Makefile.cbm cbm` |
-| `runtime` | debian-slim + git + aka + CBM native engine，非 root（uid 10001），`/data` 数据卷 |
+| `engine-builder` | Debian build 环境里拉取 `aka-engine` 并 `make -f Makefile.cbm cbm` |
+| `runtime` | debian-slim + git + aka + AKA engine，非 root（uid 10001），`/data` 数据卷 |
 
-构建慢点正常：rust release 编译 + CBM native engine 编译合计数分钟到十几分钟量级。
+构建慢点正常：rust release 编译 + AKA engine 编译合计数分钟到十几分钟量级。
 
 ## 运行
 
@@ -38,8 +38,8 @@ curl http://127.0.0.1:4111/api/health     # → {"status":"ok","service":"aka-se
 关键环境变量（镜像内已设好，一般不用动）：
 
 - `AKA_HOME=/data` — registry.json 与各仓库索引数据（artifact / graph.db / search）都在这，**挂卷持久化**。
-- `AKA_ENGINE_DIR=/opt/aka/engine` — CBM native engine 目录（含 `codebase-memory-mcp`）。
-- `AKA_CBM_MODE=fast|moderate|full` — CBM 解析模式，默认 `fast`。
+- `AKA_ENGINE_DIR=/opt/aka/engine` — AKA engine 目录（含 `aka-engine`）。
+- `AKA_ENGINE_MODE=fast|moderate|full` — AKA engine 解析模式，默认 `fast`。
 
 ## 导入仓库
 
@@ -63,7 +63,7 @@ curl -X POST http://127.0.0.1:4111/api/repos/import-zip \
   -F name=myrepo -F file=@repo.zip
 ```
 
-镜像自带冒烟样本 `/opt/aka/fixtures-demo`（fixtures/demo-ts），可快速验证 CBM engine 和 adapter 在容器内可用：
+镜像自带冒烟样本 `/opt/aka/fixtures-demo`（fixtures/demo-ts），可快速验证 AKA engine 和 adapter 在容器内可用：
 
 ```bash
 docker exec aka aka analyze /opt/aka/fixtures-demo
@@ -88,9 +88,9 @@ git 导入的 `checkouts/`。删除容器不丢索引；要全清就 `docker vol
 
 **镜像不在 macOS 本机构建**（约定）。推送 `v*` tag 触发 `.github/workflows/release.yml`：
 
-1. Dockerfile 按 CBM pin 拉取 aka 维护的 `caork/codebase-memory-mcp` fork 并构建 native C binary；日常 pin 由 `engine/ENGINE_SHA` 经 `scripts/pin-engine-ref.sh` 同步，只在显式上游验证或临时分支验证时用 `--build-arg CBM_REPO=... CBM_REF=...` 覆盖；
+1. Dockerfile 按 AKA engine pin 拉取 aka 维护的 engine fork 并构建 native C binary；日常 pin 由 `engine/ENGINE_SHA` 经 `scripts/pin-engine-ref.sh` 同步，只在显式上游验证或临时分支验证时用 `--build-arg AKA_ENGINE_REPO=... --build-arg AKA_ENGINE_REF=...` 覆盖；
 2. 构建 linux/amd64 镜像并**容器内冒烟**（health → `analyze /opt/aka/fixtures-demo` → query 非空，
-   覆盖 CBM native engine + SQLite->NDJSON adapter 这一关键风险点）；
+   覆盖 AKA engine + SQLite->NDJSON adapter 这一关键风险点）；
 3. 推 `ghcr.io/caork/aka:<版本>` 与 `:latest`（私有 package，拉取需 `read:packages` 的 PAT：
    `echo $PAT | docker login ghcr.io -u caork --password-stdin`）；
 4. `docker save` 的镜像 tar、macOS/Windows 桌面 GUI 包、Claude Code/OpenCode 插件包、
@@ -145,14 +145,14 @@ release 使用 `AKA_TAURI_UPDATER=required` 和 `--require-updater true`，缺 s
 默认 updater 端点为 `https://github.com/caork/aka/releases/latest/download/latest.json`；如需切到 CDN 或
 hawkingrad mirror，可在 CI/本地打包时设置 `AKA_UPDATER_ENDPOINT` 覆盖。
 
-桌面包必须内置 native `codebase-memory-mcp` engine。`scripts/package-release.sh` 会在准备 Tauri 资源、
-生成 macOS `.app.zip`、生成 Windows portable zip 前后校验 `engine/codebase-memory-mcp` 或
-`engine/codebase-memory-mcp.exe`，避免把旧的 JS/node engine 目录打进包里却没有 native binary。
+桌面包必须内置 native `aka-engine`。`scripts/package-release.sh` 会在准备 Tauri 资源、
+生成 macOS `.app.zip`、生成 Windows portable zip 前后校验 `engine/aka-engine` 或
+`engine/aka-engine.exe`，避免把旧的 JS/node engine 目录打进包里却没有 native binary。
 
 Release 不再发布 `aka-<版本>-...` 裸命令行/server 包。用户侧只交付桌面端和插件包；桌面包里的 `AKA`
 可执行文件支持 `serve` / `mcp` / `analyze` 等子命令仅用于插件 fallback、headless 调试和源码开发。headless
 场景使用 Docker 镜像。源码开发时仍可 `cargo build --release -p aka-cli` 得到单独的 `aka` 调试二进制。
 
-arm64 镜像暂不预构建（engine 阶段需在目标架构编译 CBM native binary，QEMU 全模拟太慢）；
+arm64 镜像暂不预构建（engine 阶段需在目标架构编译 AKA engine native binary，QEMU 全模拟太慢）；
 需要时在 arm64 机器上 `docker build -t aka:0.1.0 .` 即可，Dockerfile 全程架构无关。
 macOS 本机桌面包由 `scripts/package-release.sh --desktop-only` 产出（不含 Docker）。

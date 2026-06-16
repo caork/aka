@@ -2,7 +2,7 @@
 #   macos-desktop : macOS 上构建 Tauri GUI aka.app → dmg + zip 挂到 Release
 #   windows-desktop : Windows 上构建 Tauri GUI NSIS 安装包 + portable zip → 挂到 Release
 #   client-packages : 打包 Claude Code / OpenCode 插件包与 clients 总包 → 挂到 Release
-#   docker-image : Dockerfile 自行 clone/build codebase-memory-mcp native engine，
+#   docker-image : Dockerfile 自行 clone/build AKA engine，
 #                  构建 linux/amd64 镜像 → 容器内冒烟（health/analyze/query）→
 #                  推 ghcr.io/caork/aka → 镜像 tar 挂到 Release（便于 Jensen 离线 docker load）
 #   checksums : 全部 release 资产上传后生成 SHA256SUMS
@@ -22,8 +22,8 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/aka
-  CBM_REPO: https://github.com/caork/codebase-memory-mcp.git
-  CBM_REF: 133958e20a9bff0301d15dc12740361461bbdecb
+  AKA_ENGINE_REPO: https://github.com/caork/codebase-memory-mcp.git
+  AKA_ENGINE_REF: c88e0024ff456043771eee25151f7e5c0db15228
 
 jobs:
   macos-desktop:
@@ -127,26 +127,29 @@ jobs:
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-zlib
 
-      - name: Build Windows CBM engine
-        id: cbm
+      - name: Build Windows AKA engine
+        id: engine
         shell: msys2 {0}
         run: |
           set -euxo pipefail
-          git clone "${CBM_REPO}" cbm-win-src
-          git -C cbm-win-src checkout "${CBM_REF}"
-          make -C cbm-win-src -f Makefile.cbm cbm
-          CBM_BIN="${PWD}/cbm-win-src/build/c/codebase-memory-mcp.exe"
-          if [[ ! -x "${CBM_BIN}" && -x "${PWD}/cbm-win-src/build/c/codebase-memory-mcp" ]]; then
-            cp "${PWD}/cbm-win-src/build/c/codebase-memory-mcp" "${CBM_BIN}"
+          git clone "${AKA_ENGINE_REPO}" aka-engine-win-src
+          git -C aka-engine-win-src checkout "${AKA_ENGINE_REF}"
+          make -C aka-engine-win-src -f Makefile.cbm cbm
+          ENGINE_BIN="${PWD}/aka-engine-win-src/build/c/aka-engine.exe"
+          if [[ ! -x "${ENGINE_BIN}" && -x "${PWD}/aka-engine-win-src/build/c/codebase-memory-mcp.exe" ]]; then
+            cp "${PWD}/aka-engine-win-src/build/c/codebase-memory-mcp.exe" "${ENGINE_BIN}"
           fi
-          test -x "${CBM_BIN}"
-          echo "bin=$(cygpath -m "${CBM_BIN}")" >> "$GITHUB_OUTPUT"
+          if [[ ! -x "${ENGINE_BIN}" && -x "${PWD}/aka-engine-win-src/build/c/codebase-memory-mcp" ]]; then
+            cp "${PWD}/aka-engine-win-src/build/c/codebase-memory-mcp" "${ENGINE_BIN}"
+          fi
+          test -x "${ENGINE_BIN}"
+          echo "bin=$(cygpath -m "${ENGINE_BIN}")" >> "$GITHUB_OUTPUT"
 
       - name: Build Windows desktop GUI
         id: pkg
         shell: bash
         env:
-          AKA_CBM_BIN_WIN_X64: ${{ steps.cbm.outputs.bin }}
+          AKA_ENGINE_BIN_WIN_X64: ${{ steps.engine.outputs.bin }}
           AKA_TAURI_UPDATER: auto
           AKA_UPDATER_ENDPOINT: https://github.com/caork/aka/releases/latest/download/latest.json
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
@@ -157,7 +160,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           [ "${GITHUB_REF_TYPE}" = "tag" ] || VERSION="dev-${GITHUB_SHA::8}"
 
-          test -f "${AKA_CBM_BIN_WIN_X64}"
+          test -f "${AKA_ENGINE_BIN_WIN_X64}"
           scripts/package-release.sh --version "${VERSION}" --desktop-windows
 
           echo "setup_name=aka-desktop-${VERSION}-x86_64-pc-windows-msvc-setup.exe" >> "$GITHUB_OUTPUT"
@@ -244,7 +247,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build image (linux/amd64)
-        run: docker build --build-arg CBM_REPO="$CBM_REPO" --build-arg CBM_REF="$CBM_REF" -t "$IMAGE:${{ steps.ver.outputs.version }}" .
+        run: docker build --build-arg AKA_ENGINE_REPO="$AKA_ENGINE_REPO" --build-arg AKA_ENGINE_REF="$AKA_ENGINE_REF" -t "$IMAGE:${{ steps.ver.outputs.version }}" .
 
       - name: Smoke test (health / analyze / query)
         run: |
@@ -255,7 +258,7 @@ jobs:
             [ "$i" = 30 ] && { docker logs aka-smoke; exit 1; }
             sleep 1
           done
-          # 容器内真实跑通 codebase-memory-mcp native engine
+          # 容器内真实跑通 AKA engine
           docker exec aka-smoke aka analyze /opt/aka/fixtures-demo
           HITS=$(curl -fsS -X POST http://127.0.0.1:4111/api/query \
             -H 'content-type: application/json' \

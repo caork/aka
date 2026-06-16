@@ -69,4 +69,4 @@ claude plugin validate clients/claude-code
 claude plugin validate .                     # 校验 marketplace.json
 ```
 
-> 注意：解析引擎 `codebase-memory-mcp` 为 MIT，本插件随 aka 客户端接入按 MIT 口径分发。
+> 注意：解析引擎 AKA engine 为 MIT，本插件随 aka 客户端接入按 MIT 口径分发。

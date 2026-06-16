@@ -29,7 +29,7 @@ struct DesktopMcpRuntime {
 }
 
 #[cfg(target_os = "windows")]
-const EMBEDDED_CBM_ENGINE: &[u8] = include_bytes!("../embedded-engine/codebase-memory-mcp.exe");
+const EMBEDDED_AKA_ENGINE: &[u8] = include_bytes!("../embedded-engine/aka-engine.exe");
 
 fn fallback_app_data_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
@@ -120,7 +120,7 @@ fn fallback_resource_dir() -> PathBuf {
 
 #[cfg(not(target_os = "windows"))]
 fn bundled_engine_bin_name() -> &'static str {
-    "codebase-memory-mcp"
+    "aka-engine"
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -129,6 +129,9 @@ fn has_native_engine(dir: &std::path::Path) -> bool {
     dir.join(bin).is_file()
         || dir.join("bin").join(bin).is_file()
         || dir.join("build/c").join(bin).is_file()
+        || dir.join("codebase-memory-mcp").is_file()
+        || dir.join("bin").join("codebase-memory-mcp").is_file()
+        || dir.join("build/c").join("codebase-memory-mcp").is_file()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -144,14 +147,14 @@ fn bundled_engine_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
 #[cfg(target_os = "windows")]
 fn ensure_embedded_engine_dir(app_data_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
     let engine_dir = app_data_dir.join("engine");
-    let engine_bin = engine_dir.join("codebase-memory-mcp.exe");
+    let engine_bin = engine_dir.join("aka-engine.exe");
     std::fs::create_dir_all(&engine_dir)?;
 
     let needs_write = std::fs::read(&engine_bin)
-        .map(|existing| existing != EMBEDDED_CBM_ENGINE)
+        .map(|existing| existing != EMBEDDED_AKA_ENGINE)
         .unwrap_or(true);
     if needs_write {
-        std::fs::write(&engine_bin, EMBEDDED_CBM_ENGINE)?;
+        std::fs::write(&engine_bin, EMBEDDED_AKA_ENGINE)?;
     }
 
     Ok(engine_dir)
@@ -247,7 +250,10 @@ fn configure_backend(
 
 #[cfg(target_os = "windows")]
 fn configure_cli_engine_runtime(app_data_dir: &std::path::Path) -> anyhow::Result<()> {
-    if std::env::var_os("AKA_ENGINE_DIR").is_none() && std::env::var_os("AKA_CBM_BIN").is_none() {
+    if std::env::var_os("AKA_ENGINE_DIR").is_none()
+        && std::env::var_os("AKA_ENGINE_BIN").is_none()
+        && std::env::var_os("AKA_CBM_BIN").is_none()
+    {
         let engine_dir = ensure_embedded_engine_dir(app_data_dir)?;
         std::env::set_var("AKA_ENGINE_DIR", engine_dir);
     }
@@ -274,7 +280,10 @@ fn configure_backend(
 
 #[cfg(not(target_os = "windows"))]
 fn configure_cli_engine_runtime(_app_data_dir: &std::path::Path) -> anyhow::Result<()> {
-    if std::env::var_os("AKA_ENGINE_DIR").is_none() && std::env::var_os("AKA_CBM_BIN").is_none() {
+    if std::env::var_os("AKA_ENGINE_DIR").is_none()
+        && std::env::var_os("AKA_ENGINE_BIN").is_none()
+        && std::env::var_os("AKA_CBM_BIN").is_none()
+    {
         let resource_dir = fallback_resource_dir();
         if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
             std::env::set_var("AKA_ENGINE_DIR", engine_dir);
