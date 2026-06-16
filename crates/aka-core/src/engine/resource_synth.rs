@@ -12,6 +12,8 @@ mod http;
 use http::extract_http_resources;
 mod identity;
 use identity::extract_identity_resources;
+mod infra_config;
+use infra_config::extract_infra_config_resources;
 mod notification;
 use notification::extract_notification_resources;
 mod payment;
@@ -170,7 +172,9 @@ fn ingest_resource_detection(
 }
 
 fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
-    identity::extract_identity_config_resources(text)
+    let mut out = identity::extract_identity_config_resources(text);
+    out.extend(extract_infra_config_resources(text));
+    out
 }
 
 fn is_resource_config_file_path(file_path: &str) -> bool {
@@ -277,6 +281,51 @@ impl ResourceDetection {
         Self {
             url: format!("identity:{provider}"),
             resource_type: "identity".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
+    fn database(url: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url,
+            resource_type: "database".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
+    fn redis(url: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url,
+            resource_type: "redis".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
+    fn kafka(url: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url,
+            resource_type: "kafka".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
+    fn rabbitmq(url: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url,
+            resource_type: "rabbitmq".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
+    fn mongodb(url: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url,
+            resource_type: "mongodb".into(),
             node_id,
             strategy: strategy.into(),
         }
