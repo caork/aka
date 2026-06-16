@@ -1912,7 +1912,7 @@ fn load_synth_nodes(
         let start_line: i64 = row.get(5)?;
         let end_line: i64 = row.get(6)?;
         let props = parse_props(&text_col(row, 7)?);
-        if !is_process_step_label(&label) || is_noisy_source_path(&file_path) {
+        if !is_semantic_symbol_label(&label) || is_noisy_source_path(&file_path) {
             continue;
         }
         let aka_id = aka_node_id(cbm_id, &qn);
@@ -2199,6 +2199,9 @@ fn project_process_nodes(
     nodes
         .iter()
         .filter(|(_, node)| {
+            if !is_process_step_label(&node.label) {
+                return false;
+            }
             let project_code = is_business_language(&node.language)
                 || is_project_code_source_path(&node.file_path);
             node.file_path.is_empty()
@@ -4220,6 +4223,10 @@ fn is_process_step_label(label: &str) -> bool {
         label,
         "Function" | "Method" | "Class" | "Interface" | "Struct" | "Enum" | "Trait" | "Type"
     )
+}
+
+fn is_semantic_symbol_label(label: &str) -> bool {
+    is_process_step_label(label) || matches!(label, "Field" | "Variable" | "Property")
 }
 
 fn community_key(file_path: &str) -> String {

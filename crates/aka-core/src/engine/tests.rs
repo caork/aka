@@ -2283,6 +2283,22 @@ class OrderSettings {
             "parent_class": "com.example.orders.OrderSettings",
         }),
     );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Field",
+            "timeout",
+            "com.example.orders.OrderSettings.timeout",
+            file,
+        ),
+        (9, 9),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.orders.OrderSettings",
+            "decorators": ["@Value(\"${orders.payments.timeout:10s}\")"],
+        }),
+    );
 
     let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
     let keys: BTreeSet<_> = synth
@@ -2301,6 +2317,93 @@ class OrderSettings {
         .map(|edge| edge.edge_type)
         .collect();
     assert!(edge_types.contains(&"USES_CONFIG".to_string()));
+    let timeout = synth
+        .configs
+        .iter()
+        .find(|config| config.key == "orders.payments.timeout")
+        .expect("@Value config node");
+    assert!(timeout
+        .edge_recs()
+        .iter()
+        .any(|edge| edge.source_id == "cbm:3:com.example.orders.OrderSettings.timeout"));
+}
+
+#[test]
+fn synthesizes_spring_configs_from_source_annotations_without_metadata() {
+    let repo = temp_repo("spring-config-source-annotations");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/OrderSettings.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+@ConfigurationProperties(
+    prefix = "orders.retry")
+class OrderSettings {
+    @Value(
+        "${orders.payments.timeout:10s}")
+    String timeout;
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderSettings",
+            "com.example.orders.OrderSettings",
+            file,
+        ),
+        (8, 12),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Field",
+            "timeout",
+            "com.example.orders.OrderSettings.timeout",
+            file,
+        ),
+        (11, 11),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.orders.OrderSettings",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let retry = synth
+        .configs
+        .iter()
+        .find(|config| config.key == "orders.retry")
+        .expect("class-level @ConfigurationProperties source annotation");
+    assert_eq!(retry.config_type, "spring-property-prefix");
+    assert!(retry
+        .edge_recs()
+        .iter()
+        .any(|edge| edge.source_id == "cbm:1:com.example.orders.OrderSettings"));
+
+    let timeout = synth
+        .configs
+        .iter()
+        .find(|config| config.key == "orders.payments.timeout")
+        .expect("field-level @Value source annotation");
+    assert_eq!(timeout.config_type, "spring-property");
+    assert!(timeout
+        .edge_recs()
+        .iter()
+        .any(|edge| edge.source_id == "cbm:2:com.example.orders.OrderSettings.timeout"));
 }
 
 #[test]

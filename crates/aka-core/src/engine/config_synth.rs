@@ -5,8 +5,8 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_call_args, is_noisy_source_path, node_at_offset, nodes_by_file, pick_handler_node,
-    read_repo_text, read_string_literal, stable_hash, EdgeRec, NodeRec, ProjectSourceSet,
-    SynthNode,
+    read_repo_text, read_string_literal, source_annotations_before_node, stable_hash, EdgeRec,
+    NodeRec, ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -395,9 +395,9 @@ fn detect_config_usages(text: &str, file_path: &str, nodes: &[&SynthNode]) -> Ve
 fn detect_jvm_config_usages(text: &str, file_path: &str, nodes: &[&SynthNode]) -> Vec<ConfigUsage> {
     let mut out = Vec::new();
     for node in nodes {
-        for decorator in &node.decorators {
-            if decorator_name(decorator) == Some("Value") {
-                if let Some(key) = spring_value_key(decorator) {
+        for decorator in decorators_for_node(text, node) {
+            if decorator_name(&decorator) == Some("Value") {
+                if let Some(key) = spring_value_key(&decorator) {
                     out.push(config_usage(
                         key,
                         "spring-property",
@@ -407,8 +407,8 @@ fn detect_jvm_config_usages(text: &str, file_path: &str, nodes: &[&SynthNode]) -
                     ));
                 }
             }
-            if decorator_name(decorator) == Some("ConfigurationProperties") {
-                if let Some(prefix) = annotation_arg_string(decorator, &["prefix", "value"]) {
+            if decorator_name(&decorator) == Some("ConfigurationProperties") {
+                if let Some(prefix) = annotation_arg_string(&decorator, &["prefix", "value"]) {
                     out.push(config_usage(
                         prefix,
                         "spring-property-prefix",
@@ -439,6 +439,14 @@ fn detect_jvm_config_usages(text: &str, file_path: &str, nodes: &[&SynthNode]) -
         ));
     }
     out
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn detect_python_config_usages(
@@ -553,8 +561,9 @@ fn django_settings_keys(text: &str) -> Vec<(usize, String)> {
 
 fn spring_value_key(annotation: &str) -> Option<String> {
     let raw = first_string_literal(annotation)?;
-    let start = raw.find("${")?;
-    let rest = &raw[start + 2..];
+    let rest = raw
+        .strip_prefix("${")
+        .or_else(|| raw.find("${").map(|start| &raw[start + 2..]))?;
     let end = rest.find('}')?;
     let key = rest[..end].split(':').next().unwrap_or("").trim();
     normalize_config_key(key)
