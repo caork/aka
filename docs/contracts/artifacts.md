@@ -73,7 +73,7 @@ manifest.json 最后写入：aka 侧以 manifest 存在且 `contractVersion` 匹
 
 - `HANDLES_ROUTE`：handler 符号/文件 → Route。`route_map` 用它找 route handler；没有时回退 Route 自身的 `filePath`。
 - `FETCHES`：前端/客户端消费者 → Route。`route_map`、`shape_check`、`api_impact` 用它列直接消费者；当前工具从边 `reason` 的 `keys:<a,b>|fetches:<n>` 摘要解析 consumer `accessedKeys` 和可选 `fetchCount`，adapter 也可在 `evidence` 中保留同名原始字段。`HTTP_CALLS` 也会作为兼容的 route consumer 边消费。
-- `ACCESSES_RESOURCE`：业务方法/函数 → Resource。用于 S3/Object storage 等非 HTTP 外部资源访问；query/context/impact 会按普通图边消费。
+- `ACCESSES_RESOURCE`：业务方法/函数 → Resource。用于 S3/GCS/Azure Blob/Object storage 等非 HTTP 外部资源访问；query/context/impact 会按普通图边消费。
 - `HANDLES_GRAPHQL`：resolver/handler 符号 → GraphQL operation。`graphql_map` 用它列 resolver handlers；query/context/impact 也会按普通定义节点和图边消费。
 - `HANDLES_TOOL`：handler 符号/文件 → Tool。`tool_map` 用它列工具处理函数。
 - `HANDLES_COMMAND`：handler 符号/类 → Command。query/context/impact 会按普通定义节点和图边消费，用于识别运维脚本、管理命令和 CLI 入口的业务影响面。

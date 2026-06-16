@@ -13,6 +13,8 @@ mod java_s3;
 use java_s3::extract_java_aws_s3_resources;
 mod python_gcs;
 use python_gcs::extract_python_gcs_resources;
+mod python_azure_blob;
+use python_azure_blob::extract_python_azure_blob_resources;
 
 #[derive(Debug, Clone)]
 pub(super) struct SynthResource {
@@ -169,6 +171,15 @@ impl ResourceDetection {
             strategy: strategy.into(),
         }
     }
+
+    fn azure_blob(url: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url,
+            resource_type: "azure-blob".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
 }
 
 fn extract_resource_detections(
@@ -219,6 +230,7 @@ fn extract_resource_detections(
     out.extend(extract_python_urllib_calls(text, nodes));
     out.extend(extract_python_boto3_s3_resources(text, nodes));
     out.extend(extract_python_gcs_resources(text, nodes));
+    out.extend(extract_python_azure_blob_resources(text, nodes));
     out.extend(extract_java_aws_s3_resources(text, nodes));
     out.extend(extract_contextual_http_client_calls(
         text,
@@ -243,8 +255,9 @@ fn extract_resource_detections(
     out
 }
 
-fn resource_strategy_rank(strategy: &str) -> u8 {
-    if strategy == "literal-http-url" {
+pub(super) fn resource_strategy_rank(strategy: &str) -> u8 {
+    if strategy == "literal-http-url" || matches!(strategy, "python-gcs-blob" | "python-azure-blob")
+    {
         10
     } else {
         0

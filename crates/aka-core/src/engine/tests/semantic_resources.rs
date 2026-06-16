@@ -404,6 +404,98 @@ def load_manifest():
 }
 
 #[test]
+fn synthesizes_python_azure_blob_resources() {
+    let repo = temp_repo("python-azure-blob-resources");
+    std::fs::write(
+        repo.join("azure_storage.py"),
+        r#"from azure.storage.blob import BlobServiceClient, BlobClient
+
+service = BlobServiceClient.from_connection_string("...")
+
+def store_receipt(order_id, payload):
+    blob = service.get_container_client("order-artifacts").get_blob_client(f"receipts/{order_id}.json")
+    blob.upload_blob(payload, overwrite=True)
+
+def load_manifest():
+    return service.get_container_client("order-artifacts").get_blob_client("manifests/latest.json").download_blob().readall()
+
+def delete_legacy():
+    client = BlobClient.from_connection_string("...", container_name="order-artifacts", blob_name="legacy/old.json")
+    client.delete_blob()
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "store_receipt",
+        "azure_storage.store_receipt",
+        "azure_storage.py",
+        (5, 7),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "load_manifest",
+        "azure_storage.load_manifest",
+        "azure_storage.py",
+        (9, 10),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "delete_legacy",
+        "azure_storage.delete_legacy",
+        "azure_storage.py",
+        (12, 14),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let receipt = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "azblob://order-artifacts/receipts/{param}.json")
+        .expect("Azure Blob receipt resource");
+    assert_eq!(receipt.resource_type, "azure-blob");
+    let receipt_edge = receipt
+        .edge_recs()
+        .into_iter()
+        .find(|edge| edge.source_id == "cbm:1:azure_storage.store_receipt")
+        .expect("Azure Blob upload edge");
+    assert_eq!(receipt_edge.edge_type, "ACCESSES_RESOURCE");
+    assert_eq!(
+        receipt_edge.evidence.as_ref().unwrap()["strategy"],
+        "python-azure-blob-upload"
+    );
+
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "azblob://order-artifacts/manifests/latest.json"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.source_id == "cbm:2:azure_storage.load_manifest"
+                    && edge.evidence.as_ref().unwrap()["strategy"] == "python-azure-blob-download"
+            })
+    }));
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "azblob://order-artifacts/legacy/old.json"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.source_id == "cbm:3:azure_storage.delete_legacy"
+                    && edge.evidence.as_ref().unwrap()["strategy"] == "python-azure-blob-delete"
+            })
+    }));
+}
+
+#[test]
 fn synthesizes_java_aws_s3_resources() {
     let repo = temp_repo("java-aws-s3-resources");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/storage")).unwrap();
