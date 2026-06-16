@@ -691,21 +691,35 @@ fn orm_manager_access_kind(text: &str, start: usize) -> (TableAccessKind, &'stat
     let lower = window.to_ascii_lowercase();
     for marker in [
         ".create(",
+        ".acreate(",
         ".bulk_create(",
+        ".abulk_create(",
         ".update(",
+        ".aupdate(",
         ".bulk_update(",
+        ".abulk_update(",
         ".update_or_create(",
+        ".aupdate_or_create(",
         ".get_or_create(",
+        ".aget_or_create(",
         ".delete(",
+        ".adelete(",
     ] {
         if lower.contains(marker) {
             return (TableAccessKind::Write, "orm-entity-manager-write");
         }
     }
     if lower.starts_with("create(")
+        || lower.starts_with("acreate(")
         || lower.starts_with("bulk_create(")
+        || lower.starts_with("abulk_create(")
+        || lower.starts_with("aupdate(")
+        || lower.starts_with("abulk_update(")
         || lower.starts_with("update_or_create(")
+        || lower.starts_with("aupdate_or_create(")
         || lower.starts_with("get_or_create(")
+        || lower.starts_with("aget_or_create(")
+        || lower.starts_with("adelete(")
     {
         return (TableAccessKind::Write, "orm-entity-manager-write");
     }

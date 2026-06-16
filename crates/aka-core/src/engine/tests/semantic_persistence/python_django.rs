@@ -248,6 +248,18 @@ def cancel_orders(customer_id):
 
 def purge_cancelled():
     return Order.objects.filter(status="cancelled").delete()
+
+async def async_create_order(payload):
+    return await Order.objects.acreate(**payload)
+
+async def async_upsert_order(defaults):
+    return await Order.objects.aupdate_or_create(id=defaults["id"], defaults=defaults)
+
+async def async_bulk_cancel(rows):
+    return await Order.objects.abulk_update(rows, ["status"])
+
+async def async_purge_cancelled():
+    return await Order.objects.filter(status="cancelled").adelete()
 "#,
     )
     .unwrap();
@@ -306,6 +318,50 @@ def purge_cancelled():
             "language": "python",
         }),
     );
+    insert_function_node_props_at(
+        &conn,
+        6,
+        "async_create_order",
+        "services.async_create_order",
+        "services.py",
+        (15, 16),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        7,
+        "async_upsert_order",
+        "services.async_upsert_order",
+        "services.py",
+        (18, 19),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        8,
+        "async_bulk_cancel",
+        "services.async_bulk_cancel",
+        "services.py",
+        (21, 22),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        9,
+        "async_purge_cancelled",
+        "services.async_purge_cancelled",
+        "services.py",
+        (24, 25),
+        json!({
+            "language": "python",
+        }),
+    );
 
     let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
     let table_id = synth
@@ -328,6 +384,10 @@ def purge_cancelled():
         "cbm:3:services.create_order",
         "cbm:4:services.cancel_orders",
         "cbm:5:services.purge_cancelled",
+        "cbm:6:services.async_create_order",
+        "cbm:7:services.async_upsert_order",
+        "cbm:8:services.async_bulk_cancel",
+        "cbm:9:services.async_purge_cancelled",
     ] {
         assert!(
             edges.iter().any(|edge| {
