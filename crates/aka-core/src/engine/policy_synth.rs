@@ -209,7 +209,7 @@ fn extract_python_policy_detections(text: &str, nodes: &[&SynthNode]) -> Vec<Pol
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
     {
-        for decorator in &node.decorators {
+        for decorator in decorators_for_node(text, node) {
             let normalized = decorator.trim().trim_start_matches('@');
             let decorator_lower = normalized.to_ascii_lowercase();
             if decorator_lower.contains("permission_required") {
