@@ -164,6 +164,20 @@ async fn route_tool_shape_and_api_impact_endpoints() {
 
     let res = app()
         .oneshot(post_json(
+            "/api/topic-map",
+            json!({ "repo": "fixture", "topic": "orders", "broker": "kafka" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["topics"][0]["name"], "orders.created");
+    assert_eq!(v["topics"][0]["broker"], "kafka");
+    assert_eq!(v["topics"][0]["producers"][0]["name"], "handle_request");
+    assert_eq!(v["topics"][0]["flows"][0], "main → read_file");
+
+    let res = app()
+        .oneshot(post_json(
             "/api/shape-check",
             json!({ "repo": "fixture", "route": "config" }),
         ))

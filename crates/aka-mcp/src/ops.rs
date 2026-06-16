@@ -11,6 +11,7 @@ use crate::backend::{
     Backend, ChangeDetection, ChangedRange, ChangedSymbol, CodeLineMatch, CodeSearchHit,
     DirectoryCount, GraphqlMapEntry, ImpactDirection, ProcessHit, RenameEdit, RenamePlan, RepoInfo,
     RepoProgress, RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
+    TopicEndpoint, TopicMapEntry,
 };
 
 /// 检索命中（短字段名版）。
@@ -620,6 +621,64 @@ pub struct GraphqlMapOut {
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct TopicEndpointOut {
+    pub name: String,
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flows: Vec<String>,
+}
+
+impl From<TopicEndpoint> for TopicEndpointOut {
+    fn from(endpoint: TopicEndpoint) -> Self {
+        Self {
+            name: endpoint.name,
+            file_path: endpoint.file_path,
+            flows: endpoint.flows,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct TopicOut {
+    pub id: String,
+    pub name: String,
+    pub broker: String,
+    pub source: String,
+    #[serde(rename = "consumerGroups", skip_serializing_if = "Vec::is_empty")]
+    pub consumer_groups: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub producers: Vec<TopicEndpointOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub consumers: Vec<TopicEndpointOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flows: Vec<String>,
+}
+
+impl From<TopicMapEntry> for TopicOut {
+    fn from(topic: TopicMapEntry) -> Self {
+        Self {
+            id: topic.id,
+            name: topic.name,
+            broker: topic.broker,
+            source: topic.source,
+            consumer_groups: topic.consumer_groups,
+            producers: topic.producers.into_iter().map(Into::into).collect(),
+            consumers: topic.consumers.into_iter().map(Into::into).collect(),
+            flows: topic.flows,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct TopicMapOut {
+    pub topics: Vec<TopicOut>,
+    pub total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ShapeConsumerOut {
     pub name: String,
     #[serde(rename = "filePath")]
@@ -1052,6 +1111,33 @@ pub fn graphql_map(
     });
     Ok(GraphqlMapOut {
         operations,
+        total,
+        message,
+    })
+}
+
+pub fn topic_map(
+    b: &dyn Backend,
+    repo: Option<&str>,
+    topic: Option<&str>,
+    broker: Option<&str>,
+) -> anyhow::Result<TopicMapOut> {
+    let topics: Vec<TopicOut> = b
+        .topic_map(repo, topic, broker)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let total = topics.len();
+    let message = (total == 0).then(|| match (topic, broker) {
+        (Some(topic), Some(broker)) => {
+            format!("No {broker:?} topics/channels matching {topic:?}")
+        }
+        (Some(topic), None) => format!("No topics/channels matching {topic:?}"),
+        (None, Some(broker)) => format!("No {broker:?} topics/channels found."),
+        (None, None) => "No topics/channels found.".to_string(),
+    });
+    Ok(TopicMapOut {
+        topics,
         total,
         message,
     })

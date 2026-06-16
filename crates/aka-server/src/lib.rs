@@ -77,6 +77,7 @@ pub fn router(backend: Arc<dyn Backend>) -> Router {
         .route("/api/route-map", post(route_map))
         .route("/api/tool-map", post(tool_map))
         .route("/api/graphql-map", post(graphql_map))
+        .route("/api/topic-map", post(topic_map))
         .route("/api/shape-check", post(shape_check))
         .route("/api/api-impact", post(api_impact))
         .route("/api/search/code", post(search_code))
@@ -301,6 +302,16 @@ pub struct GraphqlMapRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct TopicMapRequest {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub broker: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ApiImpactRequest {
     #[serde(default)]
     pub repo: Option<String>,
@@ -410,6 +421,21 @@ async fn graphql_map(
 ) -> Result<Json<ops::GraphqlMapOut>, ApiError> {
     run(b, move |b| {
         ops::graphql_map(b, req.repo.as_deref(), req.operation.as_deref())
+    })
+    .await
+}
+
+async fn topic_map(
+    State(b): State<AppState>,
+    Json(req): Json<TopicMapRequest>,
+) -> Result<Json<ops::TopicMapOut>, ApiError> {
+    run(b, move |b| {
+        ops::topic_map(
+            b,
+            req.repo.as_deref(),
+            req.topic.as_deref(),
+            req.broker.as_deref(),
+        )
     })
     .await
 }

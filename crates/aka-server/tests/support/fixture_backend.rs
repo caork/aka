@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use aka_mcp::{
     Backend, ChangeDetection, ChangedRange, ChangedSymbol, CodeLineMatch, CodeSearchHit,
     CodeSearchResult, DirectoryCount, GraphqlMapEntry, ProcessHit, QueryEnrichment, RepoInfo,
-    RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, ToolMapEntry,
+    RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, ToolMapEntry, TopicEndpoint, TopicMapEntry,
 };
 
 #[derive(Debug, Clone)]
@@ -223,6 +223,40 @@ fn fixture_graphql(repo: Option<&str>, operation: Option<&str>) -> Vec<GraphqlMa
     [entry]
         .into_iter()
         .filter(|g| operation.is_none_or(|needle| g.name.contains(needle)))
+        .collect()
+}
+
+fn fixture_topics(
+    repo: Option<&str>,
+    topic: Option<&str>,
+    broker: Option<&str>,
+) -> Vec<TopicMapEntry> {
+    if repo.is_some_and(|r| r != "fixture") {
+        return Vec::new();
+    }
+    let entry = TopicMapEntry {
+        id: "fixture:topic:kafka:orders.created".into(),
+        name: "orders.created".into(),
+        broker: "kafka".into(),
+        source: "native-channel+source-scan".into(),
+        consumer_groups: vec!["orders-service".into()],
+        producers: vec![TopicEndpoint {
+            name: "handle_request".into(),
+            file_path: "src/handler.rs".into(),
+            flows: vec!["main → read_file".into(), "main → write_output".into()],
+        }],
+        consumers: vec![TopicEndpoint {
+            name: "write_output".into(),
+            file_path: "src/io.rs".into(),
+            flows: vec!["main → write_output".into()],
+        }],
+        flows: vec!["main → read_file".into(), "main → write_output".into()],
+        properties: None,
+    };
+    [entry]
+        .into_iter()
+        .filter(|t| topic.is_none_or(|needle| t.name.contains(needle)))
+        .filter(|t| broker.is_none_or(|needle| t.broker.eq_ignore_ascii_case(needle)))
         .collect()
 }
 
@@ -546,6 +580,15 @@ impl Backend for FixtureBackend {
         operation: Option<&str>,
     ) -> anyhow::Result<Vec<GraphqlMapEntry>> {
         Ok(fixture_graphql(repo, operation))
+    }
+
+    fn topic_map(
+        &self,
+        repo: Option<&str>,
+        topic: Option<&str>,
+        broker: Option<&str>,
+    ) -> anyhow::Result<Vec<TopicMapEntry>> {
+        Ok(fixture_topics(repo, topic, broker))
     }
 
     fn processes_of(&self, repo: Option<&str>, node_id: &str) -> anyhow::Result<Vec<ProcessHit>> {

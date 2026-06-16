@@ -7,9 +7,9 @@
   如果你的 OpenCode 支持原生 skills（2026-06 起），优先装 skill（按需加载更省 token），不要两者同时启用。
 -->
 
-aka 把仓库解析成「符号节点 + 调用/引用/应用语义边」的图，并建了 BM25 全文索引。MCP server `aka` 提供十八个工具（OpenCode 里显示为 `aka_list_repos`、`aka_query` 等）：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**重构/影响分析**（rename/impact/detect_changes/api_impact/shape_check）、**应用映射**（route_map/graphql_map/tool_map），外加 **管理**（list_repos/analyze/import_repo/update_repo）。在已索引仓库里找符号定义、搜实现、安全 rename、评估改动影响面（blast radius）、检查当前 git 改动、查看 API route/GraphQL/tool 映射时优先用它们，比逐文件 grep/read 更省 token、更准。
+aka 把仓库解析成「符号节点 + 调用/引用/应用语义边」的图，并建了 BM25 全文索引。MCP server `aka` 提供十九个工具（OpenCode 里显示为 `aka_list_repos`、`aka_query` 等）：**检索**（query/search_code/augment）、**定位**（find_definition/context/search_references）、**重构/影响分析**（rename/impact/detect_changes/api_impact/shape_check）、**应用映射**（route_map/graphql_map/tool_map/topic_map），外加 **管理**（list_repos/analyze/import_repo/update_repo）。在已索引仓库里找符号定义、搜实现、安全 rename、评估改动影响面（blast radius）、检查当前 git 改动、查看 API route/GraphQL/tool/message topic 映射时优先用它们，比逐文件 grep/read 更省 token、更准。
 
-Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_TABLE/WRITES_TABLE/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/HANDLES_COMMAND/HANDLES_JOB/ENQUEUES_JOB/DEPENDS_ON/USES_CONFIG/MIGRATES_TABLE/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等是 GitNexus-like 的索引语义：可用于流程分组、HTTP API/GraphQL operation/工具入口、CLI/management command、后台任务触发、依赖注入、配置/env/settings、schema migration、表读写影响、事务边界、异步任务影响、依赖关系、消费者和响应字段检查，但不是完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义层。索引缺少相应节点/边/字段时，相关工具会返回空结果或提示缺数据。
+Route/GraphQL/Tool/Topic/Channel/Command/Config/Table/Repository/Migration/Transaction/READS_TABLE/WRITES_TABLE/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/CONSUMES_TOPIC/PUBLISHES_TOPIC/HANDLES_COMMAND/HANDLES_JOB/ENQUEUES_JOB/DEPENDS_ON/USES_CONFIG/MIGRATES_TABLE/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等是 GitNexus-like 的索引语义：可用于流程分组、HTTP API/GraphQL operation/工具入口、Kafka/RabbitMQ/JMS/SQS/NATS/STOMP/WebSocket/Socket.IO topic/queue/channel 生产消费关系、CLI/management command、后台任务触发、依赖注入、配置/env/settings、schema migration、表读写影响、事务边界、异步任务影响、依赖关系、消费者和响应字段检查，但不是完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义层。索引缺少相应节点/边/字段时，相关工具会返回空结果或提示缺数据。
 
 ## 第一步：永远先 list_repos
 
@@ -39,6 +39,7 @@ Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_T
 | "改表、SQL、Repository、事务或依赖注入前看数据影响" | `query`/`context` 搜表名、`READS_TABLE`、`WRITES_TABLE`、`transaction`、`atomic`、`@Transactional` | 只看 repository 调用或构造器调用 |
 | "检查消费者访问的字段是否在 route 响应里" | `shape_check` | 把空结果当成无风险证明 |
 | "查后台任务、异步触发、MCP/RPC/agent tool 定义和 handler" | `query`/`context` 搜 job、HANDLES_JOB、ENQUEUES_JOB；依赖查 `DEPENDS_ON`；tool 用 `tool_map` | 只搜函数名 |
+| "改 Kafka/RabbitMQ/JMS/SQS/NATS/STOMP/WebSocket topic 前看生产者、消费者、消费组和流程" | `topic_map`，必要时再对 producer/consumer 用 `context` 或 `impact` | 只搜 topic 字符串 |
 | 编辑器钩子/自动补充上下文（要快要省） | `augment`（top-3 命中 + 各自一跳邻居） | context（更重） |
 
 经验法则：
@@ -49,7 +50,7 @@ Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_T
 - **动手重构前必跑 impact**：结果里 `depth` 是反向依赖的跳数，depth=1 是直接调用方（必须逐个检查），depth≥2 是传递波及（扫一眼判断是否行为变化会穿透）。`count` 很大时说明是热点符号，考虑兼容性包装而非直接改签名。
 - **rename 默认 dry-run**：返回 `status/target/replacement/dry_run/applied/changed_files/count/edits/candidates/message`。`status:"ambiguous"` 时用 `uid/file_path/kind` 缩小目标；只有看过 dry-run 计划后，才在明确 `repo`/`repo_path` 下设置 `dry_run:false` 写文件。
 - **提交前或接手别人改动时跑 detect_changes**：默认看 `unstaged`，也可用 `staged`、`all`、`compare + base_ref`。它把 diff hunk 映射到已索引符号，并列出受影响流程。
-- **API/GraphQL/事务/工具类改动先看应用语义图**：`route_map` 看 Route 节点、handler、middleware、consumers、responseKeys/errorKeys 和 flows；`graphql_map` 看 GraphQL operation、operationType、resolver handlers 和 flows；`tool_map` 看 Tool 节点、定义文件、description、handlers 和 flows；`query/context` 可看 Transaction 事务边界、Table 读写边（READS_TABLE/WRITES_TABLE）、Job 边（HANDLES_JOB/ENQUEUES_JOB）和依赖边（DEPENDS_ON）。`shape_check` 依赖 Route responseKeys/errorKeys 与 FETCHES 访问字段元数据；空结果通常表示索引没有足够应用语义/shape 数据，不等于没有 API 风险。
+- **API/GraphQL/事务/工具类改动先看应用语义图**：`route_map` 看 Route 节点、handler、middleware、consumers、responseKeys/errorKeys 和 flows；`graphql_map` 看 GraphQL operation、operationType、resolver handlers 和 flows；`tool_map` 看 Tool 节点、定义文件、description、handlers 和 flows；`topic_map` 看 Topic/Channel 节点、broker/transport、consumerGroups、producers、consumers 和 flows；`query/context` 可看 Transaction 事务边界、Table 读写边（READS_TABLE/WRITES_TABLE）、Job 边（HANDLES_JOB/ENQUEUES_JOB）和依赖边（DEPENDS_ON）。`shape_check` 依赖 Route responseKeys/errorKeys 与 FETCHES 访问字段元数据；空结果通常表示索引没有足够应用语义/shape 数据，不等于没有 API 风险。
 
 ## 怎么读输出
 
@@ -62,7 +63,7 @@ Route/GraphQL/Tool/Command/Config/Table/Repository/Migration/Transaction/READS_T
 - **rename**：`{status,target,replacement,dry_run,applied,changed_files,count,edits,candidates?,message?}`；`edits` 是文件/行/列和替换前后行文本，`candidates` 用于歧义选择。
 - **context**：分组返回 `defs` / `callers` / `callees` / `refs` / `processes`。
 - **detect_changes**：返回 `{changed_ranges, changed_symbols, changed_count, affected_processes}`；`affected_processes` 里看 `first_affected_step` 和 `affected_symbols`。
-- **route_map/graphql_map/tool_map**：route 返回 `route/handler/middleware/responseKeys/errorKeys/consumers/flows`；GraphQL 返回 `name/operationType/filePath/handlers/flows`；tool 返回 `name/filePath/description/handlers/flows`。
+- **route_map/graphql_map/tool_map/topic_map**：route 返回 `route/handler/middleware/responseKeys/errorKeys/consumers/flows`；GraphQL 返回 `name/operationType/filePath/handlers/flows`；tool 返回 `name/filePath/description/handlers/flows`；topic 返回 `name/broker/source/consumerGroups/producers/consumers/flows`。
 - **shape_check/api_impact**：重点看 `mismatches`、`consumers`、`executionFlows`、`impactSummary.riskLevel`；缺 shape 数据时按未知风险处理。
 
 拿到 `file:line` 后只 read 命中的那一小段，不要整文件读——这是用 aka 的全部意义。

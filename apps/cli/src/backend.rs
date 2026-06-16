@@ -35,7 +35,7 @@ use aka_mcp::{
     CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, GraphqlMapEntry,
     ImpactDirection, ProcessHit, QueryEnrichment, RenamePlan, RepoInfo, RepoProgress,
     RepoSettingsUpdate, RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector,
-    ToolMapEntry,
+    ToolMapEntry, TopicEndpoint, TopicMapEntry,
 };
 use aka_search::SearchIndex;
 use git2::{
@@ -252,6 +252,39 @@ fn parse_fetch_reason(reason: &str) -> (Vec<String>, Option<u32>) {
         }
     }
     (accessed, fetch_count)
+}
+
+fn topic_endpoints_for(
+    store: &GraphStore,
+    topic_rowid: i64,
+    edge_types: &[&str],
+) -> Result<Vec<TopicEndpoint>> {
+    let mut endpoints = Vec::new();
+    for linked in store.incoming_linked_nodes(topic_rowid, edge_types)? {
+        let mut flows = store
+            .processes_of_node(linked.node.rowid)?
+            .into_iter()
+            .map(|process| process.name)
+            .collect::<Vec<_>>();
+        flows.sort();
+        flows.dedup();
+        endpoints.push(TopicEndpoint {
+            name: linked
+                .node
+                .name
+                .clone()
+                .unwrap_or_else(|| linked.node.id.clone()),
+            file_path: linked.node.file_path.unwrap_or_default(),
+            flows,
+        });
+    }
+    endpoints.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    endpoints.dedup_by(|a, b| a.name == b.name && a.file_path == b.file_path);
+    Ok(endpoints)
 }
 
 fn node_content(repo_root: &Path, row: &NodeRow) -> Result<Option<String>> {
@@ -2667,6 +2700,64 @@ impl Backend for AkaBackend {
         out.sort_by(|a, b| {
             a.operation_type
                 .cmp(&b.operation_type)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(out)
+    }
+
+    fn topic_map(
+        &self,
+        repo: Option<&str>,
+        topic: Option<&str>,
+        broker: Option<&str>,
+    ) -> Result<Vec<TopicMapEntry>> {
+        let broker_filter = broker.map(|value| value.to_ascii_lowercase());
+        let mut out = Vec::new();
+        for handle in self.targets(repo)? {
+            let store = handle.store.lock().expect("store lock");
+            for row in store.nodes_by_label("Topic", topic, 500)? {
+                let topic_broker =
+                    string_prop(&row.props, "broker").unwrap_or_else(|| "unknown".into());
+                if broker_filter
+                    .as_deref()
+                    .is_some_and(|wanted| topic_broker.to_ascii_lowercase() != wanted)
+                {
+                    continue;
+                }
+                let producers =
+                    topic_endpoints_for(&store, row.rowid, &["PUBLISHES_TOPIC", "EMITS"])?;
+                let consumers =
+                    topic_endpoints_for(&store, row.rowid, &["CONSUMES_TOPIC", "LISTENS_ON"])?;
+                let mut flows = producers
+                    .iter()
+                    .chain(consumers.iter())
+                    .flat_map(|endpoint| endpoint.flows.iter().cloned())
+                    .collect::<Vec<_>>();
+                flows.sort();
+                flows.dedup();
+                out.push(TopicMapEntry {
+                    id: row.id.clone(),
+                    name: row
+                        .name
+                        .clone()
+                        .or_else(|| string_prop(&row.props, "name"))
+                        .unwrap_or_else(|| row.id.clone()),
+                    broker: topic_broker,
+                    source: string_prop(&row.props, "topicSource")
+                        .or_else(|| string_prop(&row.props, "source"))
+                        .unwrap_or_default(),
+                    consumer_groups: string_array_prop(&row.props, "consumerGroups"),
+                    producers,
+                    consumers,
+                    flows,
+                    properties: Some(row.props.clone()),
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            a.broker
+                .cmp(&b.broker)
                 .then_with(|| a.name.cmp(&b.name))
                 .then_with(|| a.id.cmp(&b.id))
         });

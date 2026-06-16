@@ -1,6 +1,6 @@
 # aka Code Graph Usage For Codex
 
-Use aka MCP tools when you need codebase-level search, symbol context, safe rename planning, impact analysis, route/API mapping, GraphQL/tool mapping, or change-risk checks. Prefer aka over broad manual grep/read loops in large repositories.
+Use aka MCP tools when you need codebase-level search, symbol context, safe rename planning, impact analysis, route/API mapping, GraphQL/tool/message topic mapping, or change-risk checks. Prefer aka over broad manual grep/read loops in large repositories.
 
 ## First Step
 
@@ -29,6 +29,7 @@ aka can index the current project without the user opening the desktop import fl
 - Route handlers, consumers, middleware, response keys, and API risk -> `route_map`, then `api_impact` or `shape_check`.
 - GraphQL operation/resolver mapping -> `graphql_map`.
 - MCP/RPC/agent tool definitions and handlers -> `tool_map`.
+- Kafka/RabbitMQ/JMS/SQS/NATS/STOMP/WebSocket/Socket.IO producers, consumers, consumer groups, and flows -> `topic_map`.
 - Fast editor/prompt augmentation -> `augment`.
 - Explicit local indexing/update -> `analyze` / `update_repo`.
 
@@ -41,7 +42,7 @@ Use code-like query terms. For example, prefer `parse ndjson stream` or `OrderRe
 - `impact` and `search_references` return graph refs with `edge` and `depth`; `depth=1` is direct, larger depth is transitive.
 - `rename` returns `{status,target,replacement,dry_run,applied,changed_files,count,edits,candidates?,message?}`. If `status` is `ambiguous`, pass `uid`, `file_path`, or `kind` from `query`/`find_definition`.
 - `detect_changes` maps diff hunks to indexed symbols and affected execution flows.
-- Route/GraphQL/tool/shape tools may return empty or "missing data" results when the index lacks that semantic layer. Treat that as unknown risk, not as proof of no callers or no API risk.
+- Route/GraphQL/tool/topic/shape tools may return empty or "missing data" results when the index lacks that semantic layer. Treat that as unknown risk, not as proof of no callers or no API risk.
 
 After aka gives `file:line`, read only the relevant local slice around that location.
 

@@ -440,6 +440,26 @@ pub struct GraphqlMapParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TopicMapParams {
+    /// Repository name or local workspace path. Omit when only one indexed repository exists.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
+    pub repo: Option<String>,
+    /// Optional topic/queue/channel substring, for example orders.created.
+    #[serde(default, alias = "channel", alias = "queue")]
+    pub topic: Option<String>,
+    /// Optional broker/transport filter, for example kafka, rabbitmq, jms, sqs, nats, stomp, socketio.
+    #[serde(default, alias = "transport", alias = "bus")]
+    pub broker: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ApiImpactParams {
     /// Repository name or local workspace path. Omit when only one indexed repository exists.
     #[serde(
@@ -719,6 +739,24 @@ impl AkaMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.run(move |b| ops::graphql_map(b, p.repo.as_deref(), p.operation.as_deref()))
             .await
+    }
+
+    #[tool(
+        description = "Show message topics, queues, and realtime channels: broker/transport, producers, consumers, consumer groups, and linked execution flows. Use before editing Kafka/RabbitMQ/JMS/SQS/NATS/STOMP/WebSocket/Socket.IO producers or consumers."
+    )]
+    pub async fn topic_map(
+        &self,
+        Parameters(p): Parameters<TopicMapParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(move |b| {
+            ops::topic_map(
+                b,
+                p.repo.as_deref(),
+                p.topic.as_deref(),
+                p.broker.as_deref(),
+            )
+        })
+        .await
     }
 
     #[tool(

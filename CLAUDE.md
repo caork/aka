@@ -29,7 +29,7 @@
 
 - `crates/aka-core`：合同类型、流式 NDJSON 读取、注册表（~/.aka/registry.json）、EngineRunner（spawn CBM native engine、读取 CBM SQLite、导出 artifacts、解析 stdout 进度事件）。
 - `crates/aka-graph`：store(摄取/查询)、adjacency(callers/callees/impact)、layout(确定性两级 phyllotaxis)、lod、ego(BFS 分环径向)。
-- `crates/aka-mcp`：`Backend` trait 是数据层接缝（mock 可测）；工具面包括 list_repos/query/search_code/context/find_definition/search_references/impact/rename/detect_changes/route_map/tool_map/graphql_map/shape_check/api_impact/analyze/import_repo/update_repo/augment。
+- `crates/aka-mcp`：`Backend` trait 是数据层接缝（mock 可测）；工具面包括 list_repos/query/search_code/context/find_definition/search_references/impact/rename/detect_changes/route_map/tool_map/graphql_map/topic_map/shape_check/api_impact/analyze/import_repo/update_repo/augment。
 - `crates/aka-server`：REST 面（repos 的导入/更新/设置/删除、query、symbol/context、graph/lod、graph/ego、node），CORS 仅 localhost。
 - `apps/desktop`：三视图 Search/Graph/Symbol 全接真实数据（serve 离线时回退 demo/mock）；图渲染静态布局无力导，LOD 三档 + 标签 Canvas2D overlay + 网格拾取。
 

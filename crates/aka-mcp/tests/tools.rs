@@ -6,7 +6,8 @@ use aka_mcp::backend::{Backend, RepoInfo, SearchHit, SymbolRef};
 use aka_mcp::service::{
     AkaMcpServer, AnalyzeParams, ApiImpactParams, AugmentParams, CodeSearchParams,
     DetectChangesParams, GraphqlMapParams, ImpactParams, ImportRepoParams, QueryParams,
-    ReferencesParams, RenameParams, RouteMapParams, SymbolParams, ToolMapParams, UpdateRepoParams,
+    ReferencesParams, RenameParams, RouteMapParams, SymbolParams, ToolMapParams, TopicMapParams,
+    UpdateRepoParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -672,6 +673,37 @@ async fn graphql_map_shape() {
         operation["flows"].as_array().unwrap()[0],
         "main → read_file"
     );
+}
+
+#[tokio::test]
+async fn topic_map_shape() {
+    let res = server()
+        .topic_map(Parameters(TopicMapParams {
+            repo: Some("fixture".into()),
+            topic: Some("orders".into()),
+            broker: Some("kafka".into()),
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    assert_eq!(v["total"], 1);
+    let topic = &v["topics"].as_array().unwrap()[0];
+    assert_eq!(topic["name"], "orders.created");
+    assert_eq!(topic["broker"], "kafka");
+    assert_eq!(topic["source"], "native-channel+source-scan");
+    assert_eq!(
+        topic["consumerGroups"].as_array().unwrap()[0],
+        "orders-service"
+    );
+    assert_eq!(
+        topic["producers"].as_array().unwrap()[0]["name"],
+        "handle_request"
+    );
+    assert_eq!(
+        topic["consumers"].as_array().unwrap()[0]["filePath"],
+        "src/io.rs"
+    );
+    assert_eq!(topic["flows"].as_array().unwrap()[0], "main → read_file");
 }
 
 #[tokio::test]
