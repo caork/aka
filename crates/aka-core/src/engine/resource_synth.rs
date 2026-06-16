@@ -175,6 +175,7 @@ fn extract_resource_detections(
         text.contains("RestClient"),
     ));
     out.extend(extract_spring_restclient_uri_calls(text, nodes));
+    out.extend(extract_spring_webclient_uri_calls(text, nodes));
     out.extend(extract_absolute_url_literals(text, nodes));
     out.sort_by(|a, b| {
         a.url
@@ -350,13 +351,41 @@ fn extract_spring_restclient_uri_calls(text: &str, nodes: &[&SynthNode]) -> Vec<
     if !text.contains("RestClient") {
         return Vec::new();
     }
-    let base_urls = restclient_base_urls(text);
+    extract_spring_client_uri_calls(
+        text,
+        nodes,
+        &spring_client_base_urls(text, "RestClient.create"),
+        "java-spring-restclient",
+        looks_like_restclient_chain,
+    )
+}
+
+fn extract_spring_webclient_uri_calls(text: &str, nodes: &[&SynthNode]) -> Vec<ResourceDetection> {
+    if !text.contains("WebClient") {
+        return Vec::new();
+    }
+    extract_spring_client_uri_calls(
+        text,
+        nodes,
+        &spring_client_base_urls(text, "WebClient.create"),
+        "java-spring-webclient",
+        looks_like_webclient_chain,
+    )
+}
+
+fn extract_spring_client_uri_calls(
+    text: &str,
+    nodes: &[&SynthNode],
+    base_urls: &[String],
+    strategy: &str,
+    looks_like_chain: fn(&str, usize) -> bool,
+) -> Vec<ResourceDetection> {
     let mut out = Vec::new();
     let mut offset = 0usize;
     while let Some(rel) = text[offset..].find(".uri") {
         let start = offset + rel;
         let open = skip_ws(text, start + ".uri".len());
-        if text.as_bytes().get(open) != Some(&b'(') || !looks_like_restclient_chain(text, start) {
+        if text.as_bytes().get(open) != Some(&b'(') || !looks_like_chain(text, start) {
             offset = start + ".uri".len();
             continue;
         }
@@ -370,14 +399,14 @@ fn extract_spring_restclient_uri_calls(text: &str, nodes: &[&SynthNode]) -> Vec<
         };
         let args = &text[open + 1..close];
         let mut urls = url_literals(args);
-        urls.extend(relative_urls_from_args(args, &base_urls));
+        urls.extend(relative_urls_from_args(args, base_urls));
         urls.sort();
         urls.dedup();
         for url in urls {
             out.push(ResourceDetection {
                 url,
                 node_id: node.aka_id.clone(),
-                strategy: "java-spring-restclient".into(),
+                strategy: strategy.into(),
             });
         }
         offset = close + 1;
@@ -385,16 +414,35 @@ fn extract_spring_restclient_uri_calls(text: &str, nodes: &[&SynthNode]) -> Vec<
     out
 }
 
-fn restclient_base_urls(text: &str) -> Vec<String> {
+fn spring_client_base_urls(text: &str, create_callee: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for callee in ["RestClient.create", ".baseUrl"] {
-        for call in find_call_args(text, callee) {
-            out.extend(url_literals(call.args));
-        }
+    for call in find_call_args(text, create_callee) {
+        out.extend(url_literals(call.args));
     }
+    out.extend(method_call_url_literals(text, ".baseUrl"));
     out.sort();
     out.dedup();
     out.truncate(4);
+    out
+}
+
+fn method_call_url_literals(text: &str, method: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(rel) = text[offset..].find(method) {
+        let start = offset + rel;
+        let open = skip_ws(text, start + method.len());
+        if text.as_bytes().get(open) != Some(&b'(') {
+            offset = start + method.len();
+            continue;
+        }
+        let Some(close) = find_matching_paren(text, open) else {
+            offset = open + 1;
+            continue;
+        };
+        out.extend(url_literals(&text[open + 1..close]));
+        offset = close + 1;
+    }
     out
 }
 
@@ -459,6 +507,19 @@ fn looks_like_restclient_chain(text: &str, uri_start: usize) -> bool {
     let chain = &text[start..uri_start];
     chain.contains("RestClient")
         || chain.contains("restClient")
+        || chain.contains(".get()")
+        || chain.contains(".post()")
+        || chain.contains(".put()")
+        || chain.contains(".patch()")
+        || chain.contains(".delete()")
+        || chain.contains(".method(")
+}
+
+fn looks_like_webclient_chain(text: &str, uri_start: usize) -> bool {
+    let start = text[..uri_start].rfind(';').map_or(0, |pos| pos + 1);
+    let chain = &text[start..uri_start];
+    chain.contains("WebClient")
+        || chain.contains("webClient")
         || chain.contains(".get()")
         || chain.contains(".post()")
         || chain.contains(".put()")
