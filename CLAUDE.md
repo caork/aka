@@ -11,7 +11,7 @@
 - **工件合同** `docs/contracts/artifacts.md` 是 engine adapter↔Rust 的唯一接口：字段只增不改不删；破坏性变更必须 `contractVersion` +1 并双侧同步，Rust 侧永不 import engine 内部模块。
 - **embedding 默认关闭**（用户拍板）：默认纯 BM25；开启只能由用户在 per-repo 设置里手动操作，代码里不许悄悄打开。
 - **图查询不引 Cypher / 嵌入式图数据库**（用户拍板）：aka 服务面使用 SQLite 持久 + 内存 CSR 邻接，就这一条路。
-- **产品形态只有桌面版 + 插件包**（用户拍板）：对外发布、文档和汇报不要再说 aka CLI / CLI 版 / 裸 CLI。`apps/cli`、`aka-cli` crate、`AKA mcp/analyze/serve` 子命令只视为桌面包/插件 fallback/headless Docker 的内部宿主与源码调试入口；用户正常使用路径是启动 AKA 桌面端和安装 Claude Code / OpenCode / Codex 插件/配置包。
+- **产品形态只有桌面版 + 插件包**（用户拍板）：对外发布、文档、汇报、阶段状态和发包说明不要再说 aka CLI / CLI 版 / 裸 CLI，也不要写"aka-cli 自身编译/发包"这类口径。`apps/cli`、`aka-cli` crate、`AKA mcp/analyze/serve` 子命令只视为桌面包/插件 fallback/headless Docker 的内部宿主与源码调试入口；用户正常使用路径是启动 AKA 桌面端和安装 Claude Code / OpenCode / Codex 插件/配置包。
 - **渲染性能红线**：WebGL 渲染器每帧 draw call O(1)（与图规模无关），pan/zoom 60fps；动 `apps/desktop/src/graph/renderer.ts` 后必须实测 FPS（页面右下角徽章）。
 - **验证 Web/UI 用浏览器实际渲染**（Playwright MCP 打开页面看真实结果），不要只凭 curl 下结论。
 
@@ -34,10 +34,10 @@
 
 ## 跑起来（源码开发 / 内部调试）
 
-用户侧只交付 AKA 桌面端和插件包；下面命令只用于源码开发、CI、stdio fallback 或 headless Docker 调试，不作为独立 CLI 产品宣传。
+用户侧只交付 AKA 桌面端和插件包；下面命令只用于源码开发、CI、stdio fallback 或 headless Docker 调试，不作为独立 CLI 产品宣传。状态汇报里要写"内部 runtime 编译/验证"，不要写"aka-cli 自身编译"。
 
 ```bash
-cargo build -p aka-cli
+cargo build -p aka-cli                 # 内部 runtime crate 编译验证，不是产品发包
 ./target/debug/aka analyze <repo>      # 内部调试：CBM engine 解析 + SQLite->NDJSON adapter + 索引
 ./target/debug/aka serve &             # 内部调试：HTTP :4111（桌面端数据源）
 cd apps/desktop && npm run dev         # UI :5188（HMR；自动连 serve）
@@ -46,7 +46,7 @@ cd apps/desktop && npm run dev         # UI :5188（HMR；自动连 serve）
 # engine 首次初始化/构建 CBM native binary
 scripts/sync-engine.sh
 
-# 提交门槛
+# 提交门槛；发包门槛以桌面端和插件包为准，aka-cli 只作为内部 runtime 被 workspace 验证覆盖
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 cd apps/desktop && npm run build
 ```
