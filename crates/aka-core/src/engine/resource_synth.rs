@@ -5,8 +5,8 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_call_args, find_matching_paren, node_at_offset, project_code_nodes_by_file,
-    read_repo_text, skip_ws, split_top_level_commas, stable_hash, EdgeRec, NodeRec,
-    ProjectSourceSet, SynthNode,
+    read_repo_text, request_line_path, skip_ws, split_top_level_commas, spring_mapping_path,
+    stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -124,7 +124,7 @@ struct ResourceDetection {
 
 fn extract_resource_detections(
     text: &str,
-    _file_path: &str,
+    file_path: &str,
     nodes: &[&SynthNode],
 ) -> Vec<ResourceDetection> {
     let mut out = Vec::new();
@@ -176,6 +176,7 @@ fn extract_resource_detections(
     ));
     out.extend(extract_spring_restclient_uri_calls(text, nodes));
     out.extend(extract_spring_webclient_uri_calls(text, nodes));
+    out.extend(extract_java_feign_client_resources(file_path, nodes));
     out.extend(extract_absolute_url_literals(text, nodes));
     out.sort_by(|a, b| {
         a.url
@@ -446,6 +447,85 @@ fn method_call_url_literals(text: &str, method: &str) -> Vec<String> {
     out
 }
 
+fn extract_java_feign_client_resources(
+    file_path: &str,
+    nodes: &[&SynthNode],
+) -> Vec<ResourceDetection> {
+    if !file_path.ends_with(".java") {
+        return Vec::new();
+    }
+    let mut client_urls: BTreeMap<String, String> = BTreeMap::new();
+    for node in nodes
+        .iter()
+        .filter(|node| matches!(node.label.as_str(), "Class" | "Interface"))
+    {
+        let Some(base_url) = feign_client_base_url(&node.decorators) else {
+            continue;
+        };
+        client_urls.insert(node.aka_id.clone(), base_url.clone());
+        client_urls.insert(node.qn.clone(), base_url);
+    }
+
+    let mut out = Vec::new();
+    for node in nodes
+        .iter()
+        .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
+    {
+        let Some(parent) = node.parent_class.as_ref() else {
+            continue;
+        };
+        let Some(base_url) = client_urls.get(parent) else {
+            continue;
+        };
+        let method_path = feign_method_path(node);
+        out.push(ResourceDetection {
+            url: mask_dynamic_url(&join_url_paths(base_url, &method_path)),
+            node_id: node.aka_id.clone(),
+            strategy: "java-spring-feign".into(),
+        });
+    }
+    out.sort_by(|a, b| a.url.cmp(&b.url).then_with(|| a.node_id.cmp(&b.node_id)));
+    out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id);
+    out
+}
+
+fn feign_client_base_url(decorators: &[String]) -> Option<String> {
+    for decorator in decorators {
+        let Some(args) = annotation_args(decorator, "FeignClient") else {
+            continue;
+        };
+        let Some(url) = keyword_url_literal(args, "url") else {
+            continue;
+        };
+        let path = keyword_relative_path_literal(args, "path");
+        return Some(path.map_or(url.clone(), |path| join_url_paths(&url, &path)));
+    }
+    None
+}
+
+fn feign_method_path(node: &SynthNode) -> String {
+    for decorator in &node.decorators {
+        if let Some(route) = request_line_path(decorator) {
+            return route;
+        }
+    }
+    node.route_path
+        .clone()
+        .or_else(|| spring_mapping_path(&node.decorators))
+        .unwrap_or_else(|| "/".into())
+}
+
+fn annotation_args<'a>(annotation: &'a str, expected_simple_name: &str) -> Option<&'a str> {
+    let name_end = annotation.find('(')?;
+    let name = annotation[..name_end].trim().trim_start_matches('@');
+    if name.rsplit('.').next().unwrap_or(name) != expected_simple_name {
+        return None;
+    }
+    let args_start = name_end + 1;
+    let args_end = annotation.rfind(')').unwrap_or(annotation.len());
+    (args_start <= args_end).then(|| &annotation[args_start..args_end])
+}
+
 fn relative_urls_from_args(args: &str, base_urls: &[String]) -> Vec<String> {
     let Some(path) = first_relative_path_literal(args) else {
         return Vec::new();
@@ -467,6 +547,34 @@ fn keyword_url_literals(args: &str, key: &str) -> Vec<String> {
         out.extend(url_literals(&trimmed[needle.len()..]));
     }
     out
+}
+
+fn keyword_url_literal(args: &str, key: &str) -> Option<String> {
+    keyword_literal(args, key).and_then(|literal| normalize_url_literal(&literal))
+}
+
+fn keyword_relative_path_literal(args: &str, key: &str) -> Option<String> {
+    keyword_literal(args, key).and_then(|literal| {
+        (literal.starts_with('/') && !literal.starts_with("//")).then(|| mask_dynamic_url(&literal))
+    })
+}
+
+fn keyword_literal(args: &str, key: &str) -> Option<String> {
+    for part in split_top_level_commas(args) {
+        let trimmed = part.trim();
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        let Some(value) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let value = value.trim_start();
+        let Some((literal, _)) = read_string_literal(value, 0) else {
+            continue;
+        };
+        return Some(literal);
+    }
+    None
 }
 
 fn first_arg_url_literals(args: &str) -> Vec<String> {
