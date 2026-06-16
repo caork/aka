@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::json;
 
 use super::{
-    find_call_args, node_at_offset, read_string_literal, split_top_level_commas, stable_hash,
-    EdgeRec, SynthNode,
+    find_call_args, node_at_offset, read_string_literal, source_annotations_before_node,
+    split_top_level_commas, stable_hash, EdgeRec, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -68,7 +68,7 @@ pub(super) fn detect_table_access_edges(
     let mut out = Vec::new();
     for detection in detect_sql_literal_table_accesses(text, nodes, table_lookup)
         .into_iter()
-        .chain(detect_annotation_table_accesses(nodes, table_lookup))
+        .chain(detect_annotation_table_accesses(text, nodes, table_lookup))
         .chain(detect_orm_table_accesses(
             text,
             nodes,
@@ -137,6 +137,7 @@ fn detect_sql_literal_table_accesses(
 }
 
 fn detect_annotation_table_accesses(
+    text: &str,
     nodes: &[&SynthNode],
     table_lookup: &BTreeMap<String, TableAccessRef>,
 ) -> Vec<TableAccessDetection> {
@@ -145,14 +146,14 @@ fn detect_annotation_table_accesses(
         if !matches!(node.label.as_str(), "Function" | "Method") {
             continue;
         }
-        for decorator in &node.decorators {
-            let Some(name) = decorator_name(decorator) else {
+        for decorator in decorators_for_node(text, node) {
+            let Some(name) = decorator_name(&decorator) else {
                 continue;
             };
             let Some(strategy_prefix) = java_annotation_sql_strategy_prefix(name) else {
                 continue;
             };
-            let Some(query) = first_raw_string_literal(decorator) else {
+            let Some(query) = first_raw_string_literal(&decorator) else {
                 continue;
             };
             for (kind, table, _) in sql_table_accesses(&query, table_lookup) {
@@ -166,6 +167,14 @@ fn detect_annotation_table_accesses(
         }
     }
     out
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn java_annotation_sql_strategy_prefix(name: &str) -> Option<&'static str> {
