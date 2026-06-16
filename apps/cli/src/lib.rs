@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use aka_core::{
     build_parse_cache_manifest, load_index_state, registry::now_unix, save_index_state,
-    save_parse_cache_manifest, ArtifactDir, EngineEvent, EngineRunner, IndexDelta, IndexState,
-    Registry, RepoEntry, RepoPaths,
+    save_parse_cache_manifest, user_facing_path, ArtifactDir, EngineEvent, EngineRunner,
+    IndexDelta, IndexState, Registry, RepoEntry, RepoPaths,
 };
 use anyhow::{Context, Result};
 
@@ -79,6 +79,7 @@ pub fn run_analyze_with_progress(
     let repo = path
         .canonicalize()
         .with_context(|| format!("仓库路径不存在: {}", path.display()))?;
+    let repo = user_facing_path(&repo);
     let paths = RepoPaths::for_repo(&repo);
     let artifact_dir = paths.artifact_dir();
     let runner = EngineRunner::discover(engine_dir.as_deref())?;
@@ -296,7 +297,7 @@ fn register(
 }
 
 pub fn run_index(path: PathBuf) -> Result<()> {
-    let repo = path.canonicalize()?;
+    let repo = user_facing_path(&path.canonicalize()?);
     let paths = RepoPaths::for_repo(&repo);
     let artifact = ArtifactDir::open(paths.artifact_dir()).context("工件不存在——先 aka analyze")?;
     let idx = indexer::index_artifact(&artifact, &paths)?;

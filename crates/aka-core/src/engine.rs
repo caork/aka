@@ -22,6 +22,7 @@ use rusqlite::{Connection, OpenFlags, Row};
 use serde_json::{json, Map, Value};
 
 use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION};
+use crate::user_facing_path;
 
 mod build_config_scan;
 mod cache_synth;
@@ -233,8 +234,9 @@ impl EngineRunner {
 
         emit_phase(&mut on_event, "codebase-memory:index", 0, 0);
         let mode = cbm_mode();
+        let engine_repo = user_facing_path(repo);
         let args = json!({
-            "repo_path": repo.display().to_string(),
+            "repo_path": engine_repo.display().to_string(),
             "mode": mode,
             "persistence": false,
         })
@@ -287,7 +289,10 @@ impl EngineRunner {
                 let stderr_tail = stderr_handle.join().unwrap_or_default();
                 return Err(EngineError::Failed {
                     code: status.code(),
-                    stderr_tail: join_tail(stderr_tail, line),
+                    stderr_tail: with_engine_repo_context(
+                        &engine_repo,
+                        join_tail(stderr_tail, line),
+                    ),
                 });
             }
             drain_cbm_progress(&phase_rx, &mut on_event);
@@ -301,7 +306,7 @@ impl EngineRunner {
         if !status.success() {
             return Err(EngineError::Failed {
                 code: status.code(),
-                stderr_tail,
+                stderr_tail: with_engine_repo_context(&engine_repo, stderr_tail),
             });
         }
 
@@ -369,6 +374,10 @@ fn drain_cbm_progress(rx: &mpsc::Receiver<String>, on_event: &mut impl FnMut(&En
     while let Ok(phase) = rx.try_recv() {
         emit_phase(on_event, phase, 0, 0);
     }
+}
+
+fn with_engine_repo_context(repo: &Path, detail: String) -> String {
+    format!("repo_path={}\n{detail}", repo.display())
 }
 
 fn parse_cbm_progress_phase(line: &str) -> Option<String> {

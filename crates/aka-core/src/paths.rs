@@ -42,6 +42,50 @@ pub fn repo_dir_name(repo_path: &Path) -> String {
     format!("{slug}-{hash:08x}")
 }
 
+/// Convert Rust/Win32 verbatim paths (for example `\\?\D:\repo`) back to
+/// ordinary absolute paths before passing them to external tools or showing
+/// them to users. Rust file APIs can handle verbatim paths, but the native CBM
+/// C engine currently discovers zero files when it receives that form.
+pub fn user_facing_path(path: &Path) -> PathBuf {
+    strip_windows_verbatim(path).unwrap_or_else(|| path.to_path_buf())
+}
+
+#[cfg(windows)]
+fn strip_windows_verbatim(path: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Component::Prefix(prefix) = components.next()? else {
+        return None;
+    };
+    match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => {
+            let mut normalized = PathBuf::from(format!("{}:\\", drive as char));
+            normalized.extend(components);
+            Some(normalized)
+        }
+        Prefix::VerbatimUNC(server, share) => {
+            let mut normalized = PathBuf::from(format!(
+                "\\\\{}\\{}",
+                server.to_string_lossy(),
+                share.to_string_lossy()
+            ));
+            normalized.extend(components);
+            Some(normalized)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_windows_verbatim(path: &Path) -> Option<PathBuf> {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return Some(PathBuf::from(format!(r"\\{rest}")));
+    }
+    s.strip_prefix(r"\\?\").map(PathBuf::from)
+}
+
 fn fnv1a(bytes: &[u8]) -> u32 {
     let mut h: u32 = 0x811c9dc5;
     for &b in bytes {
@@ -107,5 +151,23 @@ mod tests {
         assert!(a.starts_with("my-repo-"));
         let c = repo_dir_name(Path::new("/elsewhere/My Repo"));
         assert_ne!(a, c, "同名不同路径必须不同目录");
+    }
+
+    #[test]
+    fn user_facing_path_strips_windows_verbatim_disk_prefix() {
+        let path = Path::new(r"\\?\D:\dev\DataStudioFrontend");
+        assert_eq!(
+            user_facing_path(path).to_string_lossy(),
+            r"D:\dev\DataStudioFrontend"
+        );
+    }
+
+    #[test]
+    fn user_facing_path_strips_windows_verbatim_unc_prefix() {
+        let path = Path::new(r"\\?\UNC\server\share\repo");
+        assert_eq!(
+            user_facing_path(path).to_string_lossy(),
+            r"\\server\share\repo"
+        );
     }
 }

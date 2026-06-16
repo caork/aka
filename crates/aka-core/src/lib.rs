@@ -14,7 +14,7 @@ pub use incremental::{
     save_parse_cache_manifest, FileArtifactStats, FileFingerprint, IndexDelta, IndexState,
     ParseCacheManifest,
 };
-pub use paths::{aka_home, repo_dir_name, RepoPaths};
+pub use paths::{aka_home, repo_dir_name, user_facing_path, RepoPaths};
 pub use registry::{
     clamp_render_nodes, Registry, RegistryError, RepoEntry, DEFAULT_RENDER_MAX_NODES,
     MAX_RENDER_NODES, MIN_RENDER_NODES,

@@ -26,8 +26,8 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::rename;
 use aka_core::{
-    aka_home, clamp_render_nodes, load_index_state, repo_dir_name, ArtifactStats, EngineEvent,
-    IndexState, Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
+    aka_home, clamp_render_nodes, load_index_state, repo_dir_name, user_facing_path, ArtifactStats,
+    EngineEvent, IndexState, Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
 };
 use aka_graph::{Adjacency, GraphStore, NodeRow};
 use aka_mcp::{
@@ -521,7 +521,7 @@ fn job_matches_key(name: &str, job: &JobInfo, key: &str) -> bool {
     }
     PathBuf::from(key)
         .canonicalize()
-        .is_ok_and(|path| path == job.path)
+        .is_ok_and(|path| user_facing_path(&path) == job.path)
 }
 
 fn looks_like_local_path(key: &str) -> bool {
@@ -1570,6 +1570,7 @@ fn top_level_dir(path: &str) -> String {
 /// analyze 落注册表后补 name / source 字段（register() 只继承已有条目，
 /// 新导入的 git/zip 仓库要在这里盖上来源）。
 fn finalize_entry(repo_path: &Path, name: &str, kind: &str, url: Option<String>) -> Result<()> {
+    let repo_path = user_facing_path(repo_path);
     let mut registry = Registry::load()?;
     if let Some(entry) = registry.repos.iter_mut().find(|r| r.repo_path == repo_path) {
         entry.name = name.to_string();
@@ -1674,6 +1675,7 @@ impl AkaBackend {
         let repo = repo
             .canonicalize()
             .with_context(|| format!("resolve workspace repo {}", repo.display()))?;
+        let repo = user_facing_path(&repo);
         let registry = Registry::load()?;
         if registry.find(&repo).is_some() {
             return Ok(None);
@@ -1774,6 +1776,7 @@ impl AkaBackend {
             + Send
             + 'static,
     ) {
+        let path = user_facing_path(&path);
         let jobs = Arc::clone(&self.jobs);
         let handles = Arc::clone(&self.handles);
         jobs.lock()
@@ -2486,6 +2489,7 @@ impl Backend for AkaBackend {
         let path = discover_workspace_root(&requested)?
             .or_else(|| requested.canonicalize().ok())
             .with_context(|| format!("resolve repository path {repo_path}"))?;
+        let path = user_facing_path(&path);
         if !path.is_dir() {
             bail!("repository path is not a directory: {repo_path}");
         }
@@ -2788,7 +2792,7 @@ impl Backend for AkaBackend {
                             job.set_stage("checkout", "Cloning git repository", 6.0);
                         });
                         clone_git_repo(&job_url, &dest)?;
-                        let repo = dest.canonicalize()?;
+                        let repo = user_facing_path(&dest.canonicalize()?);
                         run_analyze_job(&jobs, &name, repo.clone(), engine_dir)?;
                         update_job(&jobs, &name, |job| {
                             job.set_stage("register", "Saving repository metadata", 98.0);
@@ -2803,7 +2807,8 @@ impl Backend for AkaBackend {
                 let requested = PathBuf::from(src)
                     .canonicalize()
                     .map_err(|e| anyhow!("invalid local path {src}: {e}"))?;
-                let path = discover_workspace_root(&requested)?.unwrap_or(requested);
+                let path =
+                    user_facing_path(&discover_workspace_root(&requested)?.unwrap_or(requested));
                 if !path.is_dir() {
                     bail!("invalid local path (not a directory): {src}");
                 }
@@ -2853,7 +2858,7 @@ impl Backend for AkaBackend {
                         job.set_stage("extract", "Extracting zip archive", 8.0);
                     });
                     extract_zip(&zip, &dest)?;
-                    let repo = dest.canonicalize()?;
+                    let repo = user_facing_path(&dest.canonicalize()?);
                     run_analyze_job(&jobs, &name, repo.clone(), engine_dir)?;
                     update_job(&jobs, &name, |job| {
                         job.set_stage("register", "Saving repository metadata", 98.0);
@@ -2961,7 +2966,7 @@ impl Backend for AkaBackend {
                         std::fs::remove_dir_all(&dest)?;
                     }
                     extract_zip(&zip, &dest)?;
-                    let repo = dest.canonicalize()?;
+                    let repo = user_facing_path(&dest.canonicalize()?);
                     run_analyze_job(&jobs, &name, repo.clone(), engine_dir)?;
                     update_job(&jobs, &name, |job| {
                         job.set_stage("register", "Saving repository metadata", 98.0);
