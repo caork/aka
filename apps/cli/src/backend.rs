@@ -2581,9 +2581,10 @@ impl Backend for AkaBackend {
                 Ok(name)
             }
             "local" => {
-                let path = PathBuf::from(src)
+                let requested = PathBuf::from(src)
                     .canonicalize()
                     .map_err(|e| anyhow!("invalid local path {src}: {e}"))?;
+                let path = discover_workspace_root(&requested)?.unwrap_or(requested);
                 if !path.is_dir() {
                     bail!("invalid local path (not a directory): {src}");
                 }
@@ -3256,6 +3257,37 @@ mod tests {
             .unwrap();
 
         assert!(summary.starts_with("indexing scheduled: "));
+        let repos = backend.list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, derive_local_name(&repo));
+        assert_eq!(
+            repos[0].path,
+            repo.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(repos[0].status, "indexing");
+    }
+
+    #[test]
+    fn import_local_lifts_nested_path_to_workspace_root() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let repo = temp_repo("workspace-import-local-nested");
+        let home = temp_repo("workspace-import-local-nested-home");
+        std::fs::create_dir_all(repo.join("src/app/api")).unwrap();
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
+        std::fs::write(
+            repo.join("src/app/api/views.py"),
+            "def list_orders(): pass\n",
+        )
+        .unwrap();
+        std::env::set_var("AKA_HOME", &home);
+
+        let backend = AkaBackend::new();
+        let name = backend
+            .import_repo("local", repo.join("src/app/api").to_str().unwrap(), None)
+            .unwrap();
+
+        assert_eq!(name, derive_local_name(&repo));
         let repos = backend.list_repos().unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name, derive_local_name(&repo));
