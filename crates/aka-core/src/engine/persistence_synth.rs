@@ -13,6 +13,7 @@ use super::persistence_java_synth::{
     java_mongo_field_names as java_persistence_mongo_field_names, java_relationship_targets,
 };
 use super::persistence_mybatis_synth::detect_mybatis_xml_table_access_edges;
+use super::persistence_pymongo_synth::detect_pymongo_collections;
 use super::{
     find_matching_paren, project_code_nodes_by_file, read_repo_text,
     source_annotations_before_node, split_top_level_commas, stable_hash, EdgeRec, NodeRec,
@@ -61,6 +62,20 @@ struct SynthTable {
     entity_name: String,
     file_path: String,
     columns: Vec<String>,
+}
+
+impl From<super::persistence_pymongo_synth::PyMongoCollection> for SynthTable {
+    fn from(collection: super::persistence_pymongo_synth::PyMongoCollection) -> Self {
+        Self {
+            id: collection.table_id,
+            name: collection.collection_name,
+            source: "python-pymongo-collection".into(),
+            entity_id: collection.owner_id,
+            entity_name: collection.owner_name,
+            file_path: collection.file_path,
+            columns: Vec::new(),
+        }
+    }
 }
 
 impl SynthTable {
@@ -234,6 +249,11 @@ pub(super) fn synthesize_persistence_from_sources(
 
     for (file_path, file_nodes) in &by_file {
         let text = read_repo_text(repo, file_path).unwrap_or_default();
+        for collection in detect_pymongo_collections(&text, file_path, file_nodes) {
+            tables
+                .entry(collection.table_id.clone())
+                .or_insert_with(|| collection.into());
+        }
         for node in file_nodes
             .iter()
             .copied()

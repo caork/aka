@@ -6,6 +6,7 @@ use super::{
     find_call_args, node_at_offset, read_string_literal, source_annotations_before_node,
     split_top_level_commas, stable_hash, EdgeRec, SynthNode,
 };
+use crate::engine::persistence_pymongo_synth::detect_pymongo_table_accesses;
 
 mod java_mongo_template;
 
@@ -37,7 +38,7 @@ pub(super) enum TableAccessKind {
 }
 
 impl TableAccessKind {
-    fn edge_type(self) -> &'static str {
+    pub(super) fn edge_type(self) -> &'static str {
         match self {
             TableAccessKind::Read => "READS_TABLE",
             TableAccessKind::Write => "WRITES_TABLE",
@@ -71,6 +72,7 @@ pub(super) fn detect_table_access_edges(
     for detection in detect_sql_literal_table_accesses(text, nodes, table_lookup)
         .into_iter()
         .chain(detect_annotation_table_accesses(text, nodes, table_lookup))
+        .chain(detect_pymongo_table_accesses(text, nodes, table_lookup))
         .chain(detect_orm_table_accesses(
             text,
             nodes,
