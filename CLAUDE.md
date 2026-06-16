@@ -12,6 +12,7 @@
 - **embedding 默认关闭**（用户拍板）：默认纯 BM25；开启只能由用户在 per-repo 设置里手动操作，代码里不许悄悄打开。
 - **图查询不引 Cypher / 嵌入式图数据库**（用户拍板）：aka 服务面使用 SQLite 持久 + 内存 CSR 邻接，就这一条路。
 - **产品形态只有桌面版 + 插件包**（用户拍板）：对外发布、文档、汇报、阶段状态和发包说明不要再说 aka CLI / CLI 版 / 裸 CLI，也不要写"aka-cli 自身编译/发包"这类口径。即使 cargo/CI 日志里出现 `aka-cli`，也只能称为"内部 runtime crate 编译/验证"。`apps/cli`、`aka-cli` crate、`AKA mcp/analyze/serve` 子命令只视为桌面包/插件 fallback/headless Docker 的内部宿主与源码调试入口；用户正常使用路径是启动 AKA 桌面端和安装 Claude Code / OpenCode / Codex 插件/配置包。
+- **发布/阶段状态口径检查**：任何阶段性汇报、发包清单、CI 说明、邮件和 PR 描述都必须围绕"桌面版"与"插件包"展开；如果需要提到 `cargo build -p aka-cli`、`aka-cli` 或 `apps/cli`，只能写成"内部 runtime/宿主 crate 的编译验证"，不能把它列为用户可见产品、独立交付物或发布步骤。
 - **渲染性能红线**：WebGL 渲染器每帧 draw call O(1)（与图规模无关），pan/zoom 60fps；动 `apps/desktop/src/graph/renderer.ts` 后必须实测 FPS（页面右下角徽章）。
 - **验证 Web/UI 用浏览器实际渲染**（Playwright MCP 打开页面看真实结果），不要只凭 curl 下结论。
 
