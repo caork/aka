@@ -2,6 +2,7 @@ use super::*;
 use serde_json::json;
 
 mod java_jobs;
+mod python_job_decorators;
 mod python_jobs;
 
 #[test]

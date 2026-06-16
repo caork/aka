@@ -194,7 +194,7 @@ fn spring_batch_builder_name(text: &str, node: &SynthNode, builder_type: &str) -
 
 fn detect_python_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobDetection> {
     let mut out = Vec::new();
-    for decorator in &node.decorators {
+    for decorator in decorators_for_node(text, node) {
         let normalized = decorator.trim().trim_start_matches('@');
         if is_huey_task_decorator(normalized) {
             let schedule = normalized
@@ -266,6 +266,16 @@ fn detect_python_jobs(text: Option<&str>, node: &SynthNode) -> Vec<JobDetection>
         out.extend(detect_python_background_task_entries(text, node));
     }
     out
+}
+
+fn decorators_for_node(text: Option<&str>, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    if let Some(text) = text {
+        decorators.extend(source_annotations_before_node(text, node));
+    }
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn is_celery_task_decorator(text: &str) -> bool {
