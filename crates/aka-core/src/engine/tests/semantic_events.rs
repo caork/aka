@@ -150,3 +150,48 @@ class OrderEvents {
             })
     }));
 }
+
+#[test]
+fn detects_python_signal_receivers_from_source_decorators_without_metadata() {
+    let repo = temp_repo("python-signal-source-decorators");
+    std::fs::write(
+        repo.join("events.py"),
+        r#"from django.dispatch import Signal, receiver
+
+order_paid = Signal()
+
+@receiver(order_paid)
+def handle_paid(sender, **kwargs):
+    return None
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "handle_paid",
+        "events.handle_paid",
+        "events.py",
+        (6, 7),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let event = synth
+        .events
+        .iter()
+        .find(|event| event.bus == "python-signal" && event.name == "order_paid")
+        .expect("python signal from source decorator");
+    assert!(event.edge_recs().iter().any(|edge| {
+        edge.edge_type == "HANDLES_EVENT"
+            && edge.source_id == "cbm:1:events.handle_paid"
+            && edge
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence["strategy"] == json!("python-signal-receiver"))
+    }));
+}

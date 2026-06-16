@@ -220,18 +220,14 @@ fn extract_jvm_event_detections(text: &str, nodes: &[&SynthNode]) -> Vec<EventDe
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
     {
-        let mut decorators = node.decorators.clone();
-        decorators.extend(source_annotations_before_node(text, node));
-        decorators.sort();
-        decorators.dedup();
-        for decorator in &decorators {
-            let Some(name) = decorator_name(decorator) else {
+        for decorator in decorators_for_node(text, node) {
+            let Some(name) = decorator_name(&decorator) else {
                 continue;
             };
             if !matches!(name, "EventListener" | "TransactionalEventListener") {
                 continue;
             }
-            for event_name in event_names_from_listener(decorator, node) {
+            for event_name in event_names_from_listener(&decorator, node) {
                 let mut detection = event_detection(
                     event_name,
                     "spring-application-event",
@@ -239,7 +235,7 @@ fn extract_jvm_event_detections(text: &str, nodes: &[&SynthNode]) -> Vec<EventDe
                     node.aka_id.clone(),
                     format!("java-spring-{}", name.to_ascii_lowercase()),
                 );
-                detection.metadata = spring_event_listener_metadata(decorator);
+                detection.metadata = spring_event_listener_metadata(&decorator);
                 out.push(detection);
             }
         }
@@ -262,7 +258,7 @@ fn extract_python_event_detections(text: &str, nodes: &[&SynthNode]) -> Vec<Even
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
     {
-        for decorator in &node.decorators {
+        for decorator in decorators_for_node(text, node) {
             let normalized = decorator.trim().trim_start_matches('@');
             if !normalized.starts_with("receiver(") && !normalized.contains(".receiver(") {
                 continue;
@@ -282,6 +278,14 @@ fn extract_python_event_detections(text: &str, nodes: &[&SynthNode]) -> Vec<Even
     out.extend(extract_python_signal_sends(text, nodes));
     out.extend(extract_python_signal_definitions(text, nodes));
     out
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn event_names_from_listener(decorator: &str, node: &SynthNode) -> Vec<String> {
