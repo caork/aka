@@ -262,6 +262,78 @@ def legacy_webhook(order_id):
 }
 
 #[test]
+fn synthesizes_python_boto3_s3_resources() {
+    let repo = temp_repo("python-boto3-s3-resources");
+    std::fs::write(
+        repo.join("storage.py"),
+        r#"import boto3
+
+s3 = boto3.client("s3")
+
+def store_receipt(order_id, body):
+    s3.put_object(Bucket="order-artifacts", Key=f"receipts/{order_id}.json", Body=body)
+
+def load_manifest():
+    return s3.get_object("order-artifacts", "manifests/latest.json")["Body"].read()
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "store_receipt",
+        "storage.store_receipt",
+        "storage.py",
+        (5, 6),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "load_manifest",
+        "storage.load_manifest",
+        "storage.py",
+        (8, 9),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let receipt = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "s3://order-artifacts/receipts/{param}.json")
+        .expect("S3 receipt resource");
+    assert_eq!(receipt.resource_type, "s3");
+    let receipt_edge = receipt
+        .edge_recs()
+        .into_iter()
+        .find(|edge| edge.source_id == "cbm:1:storage.store_receipt")
+        .expect("S3 put edge");
+    assert_eq!(receipt_edge.edge_type, "ACCESSES_RESOURCE");
+    assert_eq!(
+        receipt_edge.evidence.as_ref().unwrap()["strategy"],
+        "python-boto3-s3-put-object"
+    );
+
+    let manifest = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "s3://order-artifacts/manifests/latest.json")
+        .expect("S3 manifest resource");
+    assert_eq!(manifest.resource_type, "s3");
+    assert!(manifest.edge_recs().iter().any(|edge| {
+        edge.source_id == "cbm:2:storage.load_manifest"
+            && edge.evidence.as_ref().unwrap()["strategy"] == "python-boto3-s3-get-object"
+    }));
+}
+
+#[test]
 fn synthesizes_java_external_http_resources() {
     let repo = temp_repo("java-resources");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/inventory")).unwrap();
