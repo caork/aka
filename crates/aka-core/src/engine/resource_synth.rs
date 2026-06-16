@@ -12,6 +12,8 @@ mod http;
 use http::extract_http_resources;
 mod notification;
 use notification::extract_notification_resources;
+mod payment;
+use payment::extract_payment_resources;
 mod java_s3;
 use java_s3::extract_java_aws_s3_resources;
 mod java_azure_blob;
@@ -216,6 +218,15 @@ impl ResourceDetection {
             strategy: strategy.into(),
         }
     }
+
+    fn payment(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url: format!("payment:{provider}"),
+            resource_type: "payment".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
 }
 
 fn extract_resource_detections(
@@ -234,6 +245,7 @@ fn extract_resource_detections(
     out.extend(extract_search_index_resources(text, nodes));
     out.extend(extract_feature_flag_resources(text, nodes));
     out.extend(extract_notification_resources(text, nodes));
+    out.extend(extract_payment_resources(text, nodes));
     out.sort_by(|a, b| {
         a.url
             .cmp(&b.url)
