@@ -259,3 +259,112 @@ def evict_order():
     assert!(edge_types.contains(&"WRITES_CACHE".to_string()));
     assert!(edge_types.contains(&"EVICTS_CACHE".to_string()));
 }
+
+#[test]
+fn synthesizes_python_redis_client_receiver_cache_nodes() {
+    let repo = temp_repo("python-redis-client-cache");
+    std::fs::write(
+        repo.join("redis_ops.py"),
+        r#"import redis
+import redis.asyncio as aioredis
+
+redis_client = redis.Redis.from_url("redis://cache")
+
+class OrderCache:
+    def __init__(self):
+        self.redis = aioredis.from_url("redis://cache")
+
+    async def load_order(self, order_id):
+        value = await self.redis.hget("orders:data", order_id)
+        if await self.redis.exists("orders:lock"):
+            return value
+        await self.redis.expire("orders:data", 60)
+        return value
+
+def warm_order(order_id):
+    redis_client.hset("orders:data", order_id, "ok")
+    redis_client.incr("orders:count")
+    redis_client.delete("orders:lock")
+
+def not_redis(model):
+    return model.get("orders:should-not-count")
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "load_order",
+        "redis_ops.OrderCache.load_order",
+        "redis_ops.py",
+        (10, 15),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "warm_order",
+        "redis_ops.warm_order",
+        "redis_ops.py",
+        (17, 20),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "not_redis",
+        "redis_ops.not_redis",
+        "redis_ops.py",
+        (22, 23),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let data = synth
+        .caches
+        .iter()
+        .find(|cache| cache.name == "orders:data" && cache.backend == "redis")
+        .expect("redis hash key");
+    assert_eq!(data.readers.len(), 1);
+    assert_eq!(data.writers.len(), 2);
+    let count = synth
+        .caches
+        .iter()
+        .find(|cache| cache.name == "orders:count" && cache.backend == "redis")
+        .expect("redis counter key");
+    assert_eq!(count.writers.len(), 1);
+    let lock = synth
+        .caches
+        .iter()
+        .find(|cache| cache.name == "orders:lock" && cache.backend == "redis")
+        .expect("redis lock key");
+    assert_eq!(lock.readers.len(), 1);
+    assert_eq!(lock.evictors.len(), 1);
+    assert!(!synth
+        .caches
+        .iter()
+        .any(|cache| cache.name == "orders:should-not-count"));
+    let strategies: BTreeSet<_> = synth
+        .caches
+        .iter()
+        .flat_map(SynthCache::edge_recs)
+        .filter_map(|edge| {
+            edge.evidence
+                .as_ref()
+                .and_then(|value| value.get("strategy"))
+                .and_then(|value| value.as_str().map(str::to_string))
+        })
+        .collect();
+    assert!(strategies.contains("python-redis-client-hget"));
+    assert!(strategies.contains("python-redis-client-hset"));
+    assert!(strategies.contains("python-redis-client-incr"));
+    assert!(strategies.contains("python-redis-client-delete"));
+}
