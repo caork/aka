@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=AKA_ENABLE_NATIVE_UPDATER");
     let _ = std::fs::create_dir_all("resources/engine");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rerun-if-env-changed=AKA_CBM_BIN_WIN_X64");

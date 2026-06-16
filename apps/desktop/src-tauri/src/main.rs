@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() -> anyhow::Result<()> {
+    aka_desktop_lib::install_desktop_diagnostics();
     if should_run_cli_mode() {
         aka_desktop_lib::configure_cli_runtime()?;
         aka_cli::commands::run_from_env()

@@ -1,11 +1,15 @@
 //! aka desktop shell with an embedded Rust backend.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
+    Once,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aka_cli::AkaBackend;
 use aka_mcp::{clamp_render_nodes, ops, Backend, RepoSettingsUpdate, MAX_RENDER_NODES};
@@ -18,6 +22,7 @@ type BackendState = Arc<AkaBackend>;
 const AKA_HOME_DIR_NAME: &str = "aka-home";
 const APP_DATA_DIR_NAME: &str = "com.aka.desktop";
 const DESKTOP_MCP_ADDR: &str = "127.0.0.1:4112";
+const DESKTOP_LOG_FILE_NAME: &str = "aka-desktop.log";
 
 struct DesktopMcpRuntime {
     _rt: tokio::runtime::Runtime,
@@ -50,6 +55,46 @@ fn fallback_app_data_dir() -> PathBuf {
             .join(APP_DATA_DIR_NAME);
     }
     std::env::temp_dir().join(APP_DATA_DIR_NAME)
+}
+
+pub fn install_desktop_diagnostics() {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        log_desktop_event(format!(
+            "startup version={} os={} arch={} exe={}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            std::env::current_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|e| format!("<unavailable: {e}>"))
+        ));
+
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            log_desktop_event(format!(
+                "panic: {info}\nbacktrace:\n{}",
+                std::backtrace::Backtrace::force_capture()
+            ));
+            default_hook(info);
+        }));
+    });
+}
+
+fn log_desktop_event(message: impl AsRef<str>) {
+    let log_dir = fallback_app_data_dir().join("logs");
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    let log_path = log_dir.join(DESKTOP_LOG_FILE_NAME);
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) else {
+        return;
+    };
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let _ = writeln!(file, "[{ts}] {}", message.as_ref());
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -180,6 +225,7 @@ fn configure_desktop_runtime(app: &tauri::App) -> anyhow::Result<AkaBackend> {
 }
 
 pub fn configure_cli_runtime() -> anyhow::Result<()> {
+    install_desktop_diagnostics();
     let app_data_dir = fallback_app_data_dir();
     if std::env::var_os("AKA_HOME").is_none() {
         let aka_home = app_data_dir.join(AKA_HOME_DIR_NAME);
@@ -565,21 +611,38 @@ fn spawn_url_opener(url: &str) -> std::io::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    install_desktop_diagnostics();
+    let native_updater_enabled = matches!(
+        option_env!("AKA_ENABLE_NATIVE_UPDATER"),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    );
+    log_desktop_event(format!(
+        "tauri start native_updater_enabled={native_updater_enabled}"
+    ));
+
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
+
+    if native_updater_enabled {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    let result = builder
         .setup(|app| {
             let backend = configure_desktop_runtime(app).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("configure desktop runtime: {e:#}"))
             })?;
+            log_desktop_event("desktop runtime configured");
             backend.start_auto_indexer();
             let backend = Arc::new(backend);
             match start_desktop_mcp_server(Arc::clone(&backend)) {
                 Ok(mcp_runtime) => {
+                    log_desktop_event("desktop MCP server started");
                     app.manage(mcp_runtime);
                 }
                 Err(e) => {
+                    log_desktop_event(format!("desktop MCP server unavailable: {e:#}"));
                     eprintln!("aka desktop MCP server unavailable: {e:#}");
                 }
             }
@@ -608,6 +671,10 @@ pub fn run() {
             open_url,
             open_editor_url,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+
+    if let Err(e) = result {
+        log_desktop_event(format!("fatal: error while running tauri application: {e:#}"));
+        panic!("error while running tauri application: {e:#}");
+    }
 }

@@ -108,7 +108,7 @@ export async function installNativeAppUpdate(
 function normalizeNativeUpdaterError(e: unknown): Error {
   const message = e instanceof Error ? e.message : String(e);
   if (
-    /updater.*not configured|No updater endpoints|does not have any endpoints set|public key|pubkey|signature/i.test(
+    /updater.*not configured|No updater endpoints|does not have any endpoints set|public key|pubkey|signature|plugin.*updater|updater.*plugin|not found|unknown plugin/i.test(
       message,
     )
   ) {

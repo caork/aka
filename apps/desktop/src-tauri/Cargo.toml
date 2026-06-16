@@ -1,6 +1,6 @@
 [package]
 name = "aka-desktop"
-version = "0.1.14"
+version = "0.1.16"
 description = "aka — code omniscience engine, desktop shell"
 authors = ["aka"]
 edition = "2021"

@@ -577,25 +577,37 @@ package_desktop() {
         if [[ "${signed_release}" -eq 1 ]]; then
           local tauri_args=(build --bundles app,dmg --ci)
           local updater_config_args
+          local native_updater_env=()
           updater_config_args="$(tauri_updater_config_args)" || return 1
           if [[ -n "${updater_config_args}" ]]; then
+            native_updater_env=(AKA_ENABLE_NATIVE_UPDATER=1)
             while IFS= read -r arg; do
               tauri_args+=("${arg}")
             done <<< "${updater_config_args}"
           fi
           echo "==> npm run tauri -- ${tauri_args[*]}"
-          (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
+          if [[ "${#native_updater_env[@]}" -gt 0 ]]; then
+            (cd "${REPO_ROOT}/apps/desktop" && env "${native_updater_env[@]}" npm run tauri -- "${tauri_args[@]}")
+          else
+            (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
+          fi
         else
           local tauri_args=(build --bundles app --ci --no-sign)
           local updater_config_args
+          local native_updater_env=()
           updater_config_args="$(tauri_updater_config_args)" || return 1
           if [[ -n "${updater_config_args}" ]]; then
+            native_updater_env=(AKA_ENABLE_NATIVE_UPDATER=1)
             while IFS= read -r arg; do
               tauri_args+=("${arg}")
             done <<< "${updater_config_args}"
           fi
           echo "==> npm run tauri -- ${tauri_args[*]}"
-          (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
+          if [[ "${#native_updater_env[@]}" -gt 0 ]]; then
+            (cd "${REPO_ROOT}/apps/desktop" && env "${native_updater_env[@]}" npm run tauri -- "${tauri_args[@]}")
+          else
+            (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
+          fi
         fi
       fi
 
@@ -674,14 +686,20 @@ package_windows_desktop() {
       tauri_args=(build --runner cargo-xwin --target "${win_triple}" --bundles nsis --ci)
     fi
     local updater_config_args
+    local native_updater_env=()
     updater_config_args="$(tauri_updater_config_args)" || return 1
     if [[ -n "${updater_config_args}" ]]; then
+      native_updater_env=(AKA_ENABLE_NATIVE_UPDATER=1)
       while IFS= read -r arg; do
         tauri_args+=("${arg}")
       done <<< "${updater_config_args}"
     fi
     echo "==> npm run tauri -- ${tauri_args[*]}"
-    (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
+    if [[ "${#native_updater_env[@]}" -gt 0 ]]; then
+      (cd "${REPO_ROOT}/apps/desktop" && env "${native_updater_env[@]}" npm run tauri -- "${tauri_args[@]}")
+    else
+      (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
+    fi
   fi
 
   exe_path="${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/AKA.exe"
