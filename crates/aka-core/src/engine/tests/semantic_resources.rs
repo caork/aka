@@ -7,3 +7,4 @@ mod notification;
 mod object_storage;
 mod payment;
 mod search_index;
+mod storage_config;

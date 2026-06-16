@@ -32,6 +32,8 @@ mod python_azure_blob;
 use python_azure_blob::extract_python_azure_blob_resources;
 mod search_index;
 use search_index::extract_search_index_resources;
+mod storage_config;
+use storage_config::extract_storage_config_resources;
 
 #[derive(Debug, Clone)]
 pub(super) struct SynthResource {
@@ -177,6 +179,7 @@ fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
     let mut out = identity::extract_identity_config_resources(text);
     out.extend(extract_infra_config_resources(text));
     out.extend(extract_http_config_resources(text));
+    out.extend(extract_storage_config_resources(text));
     out
 }
 
