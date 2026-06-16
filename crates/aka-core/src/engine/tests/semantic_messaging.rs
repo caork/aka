@@ -75,6 +75,90 @@ def consume_order(event):
 }
 
 #[test]
+fn synthesizes_message_topics_from_config_files() {
+    let repo = temp_repo("config-message-topics");
+    std::fs::create_dir_all(repo.join("src/main/resources")).unwrap();
+    std::fs::write(
+        repo.join("src/main/resources/application.yml"),
+        r#"orders:
+  kafka:
+    topic: orders.created
+    group-id: orders-service
+  rabbit:
+    queue: orders.created.queue
+    routing-key: orders.created
+  sqs:
+    queue-name: orders-created
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".env"),
+        r#"CELERY_QUEUE=orders.tasks
+NATS_TOPIC=orders.broadcast
+KAFKA_TOPIC=${DYNAMIC_TOPIC}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Config",
+            "application.yml",
+            "src/main/resources/application.yml",
+            "src/main/resources/application.yml",
+        ),
+        (1, 10),
+        json!({"language": "yaml"}),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        ("Config", ".env", ".env", ".env"),
+        (1, 3),
+        json!({"language": "dotenv"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert_config_topic(&synth, "orders.created", "kafka", &["orders-service"]);
+    assert_config_topic(&synth, "orders.created.queue", "rabbitmq", &[]);
+    assert_config_topic(&synth, "orders.created", "rabbitmq", &[]);
+    assert_config_topic(&synth, "orders-created", "sqs", &[]);
+    assert_config_topic(&synth, "orders.tasks", "celery", &[]);
+    assert_config_topic(&synth, "orders.broadcast", "nats", &[]);
+    assert!(synth
+        .topics
+        .iter()
+        .all(|topic| topic.name != "${DYNAMIC_TOPIC}"));
+}
+
+fn assert_config_topic(synth: &SynthGraph, name: &str, broker: &str, consumer_groups: &[&str]) {
+    let topic = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == name && topic.broker == broker)
+        .unwrap_or_else(|| panic!("expected config topic {broker}:{name}"));
+    assert!(topic.sources.contains("config-scan"));
+    assert!(topic.producers.is_empty());
+    assert!(topic.consumers.is_empty());
+    assert_eq!(
+        topic.consumer_groups,
+        consumer_groups
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+    );
+    let node = topic.node_rec();
+    assert!(node.properties["sources"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("config-scan")));
+}
+
+#[test]
 fn dedups_native_channel_edges_against_source_scan_topics() {
     let repo = temp_repo("native-channel-source-dedup");
     std::fs::create_dir_all(repo.join("src/orders")).unwrap();

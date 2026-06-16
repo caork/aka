@@ -10,9 +10,11 @@ use super::{
     SynthNode,
 };
 
+mod config;
 mod python;
 mod stream;
 
+use config::extract_config_topics;
 use python::extract_python_topic_detections;
 use stream::{
     extract_stream_bridge_topics, functional_stream_binding_detections,
@@ -181,6 +183,32 @@ pub(super) fn synthesize_topics_from_sources(
             }
         }
     }
+    for file_path in project_sources
+        .project_files(repo)
+        .filter(|file_path| is_topic_config_file_path(file_path))
+    {
+        let Some(text) = read_repo_text(repo, file_path) else {
+            continue;
+        };
+        for detection in extract_config_topics(&text) {
+            let key = (detection.broker.clone(), detection.topic.clone());
+            let topic_id = format!(
+                "topic:heuristic:{:016x}",
+                stable_hash(&format!("{}|{}", detection.broker, detection.topic))
+            );
+            let topic = topics.entry(key).or_insert_with(|| SynthTopic {
+                id: topic_id,
+                name: detection.topic.clone(),
+                broker: detection.broker.clone(),
+                sources: BTreeSet::from(["config-scan".into()]),
+                consumer_groups: Vec::new(),
+                producers: Vec::new(),
+                consumers: Vec::new(),
+            });
+            topic.sources.insert("config-scan".into());
+            topic.consumer_groups.extend(detection.consumer_groups);
+        }
+    }
     let mut out: Vec<SynthTopic> = topics.into_values().collect();
     for topic in &mut out {
         topic.consumers.sort();
@@ -194,6 +222,25 @@ pub(super) fn synthesize_topics_from_sources(
     out
 }
 
+fn is_topic_config_file_path(file_path: &str) -> bool {
+    let lower = file_path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    matches!(
+        name,
+        "application.yml"
+            | "application.yaml"
+            | "application.properties"
+            | "bootstrap.yml"
+            | "bootstrap.yaml"
+            | "bootstrap.properties"
+            | "settings.py"
+            | "config.py"
+            | ".env"
+    ) || name.starts_with("application-") && name.ends_with(".yml")
+        || name.starts_with("application-") && name.ends_with(".yaml")
+        || name.starts_with("application-") && name.ends_with(".properties")
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct NativeTopicDetection {
     pub(super) topic: String,
@@ -202,6 +249,13 @@ pub(super) struct NativeTopicDetection {
     pub(super) node_id: String,
     pub(super) file_path: String,
     pub(super) native_edge_type: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ConfigTopicDetection {
+    pub(super) topic: String,
+    pub(super) broker: String,
+    pub(super) consumer_groups: Vec<String>,
 }
 
 pub(super) fn merge_native_channel_topics(

@@ -14,7 +14,7 @@ mod http_config;
 use http_config::extract_http_config_resources;
 mod identity;
 use identity::extract_identity_resources;
-mod infra_config;
+pub(super) mod infra_config;
 use infra_config::extract_infra_config_resources;
 mod notification;
 use notification::extract_notification_resources;
