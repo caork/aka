@@ -119,9 +119,7 @@ fn hide_child_console(_cmd: &mut Command) {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error(
-        "AKA engine not found: {0} (set --engine-dir, AKA_ENGINE_DIR, or AKA_ENGINE_BIN)"
-    )]
+    #[error("AKA engine not found: {0} (set --engine-dir, AKA_ENGINE_DIR, or AKA_ENGINE_BIN)")]
     EngineDirMissing(PathBuf),
     #[error("failed to spawn engine ({cmd}): {source}")]
     Spawn {
@@ -195,8 +193,10 @@ impl EngineRunner {
             return Self::new(PathBuf::from(env_dir));
         }
 
-        let mut candidates: Vec<PathBuf> =
-            vec![PathBuf::from("engine"), PathBuf::from("/tmp/aka-engine-src")];
+        let mut candidates: Vec<PathBuf> = vec![
+            PathBuf::from("engine"),
+            PathBuf::from("/tmp/aka-engine-src"),
+        ];
         if let Ok(cwd) = std::env::current_dir() {
             candidates.extend(cwd.ancestors().map(|p| p.join("engine")));
         }
@@ -534,12 +534,7 @@ fn export_artifacts(
     on_event: &mut impl FnMut(&EngineEvent),
 ) -> Result<ArtifactStats, EngineError> {
     let conn = open_engine_db(db_path)?;
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:inspect-db",
-        0,
-        0,
-    );
+    emit_phase(on_event, "aka-engine:export-artifacts:inspect-db", 0, 0);
     let db_counts = ArtifactStats {
         files: count_files(&conn, project)?,
         nodes: count_nodes(&conn, project)?,
