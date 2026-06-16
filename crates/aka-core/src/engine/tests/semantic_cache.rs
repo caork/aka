@@ -164,6 +164,135 @@ class OrderCache {
 }
 
 #[test]
+fn synthesizes_java_redis_template_structured_cache_access() {
+    let repo = temp_repo("java-redis-template-structured-cache");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/cache")).unwrap();
+    let file = "src/main/java/com/example/cache/RedisOrderCache.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.cache;
+
+import java.time.Duration;
+import org.springframework.data.redis.core.StringRedisTemplate;
+
+class RedisOrderCache {
+    private final StringRedisTemplate redisTemplate;
+
+    RedisOrderCache(StringRedisTemplate redisTemplate) {
+        this.redisTemplate = redisTemplate;
+    }
+
+    public String loadOrder(String id) {
+        return (String) redisTemplate.opsForHash().get("orders:data", id);
+    }
+
+    public void warmOrder(String id, String body) {
+        redisTemplate.opsForHash().put("orders:data", id, body);
+        redisTemplate.opsForList().leftPush("orders:recent", id);
+        redisTemplate.opsForSet().add("orders:dirty", id);
+        redisTemplate.opsForZSet().add("orders:rank", id, 42.0);
+        redisTemplate.expire("orders:ttl", Duration.ofMinutes(5));
+        redisTemplate.opsForValue().increment("orders:count");
+    }
+
+    public void inspectOrder() {
+        redisTemplate.hasKey("orders:data");
+        redisTemplate.opsForList().range("orders:recent", 0, 10);
+        redisTemplate.opsForSet().members("orders:dirty");
+        redisTemplate.opsForZSet().range("orders:rank", 0, 10);
+    }
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "loadOrder",
+        "com.example.cache.RedisOrderCache.loadOrder",
+        file,
+        (13, 15),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "warmOrder",
+        "com.example.cache.RedisOrderCache.warmOrder",
+        file,
+        (17, 24),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "inspectOrder",
+        "com.example.cache.RedisOrderCache.inspectOrder",
+        file,
+        (26, 31),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let data = synth
+        .caches
+        .iter()
+        .find(|cache| cache.name == "orders:data" && cache.backend == "redis")
+        .expect("redis hash key");
+    assert_eq!(data.readers.len(), 2);
+    assert_eq!(data.writers.len(), 1);
+    for (key, readers, writers) in [
+        ("orders:recent", 1, 1),
+        ("orders:dirty", 1, 1),
+        ("orders:rank", 1, 1),
+        ("orders:ttl", 0, 1),
+        ("orders:count", 0, 1),
+    ] {
+        let cache = synth
+            .caches
+            .iter()
+            .find(|cache| cache.name == key && cache.backend == "redis")
+            .unwrap_or_else(|| panic!("expected redis cache key {key}"));
+        assert_eq!(cache.readers.len(), readers, "{key} readers");
+        assert_eq!(cache.writers.len(), writers, "{key} writers");
+    }
+    let strategies: BTreeSet<_> = synth
+        .caches
+        .iter()
+        .flat_map(SynthCache::edge_recs)
+        .filter_map(|edge| {
+            edge.evidence
+                .as_ref()
+                .and_then(|value| value.get("strategy"))
+                .and_then(|value| value.as_str().map(str::to_string))
+        })
+        .collect();
+    for expected in [
+        "java-redis-hash-get",
+        "java-redis-hash-put",
+        "java-redis-list-left-push",
+        "java-redis-list-range",
+        "java-redis-set-add",
+        "java-redis-zset-add",
+        "java-redis-expire",
+        "java-redis-has-key",
+        "java-redis-value-increment",
+    ] {
+        assert!(
+            strategies.contains(expected),
+            "expected strategy {expected}, got {strategies:?}"
+        );
+    }
+}
+
+#[test]
 fn synthesizes_python_cache_nodes() {
     let repo = temp_repo("python-cache");
     std::fs::write(
