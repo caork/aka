@@ -334,6 +334,76 @@ def load_manifest():
 }
 
 #[test]
+fn synthesizes_python_gcs_resources() {
+    let repo = temp_repo("python-gcs-resources");
+    std::fs::write(
+        repo.join("gcs_storage.py"),
+        r#"from google.cloud import storage
+
+client = storage.Client()
+
+def store_receipt(order_id, payload):
+    blob = client.bucket("order-artifacts").blob(f"receipts/{order_id}.json")
+    blob.upload_from_string(payload)
+
+def load_manifest():
+    return client.get_bucket("order-artifacts").blob("manifests/latest.json").download_as_text()
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "store_receipt",
+        "gcs_storage.store_receipt",
+        "gcs_storage.py",
+        (5, 7),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "load_manifest",
+        "gcs_storage.load_manifest",
+        "gcs_storage.py",
+        (9, 10),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let receipt = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "gs://order-artifacts/receipts/{param}.json")
+        .expect("GCS receipt resource");
+    assert_eq!(receipt.resource_type, "gcs");
+    let receipt_edge = receipt
+        .edge_recs()
+        .into_iter()
+        .find(|edge| edge.source_id == "cbm:1:gcs_storage.store_receipt")
+        .expect("GCS upload edge");
+    assert_eq!(receipt_edge.edge_type, "ACCESSES_RESOURCE");
+    assert_eq!(
+        receipt_edge.evidence.as_ref().unwrap()["strategy"],
+        "python-gcs-blob"
+    );
+
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "gs://order-artifacts/manifests/latest.json"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.source_id == "cbm:2:gcs_storage.load_manifest"
+                    && edge.evidence.as_ref().unwrap()["strategy"] == "python-gcs-download"
+            })
+    }));
+}
+
+#[test]
 fn synthesizes_java_aws_s3_resources() {
     let repo = temp_repo("java-aws-s3-resources");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/storage")).unwrap();

@@ -11,6 +11,8 @@ use super::{
 
 mod java_s3;
 use java_s3::extract_java_aws_s3_resources;
+mod python_gcs;
+use python_gcs::extract_python_gcs_resources;
 
 #[derive(Debug, Clone)]
 pub(super) struct SynthResource {
@@ -158,6 +160,15 @@ impl ResourceDetection {
             strategy: strategy.into(),
         }
     }
+
+    fn gcs(url: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url,
+            resource_type: "gcs".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
 }
 
 fn extract_resource_detections(
@@ -207,6 +218,7 @@ fn extract_resource_detections(
     out.extend(extract_python_requests_base_url_session_calls(text, nodes));
     out.extend(extract_python_urllib_calls(text, nodes));
     out.extend(extract_python_boto3_s3_resources(text, nodes));
+    out.extend(extract_python_gcs_resources(text, nodes));
     out.extend(extract_java_aws_s3_resources(text, nodes));
     out.extend(extract_contextual_http_client_calls(
         text,
