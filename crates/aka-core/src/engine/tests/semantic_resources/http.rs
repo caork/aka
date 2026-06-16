@@ -543,3 +543,73 @@ public interface CatalogClient {
         "java-spring-feign"
     );
 }
+
+#[test]
+fn synthesizes_spring_feign_resources_from_source_annotations_without_metadata() {
+    let repo = temp_repo("spring-feign-resource-source-annotations");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/catalog")).unwrap();
+    let file = "src/main/java/com/example/catalog/CatalogClient.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.catalog;
+
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.GetMapping;
+
+@FeignClient(
+    name = "catalog",
+    url = "https://catalog.example.com",
+    path = "/api/catalog")
+public interface CatalogClient {
+    @GetMapping("/{sku}")
+    CatalogItem getItem(String sku);
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Interface",
+            "CatalogClient",
+            "com.example.catalog.CatalogClient",
+            file,
+        ),
+        (10, 13),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "getItem",
+        "com.example.catalog.CatalogClient.getItem",
+        file,
+        (12, 12),
+        json!({
+            "language": "java",
+            "parent_class": "cbm:1:com.example.catalog.CatalogClient",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let resource = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "https://catalog.example.com/api/catalog/{param}")
+        .expect("Spring Feign source annotation resource");
+    let edge = resource
+        .edge_recs()
+        .into_iter()
+        .find(|edge| edge.source_id == "cbm:2:com.example.catalog.CatalogClient.getItem")
+        .expect("Feign source annotation HTTP_CALLS edge");
+    assert_eq!(edge.edge_type, "HTTP_CALLS");
+    assert_eq!(
+        edge.evidence.as_ref().unwrap()["strategy"],
+        "java-spring-feign"
+    );
+}

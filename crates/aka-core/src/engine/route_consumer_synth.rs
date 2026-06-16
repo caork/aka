@@ -7,8 +7,8 @@ use super::route_shape::{
 };
 use super::{
     declarative_http_client_path, declarative_http_method_path, join_route_paths,
-    pick_handler_node, read_repo_text, request_line_path, route_nodes_by_file, spring_mapping_path,
-    SynthNode, SynthRoute, SynthRouteConsumer,
+    pick_handler_node, read_repo_text, request_line_path, route_nodes_by_file,
+    source_annotations_before_node, spring_mapping_path, SynthNode, SynthRoute, SynthRouteConsumer,
 };
 
 pub(super) fn attach_route_consumers(
@@ -27,7 +27,7 @@ pub(super) fn attach_route_consumers(
         let Some(text) = read_repo_text(repo, &file_path) else {
             continue;
         };
-        for (route, node_id) in java_declarative_http_route_consumers(&file_nodes) {
+        for (route, node_id) in java_declarative_http_route_consumers(&text, &file_nodes) {
             for candidate in routes.values_mut().filter(|r| r.route == route) {
                 if candidate.file_path == file_path {
                     continue;
@@ -118,13 +118,17 @@ fn parent_routes_for(route: &str, all_routes: &[String]) -> Vec<String> {
     parents
 }
 
-fn java_declarative_http_route_consumers(nodes: &[&SynthNode]) -> Vec<(String, String)> {
+fn java_declarative_http_route_consumers(
+    text: &str,
+    nodes: &[&SynthNode],
+) -> Vec<(String, String)> {
     let mut client_prefixes: BTreeMap<String, String> = BTreeMap::new();
     for node in nodes
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Class" | "Interface"))
     {
-        let Some(prefix) = declarative_http_client_path(&node.decorators) else {
+        let decorators = decorators_for_node(text, node);
+        let Some(prefix) = declarative_http_client_path(&decorators) else {
             continue;
         };
         client_prefixes.insert(node.aka_id.clone(), prefix.clone());
@@ -142,8 +146,8 @@ fn java_declarative_http_route_consumers(nodes: &[&SynthNode]) -> Vec<(String, S
         let Some(prefix) = client_prefixes.get(parent) else {
             continue;
         };
-        if let Some(route) = node
-            .decorators
+        let decorators = decorators_for_node(text, node);
+        if let Some(route) = decorators
             .iter()
             .find_map(|decorator| request_line_path(decorator))
         {
@@ -153,8 +157,8 @@ fn java_declarative_http_route_consumers(nodes: &[&SynthNode]) -> Vec<(String, S
         if let Some(method_path) = node
             .route_path
             .clone()
-            .or_else(|| declarative_http_method_path(&node.decorators))
-            .or_else(|| spring_mapping_path(&node.decorators))
+            .or_else(|| declarative_http_method_path(&decorators))
+            .or_else(|| spring_mapping_path(&decorators))
         {
             out.push((join_route_paths(prefix, &method_path), node.aka_id.clone()));
         }
@@ -162,6 +166,14 @@ fn java_declarative_http_route_consumers(nodes: &[&SynthNode]) -> Vec<(String, S
     out.sort();
     out.dedup();
     out
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn route_fetch_consumers<'a>(

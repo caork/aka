@@ -5,8 +5,9 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_call_args, find_matching_paren, node_at_offset, project_code_nodes_by_file,
-    read_repo_text, request_line_path, skip_ws, split_top_level_commas, spring_mapping_path,
-    stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
+    read_repo_text, request_line_path, skip_ws, source_annotations_before_node,
+    split_top_level_commas, spring_mapping_path, stable_hash, EdgeRec, NodeRec, ProjectSourceSet,
+    SynthNode,
 };
 
 mod java_s3;
@@ -244,7 +245,7 @@ fn extract_resource_detections(
     ));
     out.extend(extract_spring_restclient_uri_calls(text, nodes));
     out.extend(extract_spring_webclient_uri_calls(text, nodes));
-    out.extend(extract_java_feign_client_resources(file_path, nodes));
+    out.extend(extract_java_feign_client_resources(text, file_path, nodes));
     out.extend(extract_absolute_url_literals(text, nodes));
     out.sort_by(|a, b| {
         a.url
@@ -625,6 +626,7 @@ fn method_call_url_literals(text: &str, method: &str) -> Vec<String> {
 }
 
 fn extract_java_feign_client_resources(
+    text: &str,
     file_path: &str,
     nodes: &[&SynthNode],
 ) -> Vec<ResourceDetection> {
@@ -636,7 +638,8 @@ fn extract_java_feign_client_resources(
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Class" | "Interface"))
     {
-        let Some(base_url) = feign_client_base_url(&node.decorators) else {
+        let decorators = decorators_for_node(text, node);
+        let Some(base_url) = feign_client_base_url(&decorators) else {
             continue;
         };
         client_urls.insert(node.aka_id.clone(), base_url.clone());
@@ -654,7 +657,7 @@ fn extract_java_feign_client_resources(
         let Some(base_url) = client_urls.get(parent) else {
             continue;
         };
-        let method_path = feign_method_path(node);
+        let method_path = feign_method_path(text, node);
         out.push(ResourceDetection::http(
             mask_dynamic_url(&join_url_paths(base_url, &method_path)),
             node.aka_id.clone(),
@@ -680,16 +683,25 @@ fn feign_client_base_url(decorators: &[String]) -> Option<String> {
     None
 }
 
-fn feign_method_path(node: &SynthNode) -> String {
-    for decorator in &node.decorators {
+fn feign_method_path(text: &str, node: &SynthNode) -> String {
+    let decorators = decorators_for_node(text, node);
+    for decorator in &decorators {
         if let Some(route) = request_line_path(decorator) {
             return route;
         }
     }
     node.route_path
         .clone()
-        .or_else(|| spring_mapping_path(&node.decorators))
+        .or_else(|| spring_mapping_path(&decorators))
         .unwrap_or_else(|| "/".into())
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn annotation_args<'a>(annotation: &'a str, expected_simple_name: &str) -> Option<&'a str> {
