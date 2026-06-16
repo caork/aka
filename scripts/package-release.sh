@@ -109,6 +109,14 @@ engine_exe_for_platform() {
   esac
 }
 
+legacy_engine_exe_for_platform() {
+  case "$1" in
+    darwin-arm64|darwin-x64) echo "codebase-memory-mcp" ;;
+    win-x64) echo "codebase-memory-mcp.exe" ;;
+    *) echo "error: 不支持的 AKA engine 平台 $1" >&2; return 1 ;;
+  esac
+}
+
 env_var_for_platform() {
   tr '[:lower:]-' '[:upper:]_' <<< "$1"
 }
@@ -195,17 +203,21 @@ create_zip_archive() {
 }
 
 find_engine_binary() {
-  local platform exe platform_env
+  local platform exe legacy_exe platform_env
   platform="$1"
   exe="$(engine_exe_for_platform "${platform}")"
+  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
   platform_env="AKA_ENGINE_BIN_$(env_var_for_platform "${platform}")"
 
   first_existing_file \
     "${!platform_env:-}" \
     "${AKA_ENGINE_BIN:-}" \
     "${REPO_ROOT}/engine/${exe}" \
+    "${REPO_ROOT}/engine/${legacy_exe}" \
     "${REPO_ROOT}/engine/aka-engine-src/build/c/${exe}" \
+    "${REPO_ROOT}/engine/aka-engine-src/build/c/${legacy_exe}" \
     "/tmp/aka-engine-src/build/c/${exe}" \
+    "/tmp/aka-engine-src/build/c/${legacy_exe}" \
     "$(command -v "${exe}" 2>/dev/null || true)"
 }
 
@@ -258,9 +270,15 @@ find_engine_resource_bin() {
 }
 
 assert_engine_resource_dir() {
-  local platform dir engine_bin
+  local platform dir engine_bin legacy_exe
   platform="$1"
   dir="$2"
+  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
+  if [[ -f "${dir}/${legacy_exe}" || -f "${dir}/bin/${legacy_exe}" || -f "${dir}/build/c/${legacy_exe}" ]]; then
+    echo "error: 桌面 engine 资源含旧名二进制: ${dir}/${legacy_exe}" >&2
+    echo "       请统一复制为 $(engine_exe_for_platform "${platform}")。" >&2
+    return 1
+  fi
   engine_bin="$(find_engine_resource_bin "${platform}" "${dir}" || true)"
   if [[ -z "${engine_bin}" ]]; then
     echo "error: 桌面 engine 资源缺少 native AKA engine 二进制: ${dir}" >&2
@@ -297,13 +315,22 @@ assert_app_bundle_engine() {
 }
 
 assert_zip_has_engine() {
-  local zip_path platform prefix exe listing base entry
+  local zip_path platform prefix exe legacy_exe listing base entry legacy_entry
   zip_path="$1"
   platform="$2"
   prefix="$3"
   exe="$(engine_exe_for_platform "${platform}")"
+  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
   [[ -f "${zip_path}" ]] || { echo "error: 找不到 zip: ${zip_path}" >&2; return 1; }
   listing="$(unzip -Z1 "${zip_path}")"
+  for base in "engine" "resources/engine" "engine/bin" "resources/engine/bin" "engine/build/c" "resources/engine/build/c"; do
+    legacy_entry="${prefix:+${prefix}/}${base}/${legacy_exe}"
+    if grep -qxF "${legacy_entry}" <<< "${listing}"; then
+      echo "error: zip 包内含旧名 engine 二进制: ${legacy_entry}" >&2
+      echo "       Windows/macOS 包必须统一携带 $(engine_exe_for_platform "${platform}")。" >&2
+      return 1
+    fi
+  done
   for base in "engine" "resources/engine" "engine/bin" "resources/engine/bin" "engine/build/c" "resources/engine/build/c"; do
     entry="${prefix:+${prefix}/}${base}/${exe}"
     if grep -qxF "${entry}" <<< "${listing}"; then
@@ -679,8 +706,8 @@ package_windows_desktop() {
   local win_triple exe_path setup_src setup_exe portable_zip stage
   win_triple="x86_64-pc-windows-msvc"
 
+  prepare_desktop_resources "${win_triple}"
   if [[ "${SKIP_BUILD}" -eq 0 ]]; then
-    prepare_desktop_resources "${win_triple}"
     rm -rf "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/engine"
     local tauri_args=(build --target "${win_triple}" --bundles nsis --ci)
     if command -v cargo-xwin >/dev/null 2>&1 && [[ "$(uname -s)" = "Darwin" ]]; then
@@ -711,6 +738,11 @@ package_windows_desktop() {
 
   setup_src="$(find "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/bundle/nsis" -maxdepth 1 -type f -name "*${VERSION}*setup.exe" | sort | tail -n 1 || true)"
   if [[ -z "${setup_src}" ]]; then
+    if [[ "${SKIP_BUILD}" -eq 1 ]]; then
+      echo "error: 找不到版本 ${VERSION} 的 Windows NSIS 安装器。" >&2
+      echo "       --skip-build 不会把旧 setup 改名成新版本；请先去掉 --skip-build 构建一次。" >&2
+      return 1
+    fi
     setup_src="$(find "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/bundle/nsis" -maxdepth 1 -type f -name '*setup.exe' | sort | tail -n 1 || true)"
   fi
   [[ -f "${setup_src}" ]] || { echo "error: 找不到 Windows NSIS 安装器（先去掉 --skip-build 构建一次）" >&2; return 1; }
