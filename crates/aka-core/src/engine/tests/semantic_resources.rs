@@ -5,6 +5,7 @@ mod identity;
 mod infra_config;
 mod notification;
 mod object_storage;
+mod observability;
 mod payment;
 mod search_index;
 mod storage_config;

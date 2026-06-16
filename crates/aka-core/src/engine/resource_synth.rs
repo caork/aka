@@ -18,6 +18,7 @@ pub(super) mod infra_config;
 use infra_config::extract_infra_config_resources;
 mod notification;
 use notification::extract_notification_resources;
+mod observability;
 mod payment;
 use payment::extract_payment_resources;
 mod java_s3;
@@ -183,6 +184,7 @@ fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
     out.extend(feature_flag::extract_feature_flag_config_resources(text));
     out.extend(payment::extract_payment_config_resources(text));
     out.extend(notification::extract_notification_config_resources(text));
+    out.extend(observability::extract_observability_config_resources(text));
     out.extend(search_index::extract_search_index_config_resources(text));
     out
 }
@@ -282,6 +284,15 @@ impl ResourceDetection {
         Self {
             url: format!("payment:{provider}"),
             resource_type: "payment".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
+    fn observability(platform: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url: format!("observability:{platform}"),
+            resource_type: "observability".into(),
             node_id,
             strategy: strategy.into(),
         }
