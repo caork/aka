@@ -77,6 +77,83 @@ public class OrderController {
 }
 
 #[test]
+fn synthesizes_no_arg_spring_mapping_as_class_prefix_endpoint() {
+    let repo = temp_repo("spring-no-arg-method-mapping");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/OrderController.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+    @GetMapping
+    public java.util.List<String> listOrders() {
+        return java.util.List.of();
+    }
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderController",
+            "com.example.orders.OrderController",
+            file,
+        ),
+        (9, 13),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "listOrders",
+            "com.example.orders.OrderController.listOrders",
+            file,
+        ),
+        (11, 13),
+        json!({
+            "language": "java",
+            "parent_class": "cbm:1:com.example.orders.OrderController",
+        }),
+    );
+    insert_edge(&conn, 1, 1, 2, "DEFINES_METHOD");
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let route = synth
+        .routes
+        .iter()
+        .find(|route| route.route == "/api/orders" && route.method.as_deref() == Some("GET"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no-arg Spring mapping should inherit class prefix; got {:?}",
+                synth
+                    .routes
+                    .iter()
+                    .map(|route| (route.route.as_str(), route.method.as_deref()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        route.handler_id.as_deref(),
+        Some("cbm:2:com.example.orders.OrderController.listOrders")
+    );
+}
+
+#[test]
 fn synthesizes_fastapi_routes_from_source_decorators_without_metadata() {
     let repo = temp_repo("fastapi-routes-source-decorators");
     std::fs::create_dir_all(repo.join("api")).unwrap();

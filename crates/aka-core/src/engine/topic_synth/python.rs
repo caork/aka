@@ -1,5 +1,6 @@
 use super::{
-    extract_call_topic_literals, extract_keyword_topic_literals, TopicDetection, TopicEndpointKind,
+    extract_call_topic_literals, extract_keyword_topic_literals, topic_detection, TopicDetection,
+    TopicEndpointKind,
 };
 use crate::engine::SynthNode;
 
@@ -91,6 +92,42 @@ pub(super) fn extract_python_topic_detections(
             0,
         ));
     }
+    for receiver in &ctx.sqs_client_receivers {
+        out.extend(extract_boto3_sqs_client_call_topics(
+            text,
+            nodes,
+            &format!("{receiver}.send_message"),
+            TopicEndpointKind::Producer,
+            "python-boto3-sqs-send-message",
+        ));
+        out.extend(extract_boto3_sqs_client_call_topics(
+            text,
+            nodes,
+            &format!("{receiver}.receive_message"),
+            TopicEndpointKind::Consumer,
+            "python-boto3-sqs-receive-message",
+        ));
+    }
+    for queue in &ctx.sqs_queue_receivers {
+        out.extend(extract_bound_sqs_queue_call_topics(
+            text,
+            nodes,
+            &queue.receiver,
+            &queue.queue,
+            "send_message",
+            TopicEndpointKind::Producer,
+            "python-boto3-sqs-send-message",
+        ));
+        out.extend(extract_bound_sqs_queue_call_topics(
+            text,
+            nodes,
+            &queue.receiver,
+            &queue.queue,
+            "receive_messages",
+            TopicEndpointKind::Consumer,
+            "python-boto3-sqs-receive-messages",
+        ));
+    }
     out
 }
 
@@ -101,6 +138,15 @@ struct PythonMessagingContext {
     kafka_producer_receivers: Vec<String>,
     rabbit_channel_receivers: Vec<String>,
     nats_client_receivers: Vec<String>,
+    sqs_client_receivers: Vec<String>,
+    sqs_resource_receivers: Vec<String>,
+    sqs_queue_receivers: Vec<PythonSqsQueueReceiver>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct PythonSqsQueueReceiver {
+    receiver: String,
+    queue: String,
 }
 
 impl PythonMessagingContext {
@@ -141,6 +187,22 @@ impl PythonMessagingContext {
             {
                 ctx.nats_client_receivers.push(lhs.to_string());
             }
+            if !imports.boto3_aliases.is_empty() {
+                if boto3_sqs_constructor(rhs, &imports.boto3_aliases, "client") {
+                    ctx.sqs_client_receivers.push(lhs.to_string());
+                }
+                if boto3_sqs_constructor(rhs, &imports.boto3_aliases, "resource") {
+                    ctx.sqs_resource_receivers.push(lhs.to_string());
+                }
+                for receiver in &ctx.sqs_resource_receivers {
+                    if let Some(queue) = sqs_resource_queue_name(rhs, receiver) {
+                        ctx.sqs_queue_receivers.push(PythonSqsQueueReceiver {
+                            receiver: lhs.to_string(),
+                            queue,
+                        });
+                    }
+                }
+            }
         }
 
         ctx.kafka_consumer_ctors.sort();
@@ -153,6 +215,12 @@ impl PythonMessagingContext {
         ctx.rabbit_channel_receivers.dedup();
         ctx.nats_client_receivers.sort();
         ctx.nats_client_receivers.dedup();
+        ctx.sqs_client_receivers.sort();
+        ctx.sqs_client_receivers.dedup();
+        ctx.sqs_resource_receivers.sort();
+        ctx.sqs_resource_receivers.dedup();
+        ctx.sqs_queue_receivers.sort();
+        ctx.sqs_queue_receivers.dedup();
         ctx
     }
 }
@@ -164,6 +232,7 @@ struct PythonMessagingImports {
     nats_client_ctors: Vec<String>,
     has_pika: bool,
     has_nats: bool,
+    boto3_aliases: Vec<String>,
 }
 
 impl PythonMessagingImports {
@@ -218,6 +287,7 @@ impl PythonMessagingImports {
                             imports.has_nats = true;
                             imports.nats_client_ctors.push(format!("{alias}.NATS"));
                         }
+                        "boto3" => imports.boto3_aliases.push(alias),
                         _ => {}
                     }
                 }
@@ -229,6 +299,8 @@ impl PythonMessagingImports {
         imports.kafka_producer_ctors.dedup();
         imports.nats_client_ctors.sort();
         imports.nats_client_ctors.dedup();
+        imports.boto3_aliases.sort();
+        imports.boto3_aliases.dedup();
         imports
     }
 }
@@ -268,6 +340,139 @@ fn python_assignment(line: &str) -> Option<(&str, &str)> {
 fn rhs_starts_with_call(rhs: &str, callee: &str) -> bool {
     rhs.strip_prefix(callee)
         .is_some_and(|rest| rest.trim_start().starts_with('('))
+}
+
+fn boto3_sqs_constructor(rhs: &str, aliases: &[String], constructor: &str) -> bool {
+    aliases.iter().any(|alias| {
+        let callee = format!("{alias}.{constructor}");
+        call_args_if_starts_with(rhs, &callee)
+            .and_then(first_python_string_literal)
+            .is_some_and(|service| service == "sqs")
+    })
+}
+
+fn sqs_resource_queue_name(rhs: &str, receiver: &str) -> Option<String> {
+    for (method, key) in [("Queue", None), ("get_queue_by_name", Some("QueueName"))] {
+        let callee = format!("{receiver}.{method}");
+        let Some(args) = call_args_if_starts_with(rhs, &callee) else {
+            continue;
+        };
+        let queue = if let Some(key) = key {
+            python_keyword_string_literals(args, &[key])
+                .into_iter()
+                .next()
+        } else {
+            first_python_string_literal(args)
+        };
+        if let Some(queue) = queue {
+            return Some(normalize_sqs_queue_name(queue));
+        }
+    }
+    None
+}
+
+fn call_args_if_starts_with<'a>(rhs: &'a str, callee: &str) -> Option<&'a str> {
+    let rest = rhs.strip_prefix(callee)?.trim_start();
+    if !rest.starts_with('(') {
+        return None;
+    }
+    let open = rhs.find('(')?;
+    let close = crate::engine::find_matching_paren(rhs, open)?;
+    rhs.get(open + 1..close)
+}
+
+fn extract_boto3_sqs_client_call_topics(
+    text: &str,
+    nodes: &[&SynthNode],
+    callee: &str,
+    kind: TopicEndpointKind,
+    strategy: &str,
+) -> Vec<TopicDetection> {
+    let mut out = Vec::new();
+    for call in crate::engine::find_call_args(text, callee) {
+        let Some(node) = crate::engine::node_at_offset(text, nodes, call.start)
+            .or_else(|| crate::engine::pick_handler_node(nodes))
+        else {
+            continue;
+        };
+        for topic in python_keyword_string_literals(call.args, &["QueueUrl", "QueueName"]) {
+            out.push(topic_detection(
+                normalize_sqs_queue_name(topic),
+                "sqs",
+                kind,
+                node.aka_id.clone(),
+                strategy,
+            ));
+        }
+    }
+    out
+}
+
+fn extract_bound_sqs_queue_call_topics(
+    text: &str,
+    nodes: &[&SynthNode],
+    receiver: &str,
+    queue: &str,
+    method: &str,
+    kind: TopicEndpointKind,
+    strategy: &str,
+) -> Vec<TopicDetection> {
+    let mut out = Vec::new();
+    let callee = format!("{receiver}.{method}");
+    for call in crate::engine::find_call_args(text, &callee) {
+        let Some(node) = crate::engine::node_at_offset(text, nodes, call.start)
+            .or_else(|| crate::engine::pick_handler_node(nodes))
+        else {
+            continue;
+        };
+        out.push(topic_detection(
+            queue.to_string(),
+            "sqs",
+            kind,
+            node.aka_id.clone(),
+            strategy,
+        ));
+    }
+    out
+}
+
+fn python_keyword_string_literals(args: &str, keys: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for arg in crate::engine::split_top_level_commas(args) {
+        let Some((key, value)) = arg.split_once('=') else {
+            continue;
+        };
+        if !keys.iter().any(|expected| key.trim() == *expected) {
+            continue;
+        }
+        if let Some(value) = first_python_string_literal(value.trim()) {
+            out.push(value);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn first_python_string_literal(text: &str) -> Option<String> {
+    let mut idx = 0usize;
+    while idx < text.len() {
+        let byte = *text.as_bytes().get(idx)?;
+        if matches!(byte, b'\'' | b'"') {
+            return crate::engine::read_string_literal(text, idx).map(|(literal, _)| literal);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn normalize_sqs_queue_name(value: String) -> String {
+    value
+        .rsplit('/')
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or(&value)
+        .to_string()
 }
 
 fn is_python_ref(value: &str) -> bool {

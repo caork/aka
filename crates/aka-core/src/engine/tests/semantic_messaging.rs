@@ -946,3 +946,80 @@ async def nats_publish():
         .expect("nats orders.created topic");
     assert_eq!(nats.producers[0].node_id, "cbm:4:events.nats_publish");
 }
+
+#[test]
+fn synthesizes_python_boto3_sqs_topics() {
+    let repo = temp_repo("python-boto3-sqs-topics");
+    std::fs::write(
+        repo.join("sqs_events.py"),
+        r#"import boto3 as aws
+
+sqs = aws.client("sqs")
+sqs_resource = aws.resource("sqs")
+
+def publish_order(event):
+    sqs.send_message(QueueUrl="https://sqs.us-east-1.amazonaws.com/123/orders-created", MessageBody=event)
+
+def consume_order():
+    return sqs.receive_message(QueueUrl="https://sqs.us-east-1.amazonaws.com/123/orders-created")
+
+def publish_dead_letter(event):
+    queue = sqs_resource.get_queue_by_name(QueueName="orders-dlq")
+    queue.send_message(MessageBody=event)
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    for (id, name, qn, lines) in [
+        (1, "publish_order", "sqs_events.publish_order", (6, 7)),
+        (2, "consume_order", "sqs_events.consume_order", (9, 10)),
+        (
+            3,
+            "publish_dead_letter",
+            "sqs_events.publish_dead_letter",
+            (12, 14),
+        ),
+    ] {
+        insert_function_node_props_at(
+            &conn,
+            id,
+            name,
+            qn,
+            "sqs_events.py",
+            lines,
+            json!({
+                "language": "python",
+            }),
+        );
+    }
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let orders = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders-created" && topic.broker == "sqs")
+        .expect("orders-created sqs topic");
+    assert_eq!(orders.producers.len(), 1);
+    assert_eq!(orders.consumers.len(), 1);
+    assert_eq!(
+        orders.producers[0].node_id,
+        "cbm:1:sqs_events.publish_order"
+    );
+    assert_eq!(
+        orders.consumers[0].node_id,
+        "cbm:2:sqs_events.consume_order"
+    );
+
+    let dlq = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders-dlq" && topic.broker == "sqs")
+        .expect("orders-dlq sqs topic");
+    assert_eq!(dlq.producers.len(), 1);
+    assert_eq!(
+        dlq.producers[0].node_id,
+        "cbm:3:sqs_events.publish_dead_letter"
+    );
+    assert_eq!(dlq.producers[0].strategy, "python-boto3-sqs-send-message");
+}

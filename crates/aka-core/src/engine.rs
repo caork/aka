@@ -3224,20 +3224,13 @@ fn route_from_segments(segments: &[&str], api_prefix: bool) -> Option<String> {
 
 pub(super) fn spring_mapping_path(decorators: &[String]) -> Option<String> {
     for decorator in decorators {
-        let Some(name_end) = decorator.find('(') else {
+        let name_end = decorator.find('(').unwrap_or(decorator.len());
+        let name = decorator[..name_end].trim().trim_start_matches('@');
+        if !is_spring_mapping_annotation(name) {
             continue;
-        };
-        let name = decorator[..name_end].trim_start_matches('@');
-        if !matches!(
-            name.rsplit('.').next().unwrap_or(name),
-            "RequestMapping"
-                | "GetMapping"
-                | "PostMapping"
-                | "PutMapping"
-                | "DeleteMapping"
-                | "PatchMapping"
-        ) {
-            continue;
+        }
+        if name_end == decorator.len() {
+            return Some("/".into());
         }
         let args_start = name_end + 1;
         let args_end = decorator.rfind(')').unwrap_or(decorator.len());
@@ -3251,6 +3244,18 @@ pub(super) fn spring_mapping_path(decorators: &[String]) -> Option<String> {
         return Some("/".into());
     }
     None
+}
+
+fn is_spring_mapping_annotation(name: &str) -> bool {
+    matches!(
+        name.rsplit('.').next().unwrap_or(name),
+        "RequestMapping"
+            | "GetMapping"
+            | "PostMapping"
+            | "PutMapping"
+            | "DeleteMapping"
+            | "PatchMapping"
+    )
 }
 
 pub(super) fn declarative_http_client_path(decorators: &[String]) -> Option<String> {
