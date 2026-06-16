@@ -138,10 +138,7 @@ fn source_annotations_before_node(text: &str, node: &SynthNode) -> Vec<String> {
     }
     let mut idx = node_line.saturating_sub(2) as usize;
     let mut annotations = Vec::new();
-    loop {
-        let Some(line) = lines.get(idx) else {
-            break;
-        };
+    while let Some(line) = lines.get(idx) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             if idx == 0 {

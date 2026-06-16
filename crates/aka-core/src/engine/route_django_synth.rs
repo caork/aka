@@ -804,7 +804,7 @@ fn drf_action_handler(node: &SynthNode) -> Option<DrfActionHandler<'_>> {
         }
         let args = text
             .find('(')
-            .and_then(|open| text.rfind(')').map(|close| (open, close)))
+            .zip(text.rfind(')'))
             .and_then(|(open, close)| (close > open).then_some(&text[open + 1..close]))
             .unwrap_or("");
         let detail = keyword_bool_arg(args, "detail").unwrap_or(false);
