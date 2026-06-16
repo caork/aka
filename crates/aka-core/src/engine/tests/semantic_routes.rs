@@ -1,4 +1,5 @@
 mod annotated;
+mod drf_actions;
 mod drf_shapes;
 mod http_consumers;
 mod python_shapes;

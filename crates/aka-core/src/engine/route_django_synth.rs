@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use super::{
-    find_call_args, read_repo_text, read_string_literal, split_top_level_commas, ProjectSourceSet,
-    RouteCandidate, SynthNode,
+    find_call_args, read_repo_text, read_string_literal, source_annotations_before_node,
+    split_top_level_commas, ProjectSourceSet, RouteCandidate, SynthNode,
 };
 
 pub(super) fn django_urlconf_routes_from_repo(
@@ -11,7 +11,7 @@ pub(super) fn django_urlconf_routes_from_repo(
     project_sources: &ProjectSourceSet,
     by_file: &BTreeMap<String, Vec<&SynthNode>>,
 ) -> BTreeMap<String, Vec<RouteCandidate>> {
-    let handlers = PythonHandlerIndex::new(by_file);
+    let handlers = PythonHandlerIndex::new(repo, by_file);
     let mut out: BTreeMap<String, Vec<RouteCandidate>> = BTreeMap::new();
     let file_paths = django_urlconf_files(repo, project_sources);
     let module_to_file: HashMap<String, String> = file_paths
@@ -630,7 +630,7 @@ struct DrfActionHandler<'a> {
 }
 
 impl<'a> PythonHandlerIndex<'a> {
-    fn new(by_file: &'a BTreeMap<String, Vec<&'a SynthNode>>) -> Self {
+    fn new(repo: &Path, by_file: &'a BTreeMap<String, Vec<&'a SynthNode>>) -> Self {
         let mut by_module_member = HashMap::new();
         let mut by_member = HashMap::new();
         let mut by_owner_method = HashMap::new();
@@ -639,6 +639,7 @@ impl<'a> PythonHandlerIndex<'a> {
             if !file_path.to_ascii_lowercase().ends_with(".py") {
                 continue;
             }
+            let text = read_repo_text(repo, file_path);
             let module_keys = python_module_keys(file_path);
             for node in nodes {
                 if !matches!(node.label.as_str(), "Function" | "Method" | "Class") {
@@ -656,7 +657,7 @@ impl<'a> PythonHandlerIndex<'a> {
                     for key in node_method_keys(node) {
                         by_owner_method.entry(key).or_insert(*node);
                     }
-                    if let Some(action) = drf_action_handler(node) {
+                    if let Some(action) = drf_action_handler(text.as_deref(), node) {
                         for owner in node_owner_keys(node) {
                             actions_by_owner
                                 .entry(owner)
@@ -796,8 +797,8 @@ fn owner_lookup_keys(owner_expr: &str) -> Vec<String> {
     keys.into_iter().collect()
 }
 
-fn drf_action_handler(node: &SynthNode) -> Option<DrfActionHandler<'_>> {
-    for decorator in &node.decorators {
+fn drf_action_handler<'a>(text: Option<&str>, node: &'a SynthNode) -> Option<DrfActionHandler<'a>> {
+    for decorator in decorators_for_node(text, node) {
         let text = decorator.trim().trim_start_matches('@');
         if !text.starts_with("action") && !text.contains(".action") {
             continue;
@@ -818,6 +819,16 @@ fn drf_action_handler(node: &SynthNode) -> Option<DrfActionHandler<'_>> {
         });
     }
     None
+}
+
+fn decorators_for_node(text: Option<&str>, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    if let Some(text) = text {
+        decorators.extend(source_annotations_before_node(text, node));
+    }
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn keyword_bool_arg(args: &str, keyword: &str) -> Option<bool> {
