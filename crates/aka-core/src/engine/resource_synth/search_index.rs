@@ -1,4 +1,4 @@
-use super::{read_string_literal, ResourceDetection};
+use super::{infra_config, read_string_literal, ResourceDetection};
 use crate::engine::{find_call_args, node_at_offset, skip_ws, split_top_level_commas, SynthNode};
 
 pub(super) fn extract_search_index_resources(
@@ -12,6 +12,30 @@ pub(super) fn extract_search_index_resources(
     if has_java_search_context(text) {
         out.extend(extract_java_search_indices(text, nodes));
     }
+    out
+}
+
+pub(super) fn extract_search_index_config_resources(text: &str) -> Vec<ResourceDetection> {
+    let mut out = Vec::new();
+    for (key, value) in infra_config::config_pairs(text) {
+        if !is_search_index_config_key(&key) {
+            continue;
+        }
+        for index in search_indices_from_config_value(&value) {
+            out.push(ResourceDetection::search_index(
+                index,
+                infra_config::config_id(&key),
+                search_index_config_strategy(&key),
+            ));
+        }
+    }
+    out.sort_by(|a, b| {
+        a.url
+            .cmp(&b.url)
+            .then_with(|| a.node_id.cmp(&b.node_id))
+            .then_with(|| a.strategy.cmp(&b.strategy))
+    });
+    out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id && a.strategy == b.strategy);
     out
 }
 
@@ -405,4 +429,75 @@ fn python_document_index_name(class_body: &str) -> Option<String> {
     let value = &after_name[eq_pos + 1..];
     let literal = first_literal_if_index(value)?;
     Some(literal)
+}
+
+fn is_search_index_config_key(key: &str) -> bool {
+    let has_search_context = key_contains_any(
+        key,
+        &[
+            "search",
+            "elastic",
+            "elasticsearch",
+            "opensearch",
+            "solr",
+            "meilisearch",
+            "meili",
+            "typesense",
+            "algolia",
+        ],
+    );
+    has_search_context
+        && (key.ends_with(".index")
+            || key.ends_with(".indices")
+            || key.ends_with(".index.name")
+            || key.ends_with(".index.names")
+            || key.ends_with(".collection")
+            || key.ends_with(".collections")
+            || key.ends_with(".core")
+            || key.ends_with(".cores"))
+}
+
+fn search_indices_from_config_value(value: &str) -> Vec<String> {
+    let cleaned = value
+        .trim()
+        .trim_matches(['"', '\'', '`'])
+        .trim_matches(['[', ']'])
+        .trim();
+    if cleaned.is_empty() || cleaned.starts_with("${") {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = cleaned
+        .split(',')
+        .map(|part| part.trim().trim_matches(['"', '\'', '`']))
+        .filter(|part| is_index_literal(part))
+        .map(ToOwned::to_owned)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn search_index_config_strategy(key: &str) -> &'static str {
+    if key.contains("opensearch") {
+        "opensearch-config-index"
+    } else if key.contains("elastic") {
+        "elasticsearch-config-index"
+    } else if key.contains("solr") {
+        "solr-config-core"
+    } else if key.contains("meilisearch") || key.contains("meili") {
+        "meilisearch-config-index"
+    } else if key.contains("typesense") {
+        "typesense-config-collection"
+    } else if key.contains("algolia") {
+        "algolia-config-index"
+    } else {
+        "search-config-index"
+    }
+}
+
+fn key_contains_any(key: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| {
+        key.split('.')
+            .any(|part| part == *needle || part.contains(needle))
+    })
 }

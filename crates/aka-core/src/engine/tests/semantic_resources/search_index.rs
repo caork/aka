@@ -2,6 +2,100 @@ use super::super::*;
 use serde_json::json;
 
 #[test]
+fn synthesizes_configured_search_index_resources() {
+    let repo = temp_repo("configured-search-index-resources");
+    std::fs::create_dir_all(repo.join("src/main/resources")).unwrap();
+    let file = "src/main/resources/application.yml";
+    std::fs::write(
+        repo.join(file),
+        r#"elasticsearch:
+  orders:
+    index: orders-v1
+opensearch:
+  indices: orders-read,orders-write
+solr:
+  collection: products
+dynamic:
+  search:
+    index: ${SEARCH_INDEX}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("settings.py"),
+        r#"MEILISEARCH_INDEX = "catalog"
+TYPESENSE_COLLECTION = "products-v2"
+ALGOLIA_INDEX_NAME = "orders_algolia"
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Config", "application.yml", file, file),
+        (1, 10),
+        json!({"language": "yaml"}),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        ("Config", "settings.py", "settings.py", "settings.py"),
+        (1, 3),
+        json!({"language": "python"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert_search_config_edge(
+        &synth,
+        "search-index:orders-v1",
+        &config_id("elasticsearch.orders.index"),
+        "elasticsearch-config-index",
+    );
+    assert_search_config_edge(
+        &synth,
+        "search-index:orders-read",
+        &config_id("opensearch.indices"),
+        "opensearch-config-index",
+    );
+    assert_search_config_edge(
+        &synth,
+        "search-index:orders-write",
+        &config_id("opensearch.indices"),
+        "opensearch-config-index",
+    );
+    assert_search_config_edge(
+        &synth,
+        "search-index:products",
+        &config_id("solr.collection"),
+        "solr-config-core",
+    );
+    assert_search_config_edge(
+        &synth,
+        "search-index:catalog",
+        &config_id("meilisearch.index"),
+        "meilisearch-config-index",
+    );
+    assert_search_config_edge(
+        &synth,
+        "search-index:products-v2",
+        &config_id("typesense.collection"),
+        "typesense-config-collection",
+    );
+    assert_search_config_edge(
+        &synth,
+        "search-index:orders_algolia",
+        &config_id("algolia.index.name"),
+        "algolia-config-index",
+    );
+    assert!(synth
+        .resources
+        .iter()
+        .all(|resource| resource.url != "search-index:${SEARCH_INDEX}"));
+}
+
+#[test]
 fn synthesizes_python_search_index_resources() {
     let repo = temp_repo("python-search-index-resources");
     std::fs::write(
@@ -80,6 +174,24 @@ def write_order(order):
                 && edge.evidence.as_ref().unwrap()["strategy"] == strategy
         }));
     }
+}
+
+fn assert_search_config_edge(synth: &SynthGraph, url: &str, source_id: &str, strategy: &str) {
+    let resource = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == url)
+        .unwrap_or_else(|| panic!("expected search config resource {url}"));
+    assert_eq!(resource.resource_type, "search-index");
+    assert!(resource.edge_recs().iter().any(|edge| {
+        edge.source_id == source_id
+            && edge.edge_type == "ACCESSES_RESOURCE"
+            && edge.evidence.as_ref().unwrap()["strategy"] == strategy
+    }));
+}
+
+fn config_id(key: &str) -> String {
+    format!("config:heuristic:{:016x}", stable_hash(key))
 }
 
 #[test]
