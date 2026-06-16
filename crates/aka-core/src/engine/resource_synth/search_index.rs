@@ -1,5 +1,5 @@
 use super::{read_string_literal, ResourceDetection};
-use crate::engine::{find_call_args, node_at_offset, split_top_level_commas, SynthNode};
+use crate::engine::{find_call_args, node_at_offset, skip_ws, split_top_level_commas, SynthNode};
 
 pub(super) fn extract_search_index_resources(
     text: &str,
@@ -60,6 +60,20 @@ fn extract_python_search_indices(text: &str, nodes: &[&SynthNode]) -> Vec<Resour
             ));
         }
     }
+    for call in find_call_args(text, "Search") {
+        let Some(node) = node_at_offset(text, nodes, call.start) else {
+            continue;
+        };
+        for index in python_index_values(call.args) {
+            out.push(ResourceDetection::search_index(
+                index,
+                node.aka_id.clone(),
+                "python-search-index-dsl-search",
+            ));
+        }
+    }
+    out.extend(extract_python_dsl_index_objects(text, nodes));
+    out.extend(extract_python_document_indices(text, nodes));
     out
 }
 
@@ -114,6 +128,18 @@ fn extract_java_search_indices(text: &str, nodes: &[&SynthNode]) -> Vec<Resource
                     strategy,
                 ));
             }
+        }
+    }
+    for call in find_call_args(text, "SearchRequest.of") {
+        let Some(node) = node_at_offset(text, nodes, call.start) else {
+            continue;
+        };
+        for index in java_index_values(call.args) {
+            out.push(ResourceDetection::search_index(
+                index,
+                node.aka_id.clone(),
+                "java-search-index-request",
+            ));
         }
     }
     out
@@ -227,4 +253,156 @@ fn is_index_literal(value: &str) -> bool {
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | ':' | '*'))
+}
+
+fn extract_python_dsl_index_objects(text: &str, nodes: &[&SynthNode]) -> Vec<ResourceDetection> {
+    let mut out = Vec::new();
+    for call in find_call_args(text, "Index") {
+        let Some(index) = split_top_level_commas(call.args)
+            .into_iter()
+            .find_map(first_literal_if_index)
+        else {
+            continue;
+        };
+        let Some(var_name) = python_assignment_lhs(text, call.start) else {
+            continue;
+        };
+        for access in python_index_object_access_offsets(text, &var_name) {
+            let Some(node) = node_at_offset(text, nodes, access) else {
+                continue;
+            };
+            out.push(ResourceDetection::search_index(
+                index.clone(),
+                node.aka_id.clone(),
+                "python-search-index-dsl-index",
+            ));
+        }
+    }
+    out
+}
+
+fn extract_python_document_indices(text: &str, nodes: &[&SynthNode]) -> Vec<ResourceDetection> {
+    let mut out = Vec::new();
+    for node in nodes
+        .iter()
+        .copied()
+        .filter(|node| node.label == "Class")
+        .filter(|node| node_contains_document_index(text, node))
+    {
+        let Some(body) = node_text(text, node) else {
+            continue;
+        };
+        let Some(index) = python_document_index_name(body) else {
+            continue;
+        };
+        out.push(ResourceDetection::search_index(
+            index,
+            node.aka_id.clone(),
+            "python-search-index-dsl-document",
+        ));
+    }
+    out
+}
+
+fn first_literal_if_index(arg: &str) -> Option<String> {
+    let trimmed = arg.trim();
+    let start = trimmed.find(['"', '\''])?;
+    let (literal, _) = read_string_literal(trimmed, start)?;
+    is_index_literal(&literal).then_some(literal)
+}
+
+fn python_assignment_lhs(text: &str, offset: usize) -> Option<String> {
+    let line_start = text[..offset].rfind('\n').map_or(0, |idx| idx + 1);
+    let prefix = &text[line_start..offset];
+    let eq = prefix.rfind('=')?;
+    if prefix[eq + 1..].trim().is_empty() {
+        let lhs = prefix[..eq].trim();
+        if is_python_identifier(lhs) {
+            return Some(lhs.to_string());
+        }
+    }
+    None
+}
+
+fn python_index_object_access_offsets(text: &str, var_name: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    let access_prefix = format!("{var_name}.");
+    while let Some(rel) = text[offset..].find(&access_prefix) {
+        let start = offset + rel;
+        let method_start = start + access_prefix.len();
+        let method_end = text[method_start..]
+            .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .map_or(text.len(), |rel| method_start + rel);
+        let method = &text[method_start..method_end];
+        let open = skip_ws(text, method_end);
+        if matches!(
+            method,
+            "create" | "delete" | "exists" | "put_mapping" | "refresh" | "save"
+        ) && text.as_bytes().get(open) == Some(&b'(')
+        {
+            out.push(start);
+        }
+        offset = method_end.max(start + access_prefix.len());
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn is_python_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn node_contains_document_index(text: &str, node: &SynthNode) -> bool {
+    let Some(body) = node_text(text, node) else {
+        return false;
+    };
+    body.contains("Document") && body.contains("class Index") && body.contains("name")
+}
+
+fn node_text<'a>(text: &'a str, node: &SynthNode) -> Option<&'a str> {
+    let start_line = node.start_line_key().max(1) as usize;
+    let end_line = node.end_line_key().max(start_line as i64) as usize;
+    if start_line > end_line {
+        return None;
+    }
+    let mut line = 1usize;
+    let mut start = 0usize;
+    let mut end = text.len();
+    for (idx, ch) in text.char_indices() {
+        if line == start_line {
+            start = idx;
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    line = 1;
+    for (idx, ch) in text.char_indices() {
+        if line > end_line {
+            end = idx;
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    Some(&text[start..end])
+}
+
+fn python_document_index_name(class_body: &str) -> Option<String> {
+    let idx = class_body.find("class Index")?;
+    let rest = &class_body[idx..];
+    let name_pos = rest.find("name")?;
+    let after_name = &rest[name_pos + "name".len()..];
+    let eq_pos = after_name.find('=')?;
+    let value = &after_name[eq_pos + 1..];
+    let literal = first_literal_if_index(value)?;
+    Some(literal)
 }

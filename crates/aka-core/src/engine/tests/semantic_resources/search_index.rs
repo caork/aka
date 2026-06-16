@@ -83,6 +83,98 @@ def write_order(order):
 }
 
 #[test]
+fn synthesizes_python_search_index_dsl_resources() {
+    let repo = temp_repo("python-search-index-dsl-resources");
+    std::fs::write(
+        repo.join("documents.py"),
+        r#"from elasticsearch_dsl import Document, Index, Search
+
+orders_admin = Index("orders-admin")
+
+class OrderDocument(Document):
+    class Index:
+        name = "orders-documents"
+
+def find_orders(customer_id):
+    return Search(index="orders-v1").query("term", customer_id=customer_id).execute()
+
+def rebuild_admin():
+    orders_admin.create()
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderDocument",
+            "documents.OrderDocument",
+            "documents.py",
+        ),
+        (5, 7),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "find_orders",
+        "documents.find_orders",
+        "documents.py",
+        (9, 10),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "rebuild_admin",
+        "documents.rebuild_admin",
+        "documents.py",
+        (12, 13),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    for (url, source_id, strategy) in [
+        (
+            "search-index:orders-documents",
+            "cbm:1:documents.OrderDocument",
+            "python-search-index-dsl-document",
+        ),
+        (
+            "search-index:orders-v1",
+            "cbm:2:documents.find_orders",
+            "python-search-index-dsl-search",
+        ),
+        (
+            "search-index:orders-admin",
+            "cbm:3:documents.rebuild_admin",
+            "python-search-index-dsl-index",
+        ),
+    ] {
+        let resource = synth
+            .resources
+            .iter()
+            .find(|resource| resource.url == url)
+            .unwrap_or_else(|| panic!("expected search index resource {url}"));
+        assert_eq!(resource.resource_type, "search-index");
+        assert!(resource.edge_recs().iter().any(|edge| {
+            edge.source_id == source_id
+                && edge.edge_type == "ACCESSES_RESOURCE"
+                && edge.evidence.as_ref().unwrap()["strategy"] == strategy
+        }));
+    }
+}
+
+#[test]
 fn synthesizes_java_search_index_resources() {
     let repo = temp_repo("java-search-index-resources");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/search")).unwrap();
@@ -172,4 +264,58 @@ class OrderSearch {
                 && edge.evidence.as_ref().unwrap()["strategy"] == strategy
         }));
     }
+}
+
+#[test]
+fn synthesizes_java_search_request_resources() {
+    let repo = temp_repo("java-search-request-resources");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/search")).unwrap();
+    let file = "src/main/java/com/example/search/OrderSearchRequests.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.search;
+
+import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch.core.SearchRequest;
+
+class OrderSearchRequests {
+    private final ElasticsearchClient client;
+
+    OrderSearchRequests(ElasticsearchClient client) {
+        this.client = client;
+    }
+
+    public Object searchOrders() throws Exception {
+        SearchRequest request = SearchRequest.of(s -> s.index("orders-request"));
+        return client.search(request, Object.class);
+    }
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "searchOrders",
+        "com.example.search.OrderSearchRequests.searchOrders",
+        file,
+        (13, 16),
+        json!({
+            "language": "java",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let resource = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "search-index:orders-request")
+        .unwrap_or_else(|| panic!("expected search index resource orders-request"));
+    assert_eq!(resource.resource_type, "search-index");
+    assert!(resource.edge_recs().iter().any(|edge| {
+        edge.source_id == "cbm:1:com.example.search.OrderSearchRequests.searchOrders"
+            && edge.edge_type == "ACCESSES_RESOURCE"
+            && edge.evidence.as_ref().unwrap()["strategy"] == "java-search-index-request"
+    }));
 }
