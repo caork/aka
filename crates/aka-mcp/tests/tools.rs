@@ -52,6 +52,68 @@ async fn list_repos_shape() {
     assert_eq!(repos[1]["source"]["url"], "https://example.com/beta.git");
 }
 
+#[test]
+fn repo_path_aliases_deserialize_for_query_tools() {
+    let q: QueryParams =
+        serde_json::from_value(serde_json::json!({"repo_path": "/work/service", "query": "Order"}))
+            .unwrap();
+    assert_eq!(q.repo.as_deref(), Some("/work/service"));
+
+    let s: SymbolParams = serde_json::from_value(
+        serde_json::json!({"workspace_path": "/work/service/src", "name": "OrderService"}),
+    )
+    .unwrap();
+    assert_eq!(s.repo.as_deref(), Some("/work/service/src"));
+    assert_eq!(s.symbol.as_deref(), Some("OrderService"));
+
+    let refs: ReferencesParams =
+        serde_json::from_value(serde_json::json!({"workspace": "/work/service", "target": "save"}))
+            .unwrap();
+    assert_eq!(refs.repo.as_deref(), Some("/work/service"));
+
+    let impact: ImpactParams =
+        serde_json::from_value(serde_json::json!({"path": "/work/service", "target": "save"}))
+            .unwrap();
+    assert_eq!(impact.repo.as_deref(), Some("/work/service"));
+
+    let code: CodeSearchParams =
+        serde_json::from_value(serde_json::json!({"repository": "/work/service", "query": "S3"}))
+            .unwrap();
+    assert_eq!(code.repo.as_deref(), Some("/work/service"));
+
+    let changes: DetectChangesParams =
+        serde_json::from_value(serde_json::json!({"repo_path": "/work/service", "scope": "all"}))
+            .unwrap();
+    assert_eq!(changes.repo.as_deref(), Some("/work/service"));
+
+    let route: RouteMapParams = serde_json::from_value(
+        serde_json::json!({"workspace_path": "/work/service", "route": "/api/orders"}),
+    )
+    .unwrap();
+    assert_eq!(route.repo.as_deref(), Some("/work/service"));
+
+    let tool: ToolMapParams =
+        serde_json::from_value(serde_json::json!({"workspace": "/work/service", "tool": "index"}))
+            .unwrap();
+    assert_eq!(tool.repo.as_deref(), Some("/work/service"));
+
+    let graphql: GraphqlMapParams =
+        serde_json::from_value(serde_json::json!({"path": "/work/service", "operation": "order"}))
+            .unwrap();
+    assert_eq!(graphql.repo.as_deref(), Some("/work/service"));
+
+    let api: ApiImpactParams = serde_json::from_value(
+        serde_json::json!({"repository": "/work/service", "route": "/api/orders"}),
+    )
+    .unwrap();
+    assert_eq!(api.repo.as_deref(), Some("/work/service"));
+
+    let augment: AugmentParams =
+        serde_json::from_value(serde_json::json!({"repo_path": "/work/service", "query": "Order"}))
+            .unwrap();
+    assert_eq!(augment.repo.as_deref(), Some("/work/service"));
+}
+
 #[tokio::test]
 async fn query_shape() {
     let res = server()

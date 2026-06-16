@@ -139,8 +139,15 @@ fn hex_value(byte: u8) -> Option<u8> {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct QueryParams {
-    /// Repository name to search in. Omit to search all indexed repositories.
-    #[serde(default)]
+    /// Repository name or local workspace path to search in. Omit to search all indexed repositories.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// Search query: symbol name, keywords, or natural language.
     pub query: String,
@@ -163,8 +170,15 @@ pub struct QueryParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SymbolParams {
-    /// Repository name. Omit to look across all indexed repositories.
-    #[serde(default)]
+    /// Repository name or local workspace path. Omit to look across all indexed repositories.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// Exact symbol name (function, class, method...). `name` is accepted for GitNexus parity.
     #[serde(default, alias = "name", alias = "target")]
@@ -182,8 +196,15 @@ pub struct SymbolParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReferencesParams {
-    /// Repository name. Omit to look across all indexed repositories.
-    #[serde(default)]
+    /// Repository name or local workspace path. Omit to look across all indexed repositories.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// Exact symbol name whose references to list. `name`/`target` are accepted for GitNexus parity.
     #[serde(default, alias = "name", alias = "target")]
@@ -204,8 +225,15 @@ pub struct ReferencesParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ImpactParams {
-    /// Repository name. Omit to look across all indexed repositories.
-    #[serde(default)]
+    /// Repository name or local workspace path. Omit to look across all indexed repositories.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// Exact symbol name to compute the blast radius for. `name`/`target` are accepted for GitNexus parity.
     #[serde(default, alias = "name", alias = "target")]
@@ -262,8 +290,15 @@ pub struct UpdateRepoParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DetectChangesParams {
-    /// Repository name. Omit only when exactly one indexed repository exists.
-    #[serde(default)]
+    /// Repository name or local workspace path. Omit only when exactly one indexed repository exists.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// What to analyze: unstaged (default), staged, all, or compare.
     #[serde(default)]
@@ -275,8 +310,15 @@ pub struct DetectChangesParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AugmentParams {
-    /// Repository name. Omit to search all indexed repositories.
-    #[serde(default)]
+    /// Repository name or local workspace path. Omit to search all indexed repositories.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// Search query, typically the symbol or text under the cursor.
     pub query: String,
@@ -284,8 +326,15 @@ pub struct AugmentParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CodeSearchParams {
-    /// Repository name to search in. Omit to search all indexed repositories.
-    #[serde(default)]
+    /// Repository name or local workspace path to search in. Omit to search all indexed repositories.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// Literal text or regex pattern to search in source code.
     pub query: String,
@@ -305,8 +354,15 @@ pub struct CodeSearchParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RouteMapParams {
-    /// Repository name. Omit when only one indexed repository exists.
-    #[serde(default)]
+    /// Repository name or local workspace path. Omit when only one indexed repository exists.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// Optional route path substring, for example /api/users.
     #[serde(default)]
@@ -315,8 +371,15 @@ pub struct RouteMapParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ToolMapParams {
-    /// Repository name. Omit when only one indexed repository exists.
-    #[serde(default)]
+    /// Repository name or local workspace path. Omit when only one indexed repository exists.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// Optional tool name substring.
     #[serde(default)]
@@ -325,8 +388,15 @@ pub struct ToolMapParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GraphqlMapParams {
-    /// Repository name. Omit when only one indexed repository exists.
-    #[serde(default)]
+    /// Repository name or local workspace path. Omit when only one indexed repository exists.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// Optional GraphQL operation substring, for example order or createOrder.
     #[serde(default)]
@@ -335,8 +405,15 @@ pub struct GraphqlMapParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ApiImpactParams {
-    /// Repository name. Omit when only one indexed repository exists.
-    #[serde(default)]
+    /// Repository name or local workspace path. Omit when only one indexed repository exists.
+    #[serde(
+        default,
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: Option<String>,
     /// Route path substring, for example /api/users.
     #[serde(default)]
