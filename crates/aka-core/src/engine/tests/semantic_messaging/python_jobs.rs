@@ -392,3 +392,160 @@ def enqueue_orders(order_id):
         edge.edge_type == "ENQUEUES_JOB" && edge.source_id == "cbm:2:huey_tasks.enqueue_orders"
     }));
 }
+
+#[test]
+fn synthesizes_python_celery_canvas_dispatches() {
+    let repo = temp_repo("python-celery-canvas-dispatches");
+    std::fs::write(
+        repo.join("tasks.py"),
+        r#"from celery import chain, chord, group, shared_task, signature
+
+@shared_task(name="orders.extract")
+def extract_orders():
+    return []
+
+@shared_task(name="orders.transform")
+def transform_orders(rows):
+    return rows
+
+@shared_task(name="orders.persist")
+def persist_orders(rows):
+    return rows
+
+@shared_task(name="orders.notify")
+def notify_orders(rows):
+    return rows
+
+def run_pipeline():
+    chain(extract_orders.s(), transform_orders.s(), persist_orders.si()).apply_async()
+    group(extract_orders.s(), signature("orders.transform")).delay()
+    chord(group(extract_orders.s(), transform_orders.s()))(persist_orders.s())
+    transform_orders.s().apply_async()
+    signature("orders.notify", kwargs={"kind": "daily"}).apply_async()
+    sig = signature("orders.persist")
+    return sig
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    for (id, name, qn, lines, decorator) in [
+        (
+            1,
+            "extract_orders",
+            "tasks.extract_orders",
+            (4, 5),
+            "@shared_task(name=\"orders.extract\")",
+        ),
+        (
+            2,
+            "transform_orders",
+            "tasks.transform_orders",
+            (8, 9),
+            "@shared_task(name=\"orders.transform\")",
+        ),
+        (
+            3,
+            "persist_orders",
+            "tasks.persist_orders",
+            (12, 13),
+            "@shared_task(name=\"orders.persist\")",
+        ),
+        (
+            4,
+            "notify_orders",
+            "tasks.notify_orders",
+            (16, 17),
+            "@shared_task(name=\"orders.notify\")",
+        ),
+    ] {
+        insert_function_node_props_at(
+            &conn,
+            id,
+            name,
+            qn,
+            "tasks.py",
+            lines,
+            json!({
+                "decorators": [decorator],
+                "language": "python",
+            }),
+        );
+    }
+    insert_function_node_props_at(
+        &conn,
+        5,
+        "run_pipeline",
+        "tasks.run_pipeline",
+        "tasks.py",
+        (19, 24),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    for (name, expected) in [
+        (
+            "orders.extract",
+            vec![
+                "python-celery-canvas-chain",
+                "python-celery-canvas-chord",
+                "python-celery-canvas-group",
+            ],
+        ),
+        (
+            "orders.transform",
+            vec![
+                "python-celery-canvas-chain",
+                "python-celery-canvas-chord",
+                "python-celery-canvas-group",
+                "python-celery-signature-method-dispatch",
+            ],
+        ),
+        (
+            "orders.persist",
+            vec!["python-celery-canvas-chain", "python-celery-canvas-chord"],
+        ),
+        ("orders.notify", vec!["python-celery-signature-dispatch"]),
+    ] {
+        let job = synth
+            .jobs
+            .iter()
+            .find(|job| job.name == name)
+            .unwrap_or_else(|| panic!("expected celery job {name}"));
+        let edge_recs = job.edge_recs();
+        let strategies: BTreeSet<_> = edge_recs
+            .iter()
+            .filter(|edge| {
+                edge.edge_type == "ENQUEUES_JOB" && edge.source_id == "cbm:5:tasks.run_pipeline"
+            })
+            .filter_map(|edge| {
+                edge.evidence
+                    .as_ref()
+                    .and_then(|value| value.get("strategy"))
+                    .and_then(|value| value.as_str())
+            })
+            .collect();
+        for strategy in expected {
+            assert!(
+                strategies.contains(strategy),
+                "expected {name} to include {strategy}, got {strategies:?}"
+            );
+        }
+    }
+    let persist = synth
+        .jobs
+        .iter()
+        .find(|job| job.name == "orders.persist")
+        .expect("persist job");
+    assert!(!persist.edge_recs().iter().any(|edge| {
+        edge.edge_type == "ENQUEUES_JOB"
+            && edge
+                .evidence
+                .as_ref()
+                .and_then(|value| value.get("strategy"))
+                .and_then(|value| value.as_str())
+                == Some("python-celery-signature-dispatch")
+    }));
+}

@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use super::super::{
-    find_call_args, node_at_offset, project_code_nodes_by_file, read_repo_text,
-    split_top_level_commas, ProjectSourceSet, SynthNode,
+    find_call_args, find_matching_paren, node_at_offset, project_code_nodes_by_file,
+    read_repo_text, split_top_level_commas, ProjectSourceSet, SynthNode,
 };
 use super::detect::{
     first_callable_name, first_string_literal, is_background_task_receiver, is_python_identifier,
@@ -221,10 +221,176 @@ fn detect_named_job_dispatches(
             }
         }
     }
+    out.extend(detect_python_celery_canvas_dispatches(
+        text, file_path, nodes, named_jobs,
+    ));
     out.extend(detect_python_background_task_dispatches(
         text, file_path, nodes, named_jobs,
     ));
     out
+}
+
+fn detect_python_celery_canvas_dispatches(
+    text: &str,
+    file_path: &str,
+    nodes: &[&SynthNode],
+    named_jobs: &BTreeMap<String, usize>,
+) -> Vec<JobTriggerDetection> {
+    let mut out = Vec::new();
+    for (callee, strategy) in [
+        ("chain", "python-celery-canvas-chain"),
+        ("group", "python-celery-canvas-group"),
+        ("chord", "python-celery-canvas-chord"),
+    ] {
+        for call in find_call_args(text, callee) {
+            if !call_result_is_dispatched(text, call.start, callee) {
+                continue;
+            }
+            let Some(source) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            for name in celery_canvas_call_signature_names(text, call.start, callee, call.args) {
+                if let Some(job_index) = named_jobs.get(&name) {
+                    out.push(JobTriggerDetection {
+                        job_index: *job_index,
+                        node_id: source.aka_id.clone(),
+                        file_path: file_path.to_string(),
+                        strategy: strategy.into(),
+                    });
+                }
+            }
+        }
+    }
+    for callee in ["signature", ".signature", "subtask", ".subtask"] {
+        for call in find_call_args(text, callee) {
+            if !call_result_is_dispatched(text, call.start, callee) {
+                continue;
+            }
+            let Some(source) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            if let Some(name) = first_string_literal(call.args) {
+                if let Some(job_index) = named_jobs.get(&name) {
+                    out.push(JobTriggerDetection {
+                        job_index: *job_index,
+                        node_id: source.aka_id.clone(),
+                        file_path: file_path.to_string(),
+                        strategy: "python-celery-signature-dispatch".into(),
+                    });
+                }
+            }
+        }
+    }
+    out.extend(detect_python_celery_signature_method_dispatches(
+        text, file_path, nodes, named_jobs,
+    ));
+    out
+}
+
+fn celery_canvas_call_signature_names(
+    text: &str,
+    call_start: usize,
+    callee: &str,
+    args: &str,
+) -> Vec<String> {
+    let mut out = celery_signature_names(args);
+    if callee == "chord" {
+        if let Some(callback_args) = chained_call_args_after(text, call_start, callee) {
+            out.extend(celery_signature_names(callback_args));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn detect_python_celery_signature_method_dispatches(
+    text: &str,
+    file_path: &str,
+    nodes: &[&SynthNode],
+    named_jobs: &BTreeMap<String, usize>,
+) -> Vec<JobTriggerDetection> {
+    let mut out = Vec::new();
+    for callee in [".s", ".si"] {
+        for call in find_call_args(text, callee) {
+            if !call_result_is_dispatched(text, call.start, callee) {
+                continue;
+            }
+            let Some(source) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            let Some(name) = receiver_ident_before(text, call.start) else {
+                continue;
+            };
+            if let Some(job_index) = named_jobs.get(&name) {
+                out.push(JobTriggerDetection {
+                    job_index: *job_index,
+                    node_id: source.aka_id.clone(),
+                    file_path: file_path.to_string(),
+                    strategy: "python-celery-signature-method-dispatch".into(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn celery_signature_names(expr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for callee in [".s", ".si"] {
+        for call in find_call_args(expr, callee) {
+            if let Some(receiver) = receiver_ident_before(expr, call.start) {
+                out.push(receiver);
+            }
+        }
+    }
+    for callee in ["signature", ".signature", "subtask", ".subtask"] {
+        for call in find_call_args(expr, callee) {
+            if let Some(name) = first_string_literal(call.args) {
+                out.push(name);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn call_result_is_dispatched(text: &str, call_start: usize, callee: &str) -> bool {
+    let Some(close) = call_close(text, call_start, callee) else {
+        return false;
+    };
+    let after = text.get(skip_ascii_ws(text, close + 1)..).unwrap_or("");
+    if method_call_prefix(after, ".apply_async") || method_call_prefix(after, ".delay") {
+        return true;
+    }
+    callee == "chord" && after.starts_with('(')
+}
+
+fn chained_call_args_after<'a>(text: &'a str, call_start: usize, callee: &str) -> Option<&'a str> {
+    let close = call_close(text, call_start, callee)?;
+    let open = skip_ascii_ws(text, close + 1);
+    if text.as_bytes().get(open) != Some(&b'(') {
+        return None;
+    }
+    let close = find_matching_paren(text, open)?;
+    Some(&text[open + 1..close])
+}
+
+fn method_call_prefix(text: &str, method: &str) -> bool {
+    let Some(rest) = text.strip_prefix(method) else {
+        return false;
+    };
+    rest.as_bytes()
+        .first()
+        .is_some_and(|byte| *byte == b'(' || byte.is_ascii_whitespace())
+}
+
+fn call_close(text: &str, call_start: usize, callee: &str) -> Option<usize> {
+    let open = skip_ascii_ws(text, call_start + callee.len());
+    (text.as_bytes().get(open) == Some(&b'('))
+        .then_some(open)
+        .and_then(|open| find_matching_paren(text, open))
 }
 
 fn detect_python_background_task_dispatches(
@@ -314,4 +480,15 @@ fn receiver_ident_before(text: &str, dot_start: usize) -> Option<String> {
     }
     let ident = before[start..end].trim();
     is_python_identifier(ident).then(|| ident.to_string())
+}
+
+fn skip_ascii_ws(text: &str, mut idx: usize) -> usize {
+    while text
+        .as_bytes()
+        .get(idx)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        idx += 1;
+    }
+    idx
 }
