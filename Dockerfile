@@ -40,7 +40,7 @@ RUN cargo build --release -p aka-cli --target x86_64-unknown-linux-gnu && \
 # ---------- Stage 2: native CBM engine ----------
 FROM debian:bookworm AS engine-builder
 ARG CBM_REPO=https://github.com/caork/codebase-memory-mcp.git
-ARG CBM_REF=74f9a856e6be14a43305b721c9af742a728a476f
+ARG CBM_REF=133958e20a9bff0301d15dc12740361461bbdecb
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates git build-essential pkg-config zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*

@@ -23,7 +23,7 @@ permissions:
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/aka
   CBM_REPO: https://github.com/caork/codebase-memory-mcp.git
-  CBM_REF: 74f9a856e6be14a43305b721c9af742a728a476f
+  CBM_REF: 133958e20a9bff0301d15dc12740361461bbdecb
 
 jobs:
   macos-desktop:
