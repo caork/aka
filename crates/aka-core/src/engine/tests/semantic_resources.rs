@@ -391,7 +391,7 @@ def load_manifest():
     assert_eq!(receipt_edge.edge_type, "ACCESSES_RESOURCE");
     assert_eq!(
         receipt_edge.evidence.as_ref().unwrap()["strategy"],
-        "python-gcs-blob"
+        "python-gcs-upload"
     );
 
     assert!(synth.resources.iter().any(|resource| {

@@ -23,7 +23,7 @@ pub(super) fn extract_python_gcs_resources(
         let Some(bucket) = gcs_bucket_before_blob(text, call.start) else {
             continue;
         };
-        let strategy = gcs_strategy_after_blob(text, call.start);
+        let strategy = gcs_strategy_for_blob(text, node, call.start);
         out.push(ResourceDetection::gcs(
             gcs_url(&bucket, Some(&object)),
             node.aka_id.clone(),
@@ -84,6 +84,21 @@ fn bucket_literal_from_get_bucket(text: &str) -> Option<String> {
     None
 }
 
+fn gcs_strategy_for_blob(text: &str, node: &SynthNode, blob_start: usize) -> &'static str {
+    let inline = gcs_strategy_after_blob(text, blob_start);
+    if inline != "python-gcs-blob" {
+        return inline;
+    }
+    let Some(var_name) = assigned_var_before_blob(text, blob_start) else {
+        return inline;
+    };
+    let (body_start, body_end) = source_window_for_node(text, node);
+    if blob_start < body_start || blob_start > body_end {
+        return inline;
+    }
+    gcs_strategy_for_blob_var(&text[body_start..body_end], &var_name).unwrap_or(inline)
+}
+
 fn gcs_strategy_after_blob(text: &str, blob_start: usize) -> &'static str {
     let end = text[blob_start..]
         .find('\n')
@@ -101,6 +116,58 @@ fn gcs_strategy_after_blob(text: &str, blob_start: usize) -> &'static str {
     } else {
         "python-gcs-blob"
     }
+}
+
+fn assigned_var_before_blob(text: &str, blob_start: usize) -> Option<String> {
+    let line_start = text[..blob_start].rfind('\n').map_or(0, |idx| idx + 1);
+    let line_prefix = &text[line_start..blob_start];
+    let (left, _) = line_prefix.split_once('=')?;
+    let var = left.trim();
+    is_python_ident(var).then(|| var.to_string())
+}
+
+fn gcs_strategy_for_blob_var(text: &str, var_name: &str) -> Option<&'static str> {
+    for (method, strategy) in [
+        ("upload_from", "python-gcs-upload"),
+        ("download_", "python-gcs-download"),
+        ("delete", "python-gcs-delete"),
+        ("exists", "python-gcs-head"),
+        ("open", "python-gcs-download"),
+    ] {
+        let needle = format!("{var_name}.{method}");
+        if text.contains(&needle) {
+            return Some(strategy);
+        }
+    }
+    None
+}
+
+fn source_window_for_node(text: &str, node: &SynthNode) -> (usize, usize) {
+    let start_line = node.start_line_key().max(1);
+    let end_line = node.end_line_key().max(start_line);
+    let mut line = 1i64;
+    let mut start = 0usize;
+    let mut end = text.len();
+    for (idx, ch) in text.char_indices() {
+        if line == start_line {
+            start = idx;
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    line = 1;
+    for (idx, ch) in text.char_indices() {
+        if line > end_line {
+            end = idx;
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    (start.min(text.len()), end.min(text.len()))
 }
 
 fn python_keyword_arg(args: &str, key: &str) -> Option<String> {
@@ -135,4 +202,13 @@ fn gcs_url(bucket: &str, object: Option<&str>) -> String {
         ),
         None => format!("gs://{}", bucket.trim_matches('/')),
     }
+}
+
+fn is_python_ident(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
