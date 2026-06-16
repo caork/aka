@@ -14,6 +14,8 @@ mod java_s3;
 use java_s3::extract_java_aws_s3_resources;
 mod java_azure_blob;
 use java_azure_blob::extract_java_azure_blob_resources;
+mod feature_flag;
+use feature_flag::extract_feature_flag_resources;
 mod python_gcs;
 use python_gcs::extract_python_gcs_resources;
 mod python_azure_blob;
@@ -194,6 +196,15 @@ impl ResourceDetection {
             strategy: strategy.into(),
         }
     }
+
+    fn feature_flag(flag: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url: format!("feature-flag:{flag}"),
+            resource_type: "feature-flag".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
 }
 
 fn extract_resource_detections(
@@ -249,6 +260,7 @@ fn extract_resource_detections(
     out.extend(extract_java_aws_s3_resources(text, nodes));
     out.extend(extract_java_azure_blob_resources(text, nodes));
     out.extend(extract_search_index_resources(text, nodes));
+    out.extend(extract_feature_flag_resources(text, nodes));
     out.extend(extract_contextual_http_client_calls(
         text,
         nodes,
