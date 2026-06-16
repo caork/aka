@@ -7,6 +7,8 @@ use super::{
     split_top_level_commas, stable_hash, EdgeRec, SynthNode,
 };
 
+mod java_mongo_template;
+
 #[derive(Debug, Clone)]
 pub(super) struct TableAccessEntity {
     pub(super) entity_id: String,
@@ -29,7 +31,7 @@ pub(super) struct TableAccessRef {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum TableAccessKind {
+pub(super) enum TableAccessKind {
     Read,
     Write,
 }
@@ -51,11 +53,11 @@ impl TableAccessKind {
 }
 
 #[derive(Debug, Clone)]
-struct TableAccessDetection {
-    table: TableAccessRef,
-    node_id: String,
-    kind: TableAccessKind,
-    strategy: String,
+pub(super) struct TableAccessDetection {
+    pub(super) table: TableAccessRef,
+    pub(super) node_id: String,
+    pub(super) kind: TableAccessKind,
+    pub(super) strategy: String,
 }
 
 pub(super) fn detect_table_access_edges(
@@ -270,6 +272,9 @@ fn detect_orm_table_accesses(
         text,
         nodes,
         repositories,
+    ));
+    out.extend(java_mongo_template::detect_table_accesses(
+        text, nodes, entities,
     ));
     out
 }
