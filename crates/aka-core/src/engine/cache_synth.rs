@@ -5,8 +5,8 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_call_args, find_matching_paren, node_at_offset, pick_handler_node,
-    project_code_nodes_by_file, read_repo_text, split_top_level_commas, stable_hash, EdgeRec,
-    NodeRec, ProjectSourceSet, SynthNode,
+    project_code_nodes_by_file, read_repo_text, source_annotations_before_node,
+    split_top_level_commas, stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -209,8 +209,8 @@ fn extract_jvm_cache_detections(text: &str, nodes: &[&SynthNode]) -> Vec<CacheDe
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
     {
-        for decorator in &node.decorators {
-            let Some(name) = decorator_name(decorator) else {
+        for decorator in decorators_for_node(text, node) {
+            let Some(name) = decorator_name(&decorator) else {
                 continue;
             };
             let (kind, strategy) = match name {
@@ -220,7 +220,7 @@ fn extract_jvm_cache_detections(text: &str, nodes: &[&SynthNode]) -> Vec<CacheDe
                 _ => continue,
             };
             for cache_name in
-                annotation_string_values(decorator, &["cacheNames", "value", "cacheName"])
+                annotation_string_values(&decorator, &["cacheNames", "value", "cacheName"])
             {
                 out.push(CacheDetection {
                     name: cache_name,
@@ -260,6 +260,14 @@ fn extract_jvm_cache_detections(text: &str, nodes: &[&SynthNode]) -> Vec<CacheDe
         0,
     ));
     out
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn extract_python_cache_detections(text: &str, nodes: &[&SynthNode]) -> Vec<CacheDetection> {
