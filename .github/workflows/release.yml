@@ -223,6 +223,11 @@ jobs:
       - name: Package client integrations
         run: scripts/package-release.sh --version "${{ steps.ver.outputs.version }}" --clients-only
 
+      - name: Smoke client/plugin packages
+        env:
+          AKA_CLIENT_SMOKE_VERSION: ${{ steps.ver.outputs.version }}
+        run: scripts/smoke-client-packages.sh
+
       - name: Upload to release
         if: github.ref_type == 'tag'
         env:

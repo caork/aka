@@ -55,3 +55,15 @@ jobs:
       - name: Build desktop web
         working-directory: apps/desktop
         run: npm run build
+
+  client-packages:
+    name: Client package smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y zip unzip
+
+      - name: Smoke client/plugin packages
+        run: scripts/smoke-client-packages.sh

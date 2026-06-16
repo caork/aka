@@ -83,7 +83,7 @@ detect_bin() {
       return
     fi
   done
-  die "找不到可执行的 aka/AKA。请用 --bin 指向桌面包里的 AKA 可执行文件，或源码开发时先 cargo build -p aka-cli。"
+  die "找不到可执行的 aka/AKA。请用 --bin 指向桌面包里的 AKA 可执行文件；源码开发时可先 cargo build -p aka-cli 做内部 runtime crate 编译验证。"
 }
 
 if [ "$USE_STDIO" -eq 1 ] && [ "$CLIENT" != "opencode" ]; then
