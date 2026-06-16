@@ -54,7 +54,7 @@ jobs:
       - name: Package macOS desktop GUI
         env:
           AKA_MACOS_SIGN: auto
-          AKA_TAURI_UPDATER: ${{ github.ref_type == 'tag' && 'required' || 'auto' }}
+          AKA_TAURI_UPDATER: auto
           AKA_UPDATER_ENDPOINT: https://github.com/caork/aka/releases/latest/download/latest.json
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -147,7 +147,7 @@ jobs:
         shell: bash
         env:
           AKA_CBM_BIN_WIN_X64: ${{ steps.cbm.outputs.bin }}
-          AKA_TAURI_UPDATER: ${{ github.ref_type == 'tag' && 'required' || 'auto' }}
+          AKA_TAURI_UPDATER: auto
           AKA_UPDATER_ENDPOINT: https://github.com/caork/aka/releases/latest/download/latest.json
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -314,6 +314,6 @@ jobs:
             --tag "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --dir dist \
-            --require-updater true \
+            --require-updater false \
             --out dist/latest.json
           gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS dist/latest.json --clobber
