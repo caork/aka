@@ -74,6 +74,114 @@ def load_manifest():
 }
 
 #[test]
+fn synthesizes_python_minio_s3_resources() {
+    let repo = temp_repo("python-minio-s3-resources");
+    std::fs::write(
+        repo.join("minio_storage.py"),
+        r#"from minio import Minio
+
+client = Minio("object-store.internal")
+
+def store_receipt(order_id, path):
+    client.fput_object("order-artifacts", f"receipts/{order_id}.json", path)
+
+def load_manifest():
+    return client.get_object(bucket_name="order-artifacts", object_name="manifests/latest.json")
+
+def delete_legacy():
+    client.remove_object("order-artifacts", "legacy/old.json")
+
+def check_latest():
+    return client.stat_object("order-artifacts", "manifests/latest.json")
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "store_receipt",
+        "minio_storage.store_receipt",
+        "minio_storage.py",
+        (5, 6),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "load_manifest",
+        "minio_storage.load_manifest",
+        "minio_storage.py",
+        (8, 9),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "delete_legacy",
+        "minio_storage.delete_legacy",
+        "minio_storage.py",
+        (11, 12),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_function_node_props_at(
+        &conn,
+        4,
+        "check_latest",
+        "minio_storage.check_latest",
+        "minio_storage.py",
+        (14, 15),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let receipt = synth
+        .resources
+        .iter()
+        .find(|resource| resource.url == "s3://order-artifacts/receipts/{param}.json")
+        .expect("MinIO receipt resource");
+    assert_eq!(receipt.resource_type, "s3");
+    let receipt_edge = receipt
+        .edge_recs()
+        .into_iter()
+        .find(|edge| edge.source_id == "cbm:1:minio_storage.store_receipt")
+        .expect("MinIO put edge");
+    assert_eq!(receipt_edge.edge_type, "ACCESSES_RESOURCE");
+    assert_eq!(
+        receipt_edge.evidence.as_ref().unwrap()["strategy"],
+        "python-minio-put-object"
+    );
+
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "s3://order-artifacts/manifests/latest.json"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.source_id == "cbm:2:minio_storage.load_manifest"
+                    && edge.evidence.as_ref().unwrap()["strategy"] == "python-minio-get-object"
+            })
+            && resource.edge_recs().iter().any(|edge| {
+                edge.source_id == "cbm:4:minio_storage.check_latest"
+                    && edge.evidence.as_ref().unwrap()["strategy"] == "python-minio-head-object"
+            })
+    }));
+    assert!(synth.resources.iter().any(|resource| {
+        resource.url == "s3://order-artifacts/legacy/old.json"
+            && resource.edge_recs().iter().any(|edge| {
+                edge.source_id == "cbm:3:minio_storage.delete_legacy"
+                    && edge.evidence.as_ref().unwrap()["strategy"] == "python-minio-delete-object"
+            })
+    }));
+}
+
+#[test]
 fn synthesizes_python_gcs_resources() {
     let repo = temp_repo("python-gcs-resources");
     std::fs::write(

@@ -231,6 +231,7 @@ fn extract_resource_detections(
     out.extend(extract_python_requests_base_url_session_calls(text, nodes));
     out.extend(extract_python_urllib_calls(text, nodes));
     out.extend(extract_python_boto3_s3_resources(text, nodes));
+    out.extend(extract_python_minio_s3_resources(text, nodes));
     out.extend(extract_python_gcs_resources(text, nodes));
     out.extend(extract_python_azure_blob_resources(text, nodes));
     out.extend(extract_java_aws_s3_resources(text, nodes));
@@ -461,6 +462,47 @@ fn extract_python_boto3_s3_resources(text: &str, nodes: &[&SynthNode]) -> Vec<Re
     out.sort_by(|a, b| a.url.cmp(&b.url).then_with(|| a.node_id.cmp(&b.node_id)));
     out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id && a.strategy == b.strategy);
     out
+}
+
+fn extract_python_minio_s3_resources(text: &str, nodes: &[&SynthNode]) -> Vec<ResourceDetection> {
+    if !(text.contains("Minio") || text.contains("minio")) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (callee, strategy) in [
+        (".put_object", "python-minio-put-object"),
+        (".fput_object", "python-minio-put-object"),
+        (".get_object", "python-minio-get-object"),
+        (".fget_object", "python-minio-get-object"),
+        (".remove_object", "python-minio-delete-object"),
+        (".stat_object", "python-minio-head-object"),
+    ] {
+        for call in find_call_args(text, callee) {
+            let Some(node) = node_at_offset(text, nodes, call.start) else {
+                continue;
+            };
+            let Some((bucket, key)) = minio_bucket_key_from_args(call.args) else {
+                continue;
+            };
+            out.push(ResourceDetection::s3(
+                s3_url(&bucket, key.as_deref()),
+                node.aka_id.clone(),
+                strategy,
+            ));
+        }
+    }
+    out.sort_by(|a, b| a.url.cmp(&b.url).then_with(|| a.node_id.cmp(&b.node_id)));
+    out.dedup_by(|a, b| a.url == b.url && a.node_id == b.node_id && a.strategy == b.strategy);
+    out
+}
+
+fn minio_bucket_key_from_args(args: &str) -> Option<(String, Option<String>)> {
+    let bucket = keyword_literal(args, "bucket_name").or_else(|| positional_literal(args, 0))?;
+    let key = keyword_literal(args, "object_name").or_else(|| positional_literal(args, 1));
+    Some((
+        mask_dynamic_url(&bucket),
+        key.map(|value| mask_dynamic_url(&value)),
+    ))
 }
 
 fn s3_bucket_key_from_args(
