@@ -290,9 +290,7 @@ fn project_jvm_source_files<'a>(
     repo: &'a Path,
     project_sources: &'a ProjectSourceSet,
 ) -> impl Iterator<Item = &'a str> + 'a {
-    project_sources
-        .project_files(repo)
-        .filter(|path| is_jvm_source_path(path))
+    project_sources.project_jvm_source_files(repo)
 }
 
 #[derive(Debug, Clone)]
@@ -581,15 +579,6 @@ fn spring_runner_bean_method_candidates(text: &str) -> Vec<SpringRunnerCandidate
 fn declaration_mentions_runner(declaration: &str) -> bool {
     declaration.contains("implements")
         && (declaration.contains("CommandLineRunner") || declaration.contains("ApplicationRunner"))
-}
-
-fn is_jvm_source_path(path: &str) -> bool {
-    matches!(
-        Path::new(&path.to_ascii_lowercase())
-            .extension()
-            .and_then(|ext| ext.to_str()),
-        Some("java" | "kt" | "kts" | "scala" | "groovy")
-    )
 }
 
 fn java_package_name(text: &str) -> Option<String> {

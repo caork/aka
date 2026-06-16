@@ -395,74 +395,14 @@ fn is_django_urlconf_path(path: &str) -> bool {
 }
 
 fn django_urlconf_files(repo: &Path, project_sources: &ProjectSourceSet) -> Vec<String> {
-    let mut out: Vec<String> = if project_sources.has_git_listing() {
-        project_sources
-            .iter()
-            .filter(|path| is_django_urlconf_path(path))
-            .map(str::to_string)
-            .collect()
-    } else {
-        let mut files = Vec::new();
-        collect_django_urlconf_files(repo, repo, project_sources, &mut files);
-        files
-    };
+    let mut out: Vec<String> = project_sources
+        .project_python_source_files(repo)
+        .filter(|path| is_django_urlconf_path(path))
+        .map(str::to_string)
+        .collect();
     out.sort();
     out.dedup();
     out
-}
-
-fn collect_django_urlconf_files(
-    repo: &Path,
-    dir: &Path,
-    project_sources: &ProjectSourceSet,
-    out: &mut Vec<String>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
-            continue;
-        };
-        if file_type.is_dir() {
-            if is_urlconf_discovery_skip_dir(name) {
-                continue;
-            }
-            collect_django_urlconf_files(repo, &path, project_sources, out);
-        } else if file_type.is_file() {
-            let Ok(rel) = path.strip_prefix(repo) else {
-                continue;
-            };
-            let rel = rel.to_string_lossy().replace('\\', "/");
-            if is_django_urlconf_path(&rel) && project_sources.contains_project_file(repo, &rel) {
-                out.push(rel);
-            }
-        }
-    }
-}
-
-fn is_urlconf_discovery_skip_dir(name: &str) -> bool {
-    matches!(
-        name,
-        ".git"
-            | ".hg"
-            | ".svn"
-            | "node_modules"
-            | "vendor"
-            | "vendors"
-            | "target"
-            | "build"
-            | "dist"
-            | ".venv"
-            | "venv"
-            | "__pycache__"
-            | ".idea"
-            | ".vscode"
-    )
 }
 
 fn is_django_urlconf_text(text: &str) -> bool {

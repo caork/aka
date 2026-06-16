@@ -1288,6 +1288,91 @@ def legacy_order(request, id):
 }
 
 #[test]
+fn django_urlconf_routes_use_project_sources_and_exclude_configured_tests() {
+    let repo = temp_repo("django-urlconf-project-sources");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("orders")).unwrap();
+    std::fs::create_dir_all(repo.join("tests")).unwrap();
+    std::fs::write(
+        repo.join("pyproject.toml"),
+        "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("orders/urls.py"),
+        r#"from django.urls import path
+from . import views
+
+urlpatterns = [
+    path("orders/<int:id>/", views.get_order, name="order-detail"),
+]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("tests/urls.py"),
+        r#"from django.urls import path
+from orders import views
+
+urlpatterns = [
+    path("fixture-orders/<int:id>/", views.fixture_order, name="fixture-order"),
+]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("orders/views.py"),
+        r#"def get_order(request, id):
+    return {"id": id}
+
+def fixture_order(request, id):
+    return {"id": id}
+"#,
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        &[
+            "add",
+            "pyproject.toml",
+            "orders/urls.py",
+            "tests/urls.py",
+            "orders/views.py",
+        ],
+    );
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "get_order",
+        "orders.views.get_order",
+        "orders/views.py",
+        (1, 2),
+        json!({"language": "python"}),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "fixture_order",
+        "orders.views.fixture_order",
+        "orders/views.py",
+        (4, 5),
+        json!({"language": "python"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth
+        .routes
+        .iter()
+        .any(|route| route.route == "/orders/{id}"));
+    assert!(synth
+        .routes
+        .iter()
+        .all(|route| route.route != "/fixture-orders/{id}"));
+}
+
+#[test]
 fn synthesizes_django_include_urlconf_prefixes() {
     let repo = temp_repo("django-include-urlconf-routes");
     std::fs::create_dir_all(repo.join("project")).unwrap();

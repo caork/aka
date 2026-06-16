@@ -682,6 +682,107 @@ class OrderHandler {
 }
 
 #[test]
+fn spring_functional_routes_use_project_sources_and_exclude_configured_tests() {
+    let repo = temp_repo("spring-functional-project-sources");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    std::fs::create_dir_all(repo.join("src/fixture/java/com/example/orders")).unwrap();
+    std::fs::write(
+        repo.join("pom.xml"),
+        r#"<project>
+  <build>
+    <testSourceDirectory>src/fixture/java</testSourceDirectory>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    let main_routes = "src/main/java/com/example/orders/OrderRoutes.java";
+    let fixture_routes = "src/fixture/java/com/example/orders/FixtureRoutes.java";
+    let handler_file = "src/main/java/com/example/orders/OrderHandler.java";
+    std::fs::write(
+        repo.join(main_routes),
+        r#"package com.example.orders;
+
+import static org.springframework.web.reactive.function.server.RequestPredicates.GET;
+import static org.springframework.web.reactive.function.server.RouterFunctions.route;
+
+class OrderRoutes {
+    RouterFunction routes(OrderHandler handler) {
+        return route(GET("/orders/{id}"), handler::getOrder);
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(fixture_routes),
+        r#"package com.example.orders;
+
+import static org.springframework.web.reactive.function.server.RequestPredicates.GET;
+import static org.springframework.web.reactive.function.server.RouterFunctions.route;
+
+class FixtureRoutes {
+    RouterFunction routes(OrderHandler handler) {
+        return route(GET("/fixture-orders/{id}"), handler::fixtureOrder);
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(handler_file),
+        r#"package com.example.orders;
+
+class OrderHandler {
+    ServerResponse getOrder(ServerRequest request) {
+        return ServerResponse.ok().build();
+    }
+
+    ServerResponse fixtureOrder(ServerRequest request) {
+        return ServerResponse.ok().build();
+    }
+}
+"#,
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        &["add", "pom.xml", main_routes, fixture_routes, handler_file],
+    );
+
+    let conn = test_conn();
+    insert_node_props(
+        &conn,
+        1,
+        "Method",
+        "getOrder",
+        "com.example.orders.OrderHandler.getOrder",
+        handler_file,
+        json!({"language": "java"}),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Method",
+        "fixtureOrder",
+        "com.example.orders.OrderHandler.fixtureOrder",
+        handler_file,
+        json!({"language": "java"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(synth
+        .routes
+        .iter()
+        .any(|route| route.route == "/orders/{id}"));
+    assert!(synth
+        .routes
+        .iter()
+        .all(|route| route.route != "/fixture-orders/{id}"));
+}
+
+#[test]
 fn synthesizes_spring_router_function_builder_routes() {
     let repo = temp_repo("spring-router-builder-routes");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();

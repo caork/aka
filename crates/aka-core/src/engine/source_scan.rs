@@ -5,6 +5,11 @@ use std::process::Command as GitCommand;
 use super::build_config_scan::discover_project_test_roots;
 use super::SynthNode;
 
+pub(super) const JVM_SOURCE_EXTENSIONS: &[&str] = &["java", "kt", "kts", "scala", "groovy"];
+pub(super) const PYTHON_SOURCE_EXTENSIONS: &[&str] = &["py"];
+pub(super) const BUSINESS_SOURCE_EXTENSIONS: &[&str] =
+    &["java", "kt", "kts", "scala", "groovy", "py"];
+
 #[derive(Debug, Clone)]
 pub(super) struct ProjectSourceSet {
     files: BTreeSet<String>,
@@ -79,6 +84,20 @@ impl ProjectSourceSet {
                 .and_then(|ext| ext.to_str())
                 .is_some_and(|ext| extensions.contains(&ext))
         })
+    }
+
+    pub(super) fn project_jvm_source_files<'a>(
+        &'a self,
+        repo: &'a Path,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.project_files_with_extensions(repo, JVM_SOURCE_EXTENSIONS)
+    }
+
+    pub(super) fn project_python_source_files<'a>(
+        &'a self,
+        repo: &'a Path,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.project_files_with_extensions(repo, PYTHON_SOURCE_EXTENSIONS)
     }
 
     pub(super) fn has_git_listing(&self) -> bool {
@@ -367,12 +386,10 @@ pub(super) fn project_code_nodes_by_file<'a>(
 }
 
 pub(super) fn is_project_code_source_path(file_path: &str) -> bool {
-    matches!(
-        Path::new(&file_path.to_ascii_lowercase())
-            .extension()
-            .and_then(|ext| ext.to_str()),
-        Some("java" | "kt" | "kts" | "scala" | "groovy" | "py")
-    )
+    Path::new(&file_path.to_ascii_lowercase())
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| BUSINESS_SOURCE_EXTENSIONS.contains(&ext))
 }
 
 pub(super) fn is_business_language(language: &str) -> bool {
