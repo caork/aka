@@ -582,11 +582,12 @@ fn warn_missing_source_extensions(
     project: &str,
     on_event: &mut impl FnMut(&EngineEvent),
 ) -> Result<(), EngineError> {
-    let repo_exts = repo_source_extensions(repo)?;
+    let project_sources = ProjectSourceSet::discover(repo);
+    let repo_exts = repo_source_extensions(repo, &project_sources)?;
     if repo_exts.is_empty() {
         return Ok(());
     }
-    let indexed_exts = indexed_source_extensions(conn, project)?;
+    let indexed_exts = indexed_project_source_extensions(conn, project, repo, &project_sources)?;
     for (ext, language) in [
         ("java", "Java"),
         ("py", "Python"),
@@ -608,9 +609,11 @@ fn warn_missing_source_extensions(
     Ok(())
 }
 
-fn indexed_source_extensions(
+fn indexed_project_source_extensions(
     conn: &Connection,
     project: &str,
+    repo: &Path,
+    project_sources: &ProjectSourceSet,
 ) -> Result<HashSet<String>, EngineError> {
     let mut exts = HashSet::new();
     if let Some(file_hash_col) = file_hashes_path_column(conn)? {
@@ -618,7 +621,11 @@ fn indexed_source_extensions(
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query([project])?;
         while let Some(row) = rows.next()? {
-            if let Some(ext) = source_extension(&text_col(row, 0)?) {
+            let file_path = text_col(row, 0)?;
+            if !project_sources.contains_project_file(repo, &file_path) {
+                continue;
+            }
+            if let Some(ext) = source_extension(&file_path) {
                 exts.insert(ext);
             }
         }
@@ -627,7 +634,11 @@ fn indexed_source_extensions(
         .prepare("SELECT DISTINCT file_path FROM nodes WHERE project = ?1 AND file_path != ''")?;
     let mut rows = stmt.query([project])?;
     while let Some(row) = rows.next()? {
-        if let Some(ext) = source_extension(&text_col(row, 0)?) {
+        let file_path = text_col(row, 0)?;
+        if !project_sources.contains_project_file(repo, &file_path) {
+            continue;
+        }
+        if let Some(ext) = source_extension(&file_path) {
             exts.insert(ext);
         }
     }
@@ -656,8 +667,10 @@ fn file_hashes_path_column(conn: &Connection) -> Result<Option<&'static str>, En
     })
 }
 
-fn repo_source_extensions(repo: &Path) -> Result<HashSet<String>, EngineError> {
-    let project_sources = ProjectSourceSet::discover(repo);
+fn repo_source_extensions(
+    repo: &Path,
+    project_sources: &ProjectSourceSet,
+) -> Result<HashSet<String>, EngineError> {
     if project_sources.has_git_listing() {
         return Ok(project_sources
             .project_files(repo)

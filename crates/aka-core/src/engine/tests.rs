@@ -1940,7 +1940,51 @@ fn source_language_warning_ignores_build_configured_test_sources() {
 }
 
 #[test]
+fn source_language_warning_does_not_count_indexed_test_sources_as_java_coverage() {
+    let repo = temp_repo("missing-main-java-warning-test-indexed");
+    run_git(&repo, &["init"]);
+    std::fs::create_dir_all(repo.join("src/main/java/com/example")).unwrap();
+    std::fs::create_dir_all(repo.join("src/test/java/com/example")).unwrap();
+    std::fs::write(repo.join("pom.xml"), "<project></project>").unwrap();
+    std::fs::write(
+        repo.join("src/main/java/com/example/App.java"),
+        "class App {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/test/java/com/example/AppTest.java"),
+        "class AppTest {}\n",
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        &[
+            "add",
+            "pom.xml",
+            "src/main/java/com/example/App.java",
+            "src/test/java/com/example/AppTest.java",
+        ],
+    );
+    let conn = test_conn();
+    insert_file_hash(&conn, "src/test/java/com/example/AppTest.java");
+
+    let mut warnings = Vec::new();
+    warn_missing_source_extensions(&repo, &conn, "demo", &mut |ev| {
+        if let EngineEvent::Warning { message } = ev {
+            warnings.push(message.clone());
+        }
+    })
+    .unwrap();
+
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("0 Java source files"));
+}
+
+#[test]
 fn reads_cbm_file_hashes_rel_path_column() {
+    let repo = temp_repo("file-hashes-rel-path");
+    std::fs::create_dir_all(repo.join("src/main/java")).unwrap();
+    std::fs::write(repo.join("src/main/java/App.java"), "class App {}\n").unwrap();
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         "CREATE TABLE nodes (
@@ -1966,7 +2010,8 @@ fn reads_cbm_file_hashes_rel_path_column() {
     )
     .unwrap();
 
-    let exts = indexed_source_extensions(&conn, "demo").unwrap();
+    let project_sources = ProjectSourceSet::discover(&repo);
+    let exts = indexed_project_source_extensions(&conn, "demo", &repo, &project_sources).unwrap();
     assert!(exts.contains("java"));
 }
 
