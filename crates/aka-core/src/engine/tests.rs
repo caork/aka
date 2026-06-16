@@ -115,6 +115,15 @@ fn insert_edge(conn: &Connection, id: i64, src: i64, dst: i64, ty: &str) {
     .unwrap();
 }
 
+fn insert_edge_props(conn: &Connection, id: i64, src: i64, dst: i64, ty: &str, props: Value) {
+    conn.execute(
+        "INSERT INTO edges (id, project, source_id, target_id, type, properties)
+             VALUES (?1, 'demo', ?2, ?3, ?4, ?5)",
+        rusqlite::params![id, src, dst, ty, props.to_string()],
+    )
+    .unwrap();
+}
+
 fn insert_file_hash(conn: &Connection, file_path: &str) {
     conn.execute(
         "INSERT INTO file_hashes (project, file_path) VALUES ('demo', ?1)",

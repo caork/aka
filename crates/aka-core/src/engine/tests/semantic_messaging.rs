@@ -6,6 +6,124 @@ mod python_job_decorators;
 mod python_jobs;
 
 #[test]
+fn bridges_native_channel_edges_into_topics() {
+    let repo = temp_repo("native-channel-topics");
+    std::fs::create_dir_all(repo.join("src/orders")).unwrap();
+    let file = "src/orders/events.py";
+    std::fs::write(
+        repo.join(file),
+        r#"def publish_order(event):
+    pass
+
+def consume_order(event):
+    pass
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "publish_order",
+        "src.orders.events.publish_order",
+        file,
+        (1, 2),
+        json!({"language": "python"}),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "consume_order",
+        "src.orders.events.consume_order",
+        file,
+        (4, 5),
+        json!({"language": "python"}),
+    );
+    insert_node_props(
+        &conn,
+        3,
+        "Channel",
+        "orders.created",
+        "__channel__kafka__orders.created",
+        "",
+        json!({"transport": "kafka", "name": "orders.created"}),
+    );
+    insert_edge_props(&conn, 1, 1, 3, "EMITS", json!({"transport": "kafka"}));
+    insert_edge_props(&conn, 2, 2, 3, "LISTENS_ON", json!({"transport": "kafka"}));
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let topic = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders.created")
+        .expect("native channel topic");
+    assert_eq!(topic.broker, "kafka");
+    assert_eq!(topic.producers.len(), 1);
+    assert_eq!(topic.consumers.len(), 1);
+    assert_eq!(topic.producers[0].strategy, "native-channel");
+    assert_eq!(topic.consumers[0].strategy, "native-channel");
+    let node = topic.node_rec();
+    assert_eq!(node.properties["topicSource"], json!("native-channel"));
+
+    let edges = topic.edge_recs();
+    assert!(edges.iter().any(|edge| edge.edge_type == "PUBLISHES_TOPIC"
+        && edge.evidence.as_ref().and_then(|v| v.get("nativeEdgeType")) == Some(&json!("EMITS"))));
+    assert!(edges.iter().any(|edge| edge.edge_type == "CONSUMES_TOPIC"
+        && edge.evidence.as_ref().and_then(|v| v.get("nativeEdgeType"))
+            == Some(&json!("LISTENS_ON"))));
+}
+
+#[test]
+fn dedups_native_channel_edges_against_source_scan_topics() {
+    let repo = temp_repo("native-channel-source-dedup");
+    std::fs::create_dir_all(repo.join("src/orders")).unwrap();
+    let file = "src/orders/events.py";
+    std::fs::write(
+        repo.join(file),
+        r#"def publish_order(event):
+    producer.send("orders.created", event)
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "publish_order",
+        "src.orders.events.publish_order",
+        file,
+        (1, 2),
+        json!({"language": "python"}),
+    );
+    insert_node_props(
+        &conn,
+        2,
+        "Channel",
+        "orders.created",
+        "__channel__kafka__orders.created",
+        "",
+        json!({"transport": "kafka", "name": "orders.created"}),
+    );
+    insert_edge_props(&conn, 1, 1, 2, "EMITS", json!({"transport": "kafka"}));
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let topic = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders.created")
+        .expect("orders.created topic");
+    assert_eq!(topic.broker, "kafka");
+    assert_eq!(topic.producers.len(), 1);
+    let node = topic.node_rec();
+    assert_eq!(
+        node.properties["topicSource"],
+        json!("native-channel+source-scan")
+    );
+}
+
+#[test]
 fn synthesizes_java_message_topics() {
     let repo = temp_repo("java-message-topics");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();

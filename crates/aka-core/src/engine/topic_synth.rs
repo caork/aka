@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
@@ -22,6 +22,7 @@ pub(super) struct SynthTopic {
     pub(super) id: String,
     pub(super) name: String,
     pub(super) broker: String,
+    pub(super) sources: BTreeSet<String>,
     pub(super) consumer_groups: Vec<String>,
     pub(super) producers: Vec<SynthTopicEndpoint>,
     pub(super) consumers: Vec<SynthTopicEndpoint>,
@@ -32,6 +33,8 @@ pub(super) struct SynthTopicEndpoint {
     pub(super) node_id: String,
     pub(super) file_path: String,
     pub(super) strategy: String,
+    pub(super) evidence_source: String,
+    pub(super) native_edge_type: Option<String>,
 }
 
 impl SynthTopic {
@@ -40,7 +43,14 @@ impl SynthTopic {
         properties.insert("name".into(), Value::String(self.name.clone()));
         properties.insert("broker".into(), Value::String(self.broker.clone()));
         properties.insert("source".into(), Value::String("aka-cbm-synth".into()));
-        properties.insert("topicSource".into(), Value::String("source-scan".into()));
+        properties.insert(
+            "topicSource".into(),
+            Value::String(self.sources.iter().cloned().collect::<Vec<_>>().join("+")),
+        );
+        properties.insert(
+            "sources".into(),
+            Value::Array(self.sources.iter().cloned().map(Value::String).collect()),
+        );
         if !self.consumer_groups.is_empty() {
             properties.insert(
                 "consumerGroups".into(),
@@ -76,12 +86,14 @@ impl SynthTopic {
                 reason: "aka topic consumer synthesis".into(),
                 step: None,
                 evidence: Some(json!({
-                    "source": "aka-cbm-synth",
+                    "source": endpoint.evidence_source,
                     "kind": "topic-consumer",
                     "broker": self.broker,
                     "topic": self.name,
                     "strategy": endpoint.strategy,
                     "filePath": endpoint.file_path,
+                    "nativeLabel": endpoint.native_edge_type.as_ref().map(|_| "Channel"),
+                    "nativeEdgeType": endpoint.native_edge_type,
                 })),
             });
         }
@@ -99,12 +111,14 @@ impl SynthTopic {
                 reason: "aka topic publisher synthesis".into(),
                 step: None,
                 evidence: Some(json!({
-                    "source": "aka-cbm-synth",
+                    "source": endpoint.evidence_source,
                     "kind": "topic-producer",
                     "broker": self.broker,
                     "topic": self.name,
                     "strategy": endpoint.strategy,
                     "filePath": endpoint.file_path,
+                    "nativeLabel": endpoint.native_edge_type.as_ref().map(|_| "Channel"),
+                    "nativeEdgeType": endpoint.native_edge_type,
                 })),
             });
         }
@@ -136,15 +150,19 @@ pub(super) fn synthesize_topics_from_sources(
                 node_id: detection.node_id.clone(),
                 file_path: file_path.clone(),
                 strategy: detection.strategy.clone(),
+                evidence_source: "aka-cbm-synth".into(),
+                native_edge_type: None,
             };
             let topic = topics.entry(key).or_insert_with(|| SynthTopic {
                 id: topic_id,
                 name: detection.topic.clone(),
                 broker: detection.broker.clone(),
+                sources: BTreeSet::from(["source-scan".into()]),
                 consumer_groups: Vec::new(),
                 producers: Vec::new(),
                 consumers: Vec::new(),
             });
+            topic.sources.insert("source-scan".into());
             topic.consumer_groups.extend(detection.consumer_groups);
             let edge_key = (
                 detection.kind.as_str().to_string(),
@@ -172,6 +190,104 @@ pub(super) fn synthesize_topics_from_sources(
     }
     out.sort_by(|a, b| a.broker.cmp(&b.broker).then_with(|| a.name.cmp(&b.name)));
     out
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct NativeTopicDetection {
+    pub(super) topic: String,
+    pub(super) broker: String,
+    pub(super) kind: TopicEndpointKind,
+    pub(super) node_id: String,
+    pub(super) file_path: String,
+    pub(super) native_edge_type: String,
+}
+
+pub(super) fn merge_native_channel_topics(
+    topics: &mut Vec<SynthTopic>,
+    detections: Vec<NativeTopicDetection>,
+) {
+    let mut by_key: BTreeMap<(String, String), usize> = topics
+        .iter()
+        .enumerate()
+        .map(|(idx, topic)| ((topic.broker.clone(), topic.name.clone()), idx))
+        .collect();
+    let mut seen_edges: HashSet<(String, String, String, String)> = topics
+        .iter()
+        .flat_map(|topic| {
+            topic
+                .consumers
+                .iter()
+                .map(|endpoint| {
+                    (
+                        "consumer".to_string(),
+                        topic.broker.clone(),
+                        topic.name.clone(),
+                        endpoint.node_id.clone(),
+                    )
+                })
+                .chain(topic.producers.iter().map(|endpoint| {
+                    (
+                        "producer".to_string(),
+                        topic.broker.clone(),
+                        topic.name.clone(),
+                        endpoint.node_id.clone(),
+                    )
+                }))
+        })
+        .collect();
+    for detection in detections {
+        let key = (detection.broker.clone(), detection.topic.clone());
+        let idx = if let Some(idx) = by_key.get(&key).copied() {
+            idx
+        } else {
+            let topic_id = format!(
+                "topic:heuristic:{:016x}",
+                stable_hash(&format!("{}|{}", detection.broker, detection.topic))
+            );
+            topics.push(SynthTopic {
+                id: topic_id,
+                name: detection.topic.clone(),
+                broker: detection.broker.clone(),
+                sources: BTreeSet::from(["native-channel".into()]),
+                consumer_groups: Vec::new(),
+                producers: Vec::new(),
+                consumers: Vec::new(),
+            });
+            let idx = topics.len() - 1;
+            by_key.insert(key.clone(), idx);
+            idx
+        };
+        let topic = &mut topics[idx];
+        topic.sources.insert("native-channel".into());
+        let edge_key = (
+            detection.kind.as_str().to_string(),
+            detection.broker,
+            detection.topic,
+            detection.node_id.clone(),
+        );
+        if !seen_edges.insert(edge_key) {
+            continue;
+        }
+        let endpoint = SynthTopicEndpoint {
+            node_id: detection.node_id,
+            file_path: detection.file_path,
+            strategy: "native-channel".into(),
+            evidence_source: "codebase-memory-mcp".into(),
+            native_edge_type: Some(detection.native_edge_type),
+        };
+        match detection.kind {
+            TopicEndpointKind::Consumer => topic.consumers.push(endpoint),
+            TopicEndpointKind::Producer => topic.producers.push(endpoint),
+        }
+    }
+    for topic in topics {
+        topic.consumers.sort();
+        topic.consumers.dedup();
+        topic.producers.sort();
+        topic.producers.dedup();
+        topic.consumer_groups.sort();
+        topic.consumer_groups.dedup();
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

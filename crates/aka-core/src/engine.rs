@@ -90,7 +90,10 @@ use source_scan::{
 };
 use source_symbol_synth::{synthesize_source_symbols_from_sources, SynthSourceSymbol};
 use tool_synth::{synthesize_tools_from_sources, SynthTool};
-use topic_synth::{synthesize_topics_from_sources, SynthTopic};
+use topic_synth::{
+    merge_native_channel_topics, synthesize_topics_from_sources, NativeTopicDetection, SynthTopic,
+    TopicEndpointKind,
+};
 use transaction_synth::{synthesize_transactions_from_sources, SynthTransaction};
 
 const DEFAULT_CBM_MODE: &str = "fast";
@@ -1633,7 +1636,11 @@ fn synthesize_graph_with_progress(
         let persistence = synthesize_persistence_from_sources(repo, &nodes);
         let configs = synthesize_configs_from_sources(repo, &nodes);
         let jobs = synthesize_jobs_from_sources(repo, &nodes, &processes);
-        let topics = synthesize_topics_from_sources(repo, &nodes);
+        let mut topics = synthesize_topics_from_sources(repo, &nodes);
+        merge_native_channel_topics(
+            &mut topics,
+            load_native_channel_topic_detections(conn, project, repo)?,
+        );
         let caches = synthesize_caches_from_sources(repo, &nodes);
         let events = synthesize_events_from_sources(repo, &nodes);
         let policies = synthesize_policies_from_sources(repo, &nodes);
@@ -1765,7 +1772,11 @@ fn synthesize_graph_with_progress(
         0,
         0,
     );
-    let topics = synthesize_topics_from_sources(repo, &nodes);
+    let mut topics = synthesize_topics_from_sources(repo, &nodes);
+    merge_native_channel_topics(
+        &mut topics,
+        load_native_channel_topic_detections(conn, project, repo)?,
+    );
     emit_phase(
         on_event,
         "codebase-memory:export-artifacts:synthesize:caches",
@@ -1890,6 +1901,68 @@ fn load_native_app_nodes(
             id: aka_node_id(cbm_id, &qn),
             name,
             file_path,
+        });
+    }
+    Ok(out)
+}
+
+fn load_native_channel_topic_detections(
+    conn: &Connection,
+    project: &str,
+    repo: &Path,
+) -> Result<Vec<NativeTopicDetection>, EngineError> {
+    let project_sources = ProjectSourceSet::discover(repo);
+    let mut stmt = conn.prepare(
+        "SELECT e.type, s.id, s.qualified_name, s.file_path, t.name, t.properties, e.properties \
+         FROM edges e \
+         JOIN nodes s ON s.id = e.source_id \
+         JOIN nodes t ON t.id = e.target_id \
+         WHERE e.project = ?1 \
+           AND t.label = 'Channel' \
+           AND e.type IN ('EMITS', 'LISTENS_ON') \
+         ORDER BY e.id",
+    )?;
+    let mut rows = stmt.query([project])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let edge_type = text_col(row, 0)?;
+        let source_id: i64 = row.get(1)?;
+        let source_qn = text_col(row, 2)?;
+        let file_path = text_col(row, 3)?;
+        let channel_name = text_col(row, 4)?;
+        if !project_sources.contains_project_file(repo, &file_path) {
+            continue;
+        }
+        let channel_props = parse_props(&text_col(row, 5)?);
+        let edge_props = parse_props(&text_col(row, 6)?);
+        let topic = channel_props
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&channel_name)
+            .to_string();
+        if topic.is_empty() {
+            continue;
+        }
+        let broker = channel_props
+            .get("transport")
+            .or_else(|| edge_props.get("transport"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+        let kind = match edge_type.as_str() {
+            "EMITS" => TopicEndpointKind::Producer,
+            "LISTENS_ON" => TopicEndpointKind::Consumer,
+            _ => continue,
+        };
+        out.push(NativeTopicDetection {
+            topic,
+            broker,
+            kind,
+            node_id: aka_node_id(source_id, &source_qn),
+            file_path,
+            native_edge_type: edge_type,
         });
     }
     Ok(out)
