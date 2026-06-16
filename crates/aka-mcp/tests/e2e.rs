@@ -15,7 +15,7 @@ mod support;
 
 use support::fixture_backend::FixtureBackend;
 
-const EXPECTED_TOOLS: [&str; 18] = [
+const EXPECTED_TOOLS: [&str; 19] = [
     "list_repos",
     "query",
     "search_code",
@@ -28,6 +28,7 @@ const EXPECTED_TOOLS: [&str; 18] = [
     "route_map",
     "tool_map",
     "graphql_map",
+    "topic_map",
     "shape_check",
     "api_impact",
     "analyze",
@@ -54,6 +55,11 @@ async fn initialize_list_and_call_query() -> anyhow::Result<()> {
     // tools/list：工具齐全，query 的 schema 带必填参数。
     let tools = client.list_all_tools().await?;
     let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+    assert_eq!(
+        names.len(),
+        EXPECTED_TOOLS.len(),
+        "unexpected tools: {names:?}"
+    );
     for expected in EXPECTED_TOOLS {
         assert!(
             names.contains(expected),
