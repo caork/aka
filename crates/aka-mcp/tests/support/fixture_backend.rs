@@ -397,11 +397,17 @@ impl Backend for FixtureBackend {
         query: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<SearchHit>> {
-        let q = query.to_lowercase();
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .map(|term| term.to_lowercase())
+            .collect();
         Ok(NODES
             .iter()
             .filter(|n| Self::node_in_repo(n, repo))
-            .filter(|n| n.name.to_lowercase().contains(&q))
+            .filter(|n| {
+                let name = n.name.to_lowercase();
+                terms.iter().any(|term| name.contains(term))
+            })
             .enumerate()
             .map(|(i, n)| Self::hit(n, 1.0 - 0.1 * i as f32, true))
             .take(limit)

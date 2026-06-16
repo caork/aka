@@ -803,6 +803,7 @@ pub const AUGMENT_TOP_K: usize = 3;
 pub const MAX_HIT_PROCESS_NAMES: usize = 3;
 pub const DEFAULT_QUERY_PROCESS_SYMBOL_LIMIT: usize = 10;
 pub const MAX_QUERY_PROCESS_SYMBOL_LIMIT: usize = 200;
+const QUERY_CONTEXT_TERM_LIMIT: usize = 6;
 
 pub fn clamp_process_symbol_limit(limit: Option<usize>) -> usize {
     limit
@@ -842,7 +843,8 @@ pub fn query(b: &dyn Backend, opts: QueryOptions<'_>) -> anyhow::Result<QueryOut
     let mut definitions = Vec::new();
     let mut next_process_order = 0usize;
     let search_limit = limit.saturating_mul(max_symbols).max(limit);
-    let search_hits = b.search(repo, query, search_limit)?;
+    let search_query = expanded_query(query, [task_context, goal]);
+    let search_hits = b.search(repo, &search_query, search_limit)?;
     let node_ids: Vec<String> = search_hits.iter().map(|h| h.node_id.clone()).collect();
     let enrichments = b.query_enrichment(repo, &node_ids, include_content)?;
     let context_terms = ranking_terms([Some(query), task_context, goal]);
@@ -1011,6 +1013,22 @@ fn ranking_terms<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> Vec<St
     let mut out: Vec<String> = terms.into_iter().collect();
     out.sort();
     out
+}
+
+fn expanded_query<'a>(
+    query: &'a str,
+    context_parts: impl IntoIterator<Item = Option<&'a str>>,
+) -> String {
+    let query_terms = ranking_terms([Some(query)]);
+    let query_term_set: HashSet<&str> = query_terms.iter().map(String::as_str).collect();
+    let mut extra = ranking_terms(context_parts);
+    extra.retain(|term| !query_term_set.contains(term.as_str()));
+    extra.truncate(QUERY_CONTEXT_TERM_LIMIT);
+    if extra.is_empty() {
+        query.to_string()
+    } else {
+        format!("{query} {}", extra.join(" "))
+    }
 }
 
 fn context_score<'a>(

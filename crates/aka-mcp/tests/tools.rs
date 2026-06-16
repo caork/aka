@@ -247,6 +247,25 @@ async fn query_uses_task_context_for_process_ranking() {
 }
 
 #[tokio::test]
+async fn query_expands_search_with_task_context_terms() {
+    let res = server()
+        .query(Parameters(QueryParams {
+            repo: Some("fixture".into()),
+            query: "investigate".into(),
+            limit: Some(5),
+            task_context: Some("handle request failure path".into()),
+            goal: None,
+            max_symbols: None,
+            include_content: None,
+        }))
+        .await
+        .unwrap();
+    let v = text_json(&res);
+    let hits = v["hits"].as_array().unwrap();
+    assert_eq!(hits[0]["name"], "handle_request");
+}
+
+#[tokio::test]
 async fn search_code_shape() {
     let res = server()
         .search_code(Parameters(CodeSearchParams {
