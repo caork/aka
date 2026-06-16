@@ -70,7 +70,7 @@ const DEFINITION_LABELS: &[&str] = &[
     "Transaction",
 ];
 
-const JOB_LOG_LIMIT: usize = 80;
+const JOB_LOG_LIMIT: usize = 240;
 const AUTO_INDEX_SCAN_INTERVAL: Duration = Duration::from_secs(4);
 const AUTO_INDEX_DEBOUNCE: Duration = Duration::from_secs(3);
 const RENAME_REFERENCE_LIMIT: usize = 500;
@@ -412,6 +412,9 @@ impl JobInfo {
             }
             EngineEvent::Warning { message } => {
                 self.push_log(format!("warning: {message}"));
+            }
+            EngineEvent::Log { stream, line } => {
+                self.push_log(format!("[{stream}] {line}"));
             }
             EngineEvent::Done { stats } => {
                 self.progress.stage = "engine".into();

@@ -1,9 +1,11 @@
 import { motion } from "framer-motion";
+import { useMemo, useState } from "react";
 import type { Repo } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 
 export default function IndexingPanel({ repo }: { repo: Repo }) {
+  const [copied, setCopied] = useState(false);
   const progress = repo.progress;
   const percent =
     repo.status === "failed"
@@ -13,6 +15,30 @@ export default function IndexingPanel({ repo }: { repo: Repo }) {
     progress?.logs && progress.logs.length > 0
       ? progress.logs
       : [repo.status === "failed" ? (repo.detail ?? "Indexing failed") : "Waiting for indexing events"];
+  const logText = useMemo(
+    () =>
+      [
+        `repo=${repo.name}`,
+        `path=${repo.path}`,
+        `status=${repo.status}`,
+        repo.detail ? `detail=${repo.detail}` : "",
+        "",
+        ...logs,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    [logs, repo.detail, repo.name, repo.path, repo.status],
+  );
+
+  const copyLogs = () => {
+    void navigator.clipboard
+      ?.writeText(logText)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => undefined);
+  };
 
   return (
     <div className="flex h-full items-center justify-center px-8 py-10" data-testid="indexing-panel">
@@ -74,8 +100,17 @@ export default function IndexingPanel({ repo }: { repo: Repo }) {
         )}
 
         <div className="overflow-hidden rounded-[10px] bg-[var(--subtle-fill-2)] shadow-[inset_0_0_0_0.5px_var(--hairline)]">
-          <div className="themed-divider border-b px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">
-            Logs
+          <div className="themed-divider flex items-center justify-between gap-3 border-b px-3 py-2">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">
+              Logs
+            </span>
+            <button
+              type="button"
+              onClick={copyLogs}
+              className="rounded-[6px] px-2 py-1 text-[11px] font-medium text-ink-3 transition hover:bg-[var(--subtle-fill)] hover:text-ink"
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
           </div>
           <div className="scroll-area max-h-[220px] px-3 py-2">
             {logs.slice(-40).map((line, idx) => (

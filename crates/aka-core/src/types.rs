@@ -139,6 +139,10 @@ pub enum EngineEvent {
     Warning {
         message: String,
     },
+    Log {
+        stream: String,
+        line: String,
+    },
     Done {
         #[serde(default)]
         stats: ArtifactStats,

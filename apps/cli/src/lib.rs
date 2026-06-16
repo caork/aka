@@ -152,6 +152,14 @@ pub fn run_analyze_with_progress(
                     cb(ev);
                 }
             }
+            EngineEvent::Log { stream, line } => {
+                if stream == "engine" {
+                    eprintln!("  · {line}");
+                }
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(ev);
+                }
+            }
             EngineEvent::Done { stats } => {
                 eprintln!(
                     "  ✓ 解析完成：{} 文件 / {} 节点 / {} 边 / {} 切块",

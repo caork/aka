@@ -151,6 +151,11 @@ pub struct EngineRunner {
     cbm_bin: PathBuf,
 }
 
+enum EngineLine {
+    Stdout(String),
+    Stderr(String),
+}
+
 impl EngineRunner {
     const DONE_EXIT_GRACE: Duration = Duration::from_secs(5);
 
@@ -235,6 +240,10 @@ impl EngineRunner {
         emit_phase(&mut on_event, "codebase-memory:index", 0, 0);
         let mode = cbm_mode();
         let engine_repo = user_facing_path(repo);
+        let engine_repo = engine_repo
+            .canonicalize()
+            .map(|path| user_facing_path(&path))
+            .unwrap_or(engine_repo);
         let args = json!({
             "repo_path": engine_repo.display().to_string(),
             "mode": mode,
@@ -256,57 +265,115 @@ impl EngineRunner {
             "{} cli --progress --json index_repository <args>",
             self.cbm_bin.display()
         );
+        on_event(&EngineEvent::Log {
+            stream: "engine".into(),
+            line: format!(
+                "spawn repo_path={} cache_dir={} mode={} bin={}",
+                engine_repo.display(),
+                cache_root.display(),
+                mode,
+                self.cbm_bin.display()
+            ),
+        });
         let mut child = cmd.spawn().map_err(|source| EngineError::Spawn {
             cmd: cmd_display,
             source,
         })?;
 
+        let (line_tx, line_rx) = mpsc::channel();
         let stderr = child.stderr.take().expect("piped stderr");
-        let (phase_tx, phase_rx) = mpsc::channel();
+        let stderr_tx = line_tx.clone();
         let stderr_handle = std::thread::spawn(move || {
-            let mut tail: Vec<String> = Vec::new();
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if let Some(phase) = parse_cbm_progress_phase(&line) {
-                    let _ = phase_tx.send(phase);
-                }
-                tail.push(line);
-                if tail.len() > 40 {
-                    tail.remove(0);
-                }
+                let _ = stderr_tx.send(EngineLine::Stderr(line));
             }
-            tail.join("\n")
         });
 
         let stdout = child.stdout.take().expect("piped stdout");
-        for line in BufReader::new(stdout).lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
+        let stdout_tx = line_tx.clone();
+        let stdout_handle = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let _ = stdout_tx.send(EngineLine::Stdout(line));
             }
-            if line.contains("\"status\":\"error\"") || line.contains("Pipeline failed") {
-                let _ = child.kill();
-                let status = child.wait()?;
-                let stderr_tail = stderr_handle.join().unwrap_or_default();
-                return Err(EngineError::Failed {
-                    code: status.code(),
-                    stderr_tail: with_engine_repo_context(
-                        &engine_repo,
-                        join_tail(stderr_tail, line),
-                    ),
-                });
-            }
-            drain_cbm_progress(&phase_rx, &mut on_event);
-        }
-        drain_cbm_progress(&phase_rx, &mut on_event);
+        });
+        drop(line_tx);
 
-        let status = wait_for_done_exit(&mut child, Self::DONE_EXIT_GRACE)?;
-        drain_cbm_progress(&phase_rx, &mut on_event);
-        let stderr_tail = stderr_handle.join().unwrap_or_default();
-        drain_cbm_progress(&phase_rx, &mut on_event);
+        let mut stdout_tail: Vec<String> = Vec::new();
+        let mut stderr_tail: Vec<String> = Vec::new();
+        let status = loop {
+            match line_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(EngineLine::Stdout(line)) => {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    push_tail(&mut stdout_tail, line.clone(), 80);
+                    on_event(&EngineEvent::Log {
+                        stream: "stdout".into(),
+                        line: line.clone(),
+                    });
+                    if line.contains("\"status\":\"error\"") || line.contains("Pipeline failed") {
+                        let _ = child.kill();
+                        break child.wait()?;
+                    }
+                }
+                Ok(EngineLine::Stderr(line)) => {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    if let Some(phase) = parse_cbm_progress_phase(&line) {
+                        emit_phase(&mut on_event, phase, 0, 0);
+                    }
+                    push_tail(&mut stderr_tail, line.clone(), 120);
+                    on_event(&EngineEvent::Log {
+                        stream: "stderr".into(),
+                        line,
+                    });
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(done) = child.try_wait()? {
+                        break done;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break wait_for_done_exit(&mut child, Self::DONE_EXIT_GRACE)?;
+                }
+            }
+        };
+        for line in line_rx.try_iter() {
+            match line {
+                EngineLine::Stdout(line) if !line.trim().is_empty() => {
+                    push_tail(&mut stdout_tail, line.clone(), 80);
+                    on_event(&EngineEvent::Log {
+                        stream: "stdout".into(),
+                        line,
+                    });
+                }
+                EngineLine::Stderr(line) if !line.trim().is_empty() => {
+                    if let Some(phase) = parse_cbm_progress_phase(&line) {
+                        emit_phase(&mut on_event, phase, 0, 0);
+                    }
+                    push_tail(&mut stderr_tail, line.clone(), 120);
+                    on_event(&EngineEvent::Log {
+                        stream: "stderr".into(),
+                        line,
+                    });
+                }
+                _ => {}
+            }
+        }
+        let _ = stdout_handle.join();
+        let _ = stderr_handle.join();
         if !status.success() {
             return Err(EngineError::Failed {
                 code: status.code(),
-                stderr_tail: with_engine_repo_context(&engine_repo, stderr_tail),
+                stderr_tail: engine_failure_context(
+                    &engine_repo,
+                    &cache_root,
+                    &self.cbm_bin,
+                    &mode,
+                    &stdout_tail,
+                    &stderr_tail,
+                ),
             });
         }
 
@@ -370,14 +437,37 @@ fn emit_phase(
     });
 }
 
-fn drain_cbm_progress(rx: &mpsc::Receiver<String>, on_event: &mut impl FnMut(&EngineEvent)) {
-    while let Ok(phase) = rx.try_recv() {
-        emit_phase(on_event, phase, 0, 0);
+fn push_tail(tail: &mut Vec<String>, line: String, limit: usize) {
+    tail.push(line);
+    if tail.len() > limit {
+        let drop_count = tail.len() - limit;
+        tail.drain(0..drop_count);
     }
 }
 
-fn with_engine_repo_context(repo: &Path, detail: String) -> String {
-    format!("repo_path={}\n{detail}", repo.display())
+fn engine_failure_context(
+    repo: &Path,
+    cache_root: &Path,
+    cbm_bin: &Path,
+    mode: &str,
+    stdout_tail: &[String],
+    stderr_tail: &[String],
+) -> String {
+    let mut out = vec![
+        format!("repo_path={}", repo.display()),
+        format!("cache_dir={}", cache_root.display()),
+        format!("mode={mode}"),
+        format!("cbm_bin={}", cbm_bin.display()),
+    ];
+    if !stdout_tail.is_empty() {
+        out.push("stdout tail:".into());
+        out.extend(stdout_tail.iter().cloned());
+    }
+    if !stderr_tail.is_empty() {
+        out.push("stderr tail:".into());
+        out.extend(stderr_tail.iter().cloned());
+    }
+    out.join("\n")
 }
 
 fn parse_cbm_progress_phase(line: &str) -> Option<String> {
@@ -398,14 +488,6 @@ fn parse_cbm_progress_phase(line: &str) -> Option<String> {
         return Some(format!("codebase-memory:{trimmed}"));
     }
     None
-}
-
-fn join_tail(stderr_tail: String, stdout_line: String) -> String {
-    if stderr_tail.trim().is_empty() {
-        stdout_line
-    } else {
-        format!("{stderr_tail}\n{stdout_line}")
-    }
 }
 
 fn find_single_project_db(cache_root: &Path) -> Result<(String, PathBuf), EngineError> {
