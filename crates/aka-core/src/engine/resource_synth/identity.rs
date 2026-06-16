@@ -1,4 +1,4 @@
-use super::{read_string_literal, ResourceDetection};
+use super::{read_string_literal, stable_hash, ResourceDetection};
 use crate::engine::{find_call_args, node_at_offset, SynthNode};
 
 pub(super) fn extract_identity_resources(
@@ -7,7 +7,6 @@ pub(super) fn extract_identity_resources(
 ) -> Vec<ResourceDetection> {
     let mut out = Vec::new();
     if has_identity_context(text) {
-        out.extend(extract_configured_identity_resources(text, nodes));
         out.extend(extract_python_identity_resources(text, nodes));
         out.extend(extract_java_identity_resources(text, nodes));
     }
@@ -30,25 +29,19 @@ fn has_identity_context(text: &str) -> bool {
         || text.contains("PyJWKClient")
 }
 
-fn extract_configured_identity_resources(
-    text: &str,
-    nodes: &[&SynthNode],
-) -> Vec<ResourceDetection> {
+pub(super) fn extract_identity_config_resources(text: &str) -> Vec<ResourceDetection> {
     let mut out = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
-        if !looks_like_identity_config_line(trimmed) {
-            continue;
-        }
-        let Some(url) = first_url_like_value(trimmed) else {
+        let Some(key) = identity_config_key(trimmed) else {
             continue;
         };
-        let Some(node) = first_config_node(nodes).or_else(|| nodes.first().copied()) else {
+        let Some(url) = first_url_like_value(trimmed) else {
             continue;
         };
         out.push(ResourceDetection::identity(
             identity_provider(&url),
-            node.aka_id.clone(),
+            config_id(&key),
             "identity-config-url",
         ));
     }
@@ -144,21 +137,14 @@ fn extract_java_identity_resources(text: &str, nodes: &[&SynthNode]) -> Vec<Reso
     out
 }
 
-fn looks_like_identity_config_line(line: &str) -> bool {
-    let Some((key, _)) = line.split_once([':', '=']) else {
-        return false;
-    };
+fn identity_config_key(line: &str) -> Option<String> {
+    let (key, _) = line.split_once([':', '='])?;
+    let key = key.trim();
     matches!(
-        key.trim(),
+        key,
         "issuer-uri" | "jwk-set-uri" | "jwks_uri" | "auth-server-url"
     )
-}
-
-fn first_config_node<'a>(nodes: &[&'a SynthNode]) -> Option<&'a SynthNode> {
-    nodes
-        .iter()
-        .copied()
-        .find(|node| matches!(node.label.as_str(), "Config" | "File" | "Module"))
+    .then(|| key.to_string())
 }
 
 fn first_url_like_value(text: &str) -> Option<String> {
@@ -215,4 +201,8 @@ fn identity_provider(url: &str) -> String {
     } else {
         "oidc".into()
     }
+}
+
+fn config_id(key: &str) -> String {
+    format!("config:heuristic:{:016x}", stable_hash(key))
 }

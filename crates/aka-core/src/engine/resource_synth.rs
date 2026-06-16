@@ -114,30 +114,18 @@ pub(super) fn synthesize_resources_from_sources(
             continue;
         };
         for detection in extract_resource_detections(&text, &file_path, &file_nodes) {
-            let key = detection.url.clone();
-            let id = format!(
-                "resource:{}:{:016x}",
-                detection.resource_type,
-                stable_hash(&key)
-            );
-            let resource = resources
-                .entry(key.clone())
-                .or_insert_with(|| SynthResource {
-                    id,
-                    name: resource_name(&key),
-                    url: key,
-                    resource_type: detection.resource_type.clone(),
-                    callers: Vec::new(),
-                });
-            let edge_key = (resource.id.clone(), detection.node_id.clone());
-            if !seen_edges.insert(edge_key) {
-                continue;
-            }
-            resource.callers.push(SynthResourceCaller {
-                node_id: detection.node_id,
-                file_path: file_path.clone(),
-                strategy: detection.strategy,
-            });
+            ingest_resource_detection(&mut resources, &mut seen_edges, &file_path, detection);
+        }
+    }
+    for file_path in project_sources
+        .project_files(repo)
+        .filter(|file_path| is_resource_config_file_path(file_path))
+    {
+        let Some(text) = read_repo_text(repo, file_path) else {
+            continue;
+        };
+        for detection in extract_config_resource_detections(&text) {
+            ingest_resource_detection(&mut resources, &mut seen_edges, file_path, detection);
         }
     }
     let mut out: Vec<SynthResource> = resources.into_values().collect();
@@ -147,6 +135,61 @@ pub(super) fn synthesize_resources_from_sources(
     }
     out.sort_by(|a, b| a.url.cmp(&b.url));
     out
+}
+
+fn ingest_resource_detection(
+    resources: &mut BTreeMap<String, SynthResource>,
+    seen_edges: &mut HashSet<(String, String)>,
+    file_path: &str,
+    detection: ResourceDetection,
+) {
+    let key = detection.url.clone();
+    let id = format!(
+        "resource:{}:{:016x}",
+        detection.resource_type,
+        stable_hash(&key)
+    );
+    let resource = resources
+        .entry(key.clone())
+        .or_insert_with(|| SynthResource {
+            id,
+            name: resource_name(&key),
+            url: key,
+            resource_type: detection.resource_type.clone(),
+            callers: Vec::new(),
+        });
+    let edge_key = (resource.id.clone(), detection.node_id.clone());
+    if !seen_edges.insert(edge_key) {
+        return;
+    }
+    resource.callers.push(SynthResourceCaller {
+        node_id: detection.node_id,
+        file_path: file_path.to_string(),
+        strategy: detection.strategy,
+    });
+}
+
+fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
+    identity::extract_identity_config_resources(text)
+}
+
+fn is_resource_config_file_path(file_path: &str) -> bool {
+    let lower = file_path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    matches!(
+        name,
+        "application.yml"
+            | "application.yaml"
+            | "application.properties"
+            | "bootstrap.yml"
+            | "bootstrap.yaml"
+            | "bootstrap.properties"
+            | "settings.py"
+            | "config.py"
+            | ".env"
+    ) || name.starts_with("application-") && name.ends_with(".yml")
+        || name.starts_with("application-") && name.ends_with(".yaml")
+        || name.starts_with("application-") && name.ends_with(".properties")
 }
 
 #[derive(Debug, Clone)]

@@ -141,6 +141,44 @@ class SecurityConfig {
     );
 }
 
+#[test]
+fn synthesizes_configured_identity_resources() {
+    let repo = temp_repo("configured-identity-resources");
+    std::fs::create_dir_all(repo.join("src/main/resources")).unwrap();
+    let file = "src/main/resources/application.yml";
+    std::fs::write(
+        repo.join(file),
+        r#"spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: https://login.example.com/oauth2/default
+          jwk-set-uri: https://login.example.com/oauth2/default/v1/keys
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        ("Config", "application.yml", file, file),
+        (1, 7),
+        json!({
+            "language": "yaml",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert_identity_edge(
+        &synth,
+        "identity:oidc",
+        &format!("config:heuristic:{:016x}", stable_hash("issuer-uri")),
+        "identity-config-url",
+    );
+}
+
 fn assert_identity_edge(synth: &SynthGraph, url: &str, source_id: &str, strategy: &str) {
     let resource = synth
         .resources
