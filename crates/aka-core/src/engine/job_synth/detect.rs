@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use super::super::{
-    find_call_args, find_matching_paren, read_string_literal, split_top_level_commas,
-    string_literals, SynthNode,
+    find_call_args, find_matching_paren, read_string_literal, source_annotations_before_node,
+    split_top_level_commas, string_literals, SynthNode,
 };
 
 #[derive(Debug, Clone)]
@@ -128,49 +128,6 @@ fn detect_spring_batch_bean_jobs(text: &str, node: &SynthNode) -> Vec<JobDetecti
         schedule: None,
         strategy: strategy.into(),
     }]
-}
-
-fn source_annotations_before_node(text: &str, node: &SynthNode) -> Vec<String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let node_line = node.start_line_key();
-    if node_line <= 1 {
-        return Vec::new();
-    }
-    let mut idx = node_line.saturating_sub(2) as usize;
-    let mut annotations = Vec::new();
-    while let Some(line) = lines.get(idx) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if idx == 0 {
-                break;
-            }
-            idx -= 1;
-            continue;
-        }
-        if !trimmed.starts_with('@') {
-            break;
-        }
-        annotations.push(collect_annotation_from_line(text, &lines, idx));
-        if idx == 0 {
-            break;
-        }
-        idx -= 1;
-    }
-    annotations.reverse();
-    annotations
-}
-
-fn collect_annotation_from_line(text: &str, lines: &[&str], line_idx: usize) -> String {
-    let start = line_start_offset(text, line_idx);
-    let raw_line = lines[line_idx];
-    let line = raw_line.trim();
-    let Some(open) = raw_line.find('(').map(|rel| start + rel) else {
-        return line.to_string();
-    };
-    let Some(close) = find_matching_paren(text, open) else {
-        return line.to_string();
-    };
-    text[start..=close].trim().replace('\n', " ")
 }
 
 fn line_start_offset(text: &str, line_idx: usize) -> usize {

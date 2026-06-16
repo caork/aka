@@ -83,8 +83,8 @@ use route_spring_functional_synth::spring_functional_routes_from_repo;
 use source_scan::{
     find_call_args, find_matching_paren, is_business_language, is_ident_continue,
     is_noisy_source_path, is_project_code_source_path, node_at_offset, nodes_by_file,
-    pick_handler_node, project_code_nodes_by_file, read_repo_text, skip_ws, split_top_level_commas,
-    stable_hash, ProjectSourceSet,
+    pick_handler_node, project_code_nodes_by_file, read_repo_text, skip_ws,
+    source_annotations_before_node, split_top_level_commas, stable_hash, ProjectSourceSet,
 };
 use source_symbol_synth::{synthesize_source_symbols_from_sources, SynthSourceSymbol};
 use tool_synth::{synthesize_tools_from_sources, SynthTool};

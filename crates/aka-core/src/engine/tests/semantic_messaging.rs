@@ -202,6 +202,113 @@ class OrderLifecycleEvents {
 }
 
 #[test]
+fn synthesizes_java_kafka_topics_from_source_annotations_without_metadata() {
+    let repo = temp_repo("java-kafka-source-annotations");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();
+    let file = "src/main/java/com/example/orders/OrderLifecycleEvents.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.orders;
+
+import org.springframework.kafka.annotation.KafkaHandler;
+import org.springframework.kafka.annotation.KafkaListener;
+
+@KafkaListener(
+    topics = "orders.lifecycle",
+    groupId = "orders-service")
+class OrderLifecycleEvents {
+    @KafkaHandler
+    public void onCreated(OrderCreated event) {}
+
+    @KafkaListener(
+        topics = "orders.priority",
+        groupId = "priority-service")
+    public void onPriority(String payload) {}
+}
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "OrderLifecycleEvents",
+            "com.example.orders.OrderLifecycleEvents",
+            file,
+        ),
+        (9, 17),
+        json!({
+            "language": "java",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        (
+            "Method",
+            "onCreated",
+            "com.example.orders.OrderLifecycleEvents.onCreated",
+            file,
+        ),
+        (11, 11),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.orders.OrderLifecycleEvents",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        (
+            "Method",
+            "onPriority",
+            "com.example.orders.OrderLifecycleEvents.onPriority",
+            file,
+        ),
+        (16, 16),
+        json!({
+            "language": "java",
+            "parent_class": "com.example.orders.OrderLifecycleEvents",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let lifecycle = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders.lifecycle")
+        .expect("class-level kafka listener topic from source annotation");
+    assert_eq!(lifecycle.broker, "kafka");
+    assert_eq!(lifecycle.consumer_groups, vec!["orders-service"]);
+    assert_eq!(lifecycle.consumers.len(), 1);
+    assert_eq!(
+        lifecycle.consumers[0].node_id,
+        "cbm:2:com.example.orders.OrderLifecycleEvents.onCreated"
+    );
+    assert_eq!(
+        lifecycle.consumers[0].strategy,
+        "java-kafka-handler-class-listener"
+    );
+
+    let priority = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders.priority")
+        .expect("method-level kafka listener topic from source annotation");
+    assert_eq!(priority.broker, "kafka");
+    assert_eq!(priority.consumer_groups, vec!["priority-service"]);
+    assert_eq!(priority.consumers.len(), 1);
+    assert_eq!(
+        priority.consumers[0].node_id,
+        "cbm:3:com.example.orders.OrderLifecycleEvents.onPriority"
+    );
+    assert_eq!(priority.consumers[0].strategy, "java-kafka-listener");
+}
+
+#[test]
 fn synthesizes_spring_rabbit_topics_from_routing_keys() {
     let repo = temp_repo("java-rabbit-topics");
     std::fs::create_dir_all(repo.join("src/main/java/com/example/orders")).unwrap();

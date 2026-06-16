@@ -400,6 +400,89 @@ pub(super) fn read_repo_text(repo: &Path, file_path: &str) -> Option<String> {
     std::fs::read_to_string(repo.join(file_path)).ok()
 }
 
+pub(super) fn source_annotations_before_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let node_line = node.start_line_key();
+    if node_line <= 1 {
+        return Vec::new();
+    }
+    let mut idx = node_line.saturating_sub(2) as usize;
+    let mut annotations = Vec::new();
+    while idx < lines.len() {
+        while lines.get(idx).is_some_and(|line| line.trim().is_empty()) {
+            if idx == 0 {
+                return annotations;
+            }
+            idx -= 1;
+        }
+        let Some(start_idx) = annotation_start_covering_line(text, &lines, idx) else {
+            break;
+        };
+        annotations.push(collect_annotation_from_line(text, &lines, start_idx));
+        if start_idx == 0 {
+            break;
+        }
+        idx = start_idx - 1;
+    }
+    annotations.reverse();
+    annotations
+}
+
+fn annotation_start_covering_line(text: &str, lines: &[&str], end_idx: usize) -> Option<usize> {
+    let mut idx = end_idx;
+    let floor = end_idx.saturating_sub(32);
+    loop {
+        let line = lines.get(idx)?.trim();
+        if line.starts_with('@') {
+            return annotation_covers_line(text, lines, idx, end_idx).then_some(idx);
+        }
+        if idx == floor || idx == 0 {
+            return None;
+        }
+        idx -= 1;
+    }
+}
+
+fn annotation_covers_line(text: &str, lines: &[&str], start_idx: usize, end_idx: usize) -> bool {
+    let raw_line = lines[start_idx];
+    let Some(open) = raw_line
+        .find('(')
+        .map(|rel| line_start_offset(text, start_idx) + rel)
+    else {
+        return start_idx == end_idx;
+    };
+    find_matching_paren(text, open).is_some_and(|close| close >= line_start_offset(text, end_idx))
+}
+
+fn collect_annotation_from_line(text: &str, lines: &[&str], line_idx: usize) -> String {
+    let start = line_start_offset(text, line_idx);
+    let raw_line = lines[line_idx];
+    let line = raw_line.trim();
+    let Some(open) = raw_line.find('(').map(|rel| start + rel) else {
+        return line.to_string();
+    };
+    let Some(close) = find_matching_paren(text, open) else {
+        return line.to_string();
+    };
+    text[start..=close].trim().replace('\n', " ")
+}
+
+fn line_start_offset(text: &str, line_idx: usize) -> usize {
+    if line_idx == 0 {
+        return 0;
+    }
+    let mut line = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            line += 1;
+            if line == line_idx {
+                return idx + 1;
+            }
+        }
+    }
+    text.len()
+}
+
 pub(super) fn normalize_repo_path(path: &str) -> String {
     path.replace('\\', "/")
         .trim_start_matches("./")

@@ -5,8 +5,9 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_call_args, find_matching_paren, node_at_offset, pick_handler_node,
-    project_code_nodes_by_file, read_repo_text, split_top_level_commas, stable_hash,
-    string_literals, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
+    project_code_nodes_by_file, read_repo_text, source_annotations_before_node,
+    split_top_level_commas, stable_hash, string_literals, EdgeRec, NodeRec, ProjectSourceSet,
+    SynthNode,
 };
 
 mod stream;
@@ -260,15 +261,15 @@ fn extract_jvm_topic_detections(
     stream_bindings: &BTreeMap<String, StreamBinding>,
 ) -> Vec<TopicDetection> {
     let mut out = Vec::new();
-    let class_kafka_listeners = class_kafka_listeners(nodes);
+    let class_kafka_listeners = class_kafka_listeners(text, nodes);
     for node in nodes
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
     {
-        for decorator in &node.decorators {
+        for decorator in decorators_for_node(text, node) {
             if decorator.contains("KafkaListener") {
-                let consumer_groups = annotation_string_values(decorator, &["groupId", "group"]);
-                for topic in annotation_string_values(decorator, &["topics", "topic", "value"]) {
+                let consumer_groups = annotation_string_values(&decorator, &["groupId", "group"]);
+                for topic in annotation_string_values(&decorator, &["topics", "topic", "value"]) {
                     let mut detection = topic_detection(
                         topic,
                         "kafka",
@@ -296,7 +297,7 @@ fn extract_jvm_topic_detections(
                 }
             }
             if decorator.contains("StreamListener") {
-                for binding in annotation_string_values(decorator, &["target", "value"]) {
+                for binding in annotation_string_values(&decorator, &["target", "value"]) {
                     out.extend(stream_binding_detections(
                         &binding,
                         stream_bindings,
@@ -307,7 +308,7 @@ fn extract_jvm_topic_detections(
                 }
             }
             if decorator.contains("RabbitListener") {
-                for topic in rabbit_listener_topics(decorator) {
+                for topic in rabbit_listener_topics(&decorator) {
                     out.push(topic_detection(
                         topic,
                         "rabbitmq",
@@ -318,9 +319,10 @@ fn extract_jvm_topic_detections(
                 }
             }
             if decorator.contains("JmsListener") {
-                for topic in
-                    annotation_string_values(decorator, &["destination", "queue", "topic", "value"])
-                {
+                for topic in annotation_string_values(
+                    &decorator,
+                    &["destination", "queue", "topic", "value"],
+                ) {
                     out.push(topic_detection(
                         topic,
                         "jms",
@@ -332,7 +334,7 @@ fn extract_jvm_topic_detections(
             }
             if decorator.contains("SqsListener") {
                 for topic in
-                    annotation_string_values(decorator, &["queueNames", "queueName", "value"])
+                    annotation_string_values(&decorator, &["queueNames", "queueName", "value"])
                 {
                     out.push(topic_detection(
                         topic,
@@ -349,7 +351,7 @@ fn extract_jvm_topic_detections(
                 } else {
                     "java-spring-stomp-send-to"
                 };
-                for topic in annotation_destination_values(decorator, &["destinations", "value"]) {
+                for topic in annotation_destination_values(&decorator, &["destinations", "value"]) {
                     out.push(topic_detection(
                         topic,
                         "stomp",
@@ -449,24 +451,35 @@ struct ClassKafkaListener {
     consumer_groups: Vec<String>,
 }
 
-fn class_kafka_listeners(nodes: &[&SynthNode]) -> BTreeMap<String, Vec<ClassKafkaListener>> {
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
+}
+
+fn class_kafka_listeners(
+    text: &str,
+    nodes: &[&SynthNode],
+) -> BTreeMap<String, Vec<ClassKafkaListener>> {
     let mut out: BTreeMap<String, Vec<ClassKafkaListener>> = BTreeMap::new();
     for node in nodes
         .iter()
         .filter(|node| matches!(node.label.as_str(), "Class" | "Interface" | "Record"))
     {
         let mut listeners = Vec::new();
-        for decorator in &node.decorators {
+        for decorator in decorators_for_node(text, node) {
             if !decorator.contains("KafkaListener") {
                 continue;
             }
-            let topics = annotation_string_values(decorator, &["topics", "topic", "value"]);
+            let topics = annotation_string_values(&decorator, &["topics", "topic", "value"]);
             if topics.is_empty() {
                 continue;
             }
             listeners.push(ClassKafkaListener {
                 topics,
-                consumer_groups: annotation_string_values(decorator, &["groupId", "group"]),
+                consumer_groups: annotation_string_values(&decorator, &["groupId", "group"]),
             });
         }
         if listeners.is_empty() {
