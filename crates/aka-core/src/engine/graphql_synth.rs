@@ -5,8 +5,8 @@ use serde_json::{json, Map, Value};
 
 use super::{
     find_matching_paren, merge_strings, nodes_by_file, process_ids_for_entry, read_repo_text,
-    read_string_literal, skip_ws, stable_hash, EdgeRec, NodeRec, ProjectSourceSet, SynthNode,
-    SynthProcess,
+    read_string_literal, skip_ws, source_annotations_before_node, stable_hash, EdgeRec, NodeRec,
+    ProjectSourceSet, SynthNode, SynthProcess,
 };
 
 #[derive(Debug, Clone)]
@@ -171,11 +171,11 @@ fn is_graphql_candidate_file(file_path: &str, nodes: &[&SynthNode]) -> bool {
 
 fn detect_graphql_operations(text: &str, node: &SynthNode) -> Vec<GraphqlDetection> {
     let mut out = Vec::new();
-    for decorator in &node.decorators {
-        if let Some(detection) = detect_jvm_graphql_annotation(decorator, &node.name) {
+    for decorator in decorators_for_node(text, node) {
+        if let Some(detection) = detect_jvm_graphql_annotation(&decorator, &node.name) {
             out.push(detection);
         }
-        if let Some(detection) = detect_python_graphql_decorator(decorator, &node.name) {
+        if let Some(detection) = detect_python_graphql_decorator(&decorator, &node.name) {
             out.push(detection);
         }
     }
@@ -187,6 +187,14 @@ fn detect_graphql_operations(text: &str, node: &SynthNode) -> Vec<GraphqlDetecti
     });
     out.dedup_by(|a, b| a.operation_type == b.operation_type && a.name == b.name);
     out
+}
+
+fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {
+    let mut decorators = node.decorators.clone();
+    decorators.extend(source_annotations_before_node(text, node));
+    decorators.sort();
+    decorators.dedup();
+    decorators
 }
 
 fn detect_jvm_graphql_annotation(annotation: &str, fallback: &str) -> Option<GraphqlDetection> {
