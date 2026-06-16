@@ -10,8 +10,10 @@ use super::{
     SynthNode,
 };
 
+mod python;
 mod stream;
 
+use python::extract_python_topic_detections;
 use stream::{
     extract_stream_bridge_topics, functional_stream_binding_detections,
     spring_cloud_stream_bindings, stream_binding_detections, StreamBinding,
@@ -637,74 +639,6 @@ fn simple_class_name(name: &str) -> Option<&str> {
     name.rsplit(['.', '$'])
         .next()
         .filter(|value| !value.is_empty())
-}
-
-fn extract_python_topic_detections(text: &str, nodes: &[&SynthNode]) -> Vec<TopicDetection> {
-    let mut out = Vec::new();
-    out.extend(extract_call_topic_literals(
-        text,
-        nodes,
-        "KafkaConsumer",
-        "kafka",
-        TopicEndpointKind::Consumer,
-        "python-kafka-consumer",
-        0,
-    ));
-    out.extend(extract_call_topic_literals(
-        text,
-        nodes,
-        "producer.send",
-        "kafka",
-        TopicEndpointKind::Producer,
-        "python-producer-send",
-        0,
-    ));
-    out.extend(extract_call_topic_literals(
-        text,
-        nodes,
-        "producer.produce",
-        "kafka",
-        TopicEndpointKind::Producer,
-        "python-producer-produce",
-        0,
-    ));
-    out.extend(extract_keyword_topic_literals(
-        text,
-        nodes,
-        "channel.basic_consume",
-        "queue",
-        "rabbitmq",
-        TopicEndpointKind::Consumer,
-        "python-rabbit-basic-consume",
-    ));
-    out.extend(extract_keyword_topic_literals(
-        text,
-        nodes,
-        "channel.basic_publish",
-        "exchange",
-        "rabbitmq",
-        TopicEndpointKind::Producer,
-        "python-rabbit-basic-publish",
-    ));
-    out.extend(extract_call_topic_literals(
-        text,
-        nodes,
-        "nc.subscribe",
-        "nats",
-        TopicEndpointKind::Consumer,
-        "python-nats-subscribe",
-        0,
-    ));
-    out.extend(extract_call_topic_literals(
-        text,
-        nodes,
-        "nc.publish",
-        "nats",
-        TopicEndpointKind::Producer,
-        "python-nats-publish",
-        0,
-    ));
-    out
 }
 
 fn annotation_string_values(annotation: &str, keys: &[&str]) -> Vec<String> {

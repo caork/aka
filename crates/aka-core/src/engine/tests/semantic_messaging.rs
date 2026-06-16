@@ -81,7 +81,10 @@ fn dedups_native_channel_edges_against_source_scan_topics() {
     let file = "src/orders/events.py";
     std::fs::write(
         repo.join(file),
-        r#"def publish_order(event):
+        r#"from kafka import KafkaProducer
+
+def publish_order(event):
+    producer = KafkaProducer()
     producer.send("orders.created", event)
 "#,
     )
@@ -94,7 +97,7 @@ fn dedups_native_channel_edges_against_source_scan_topics() {
         "publish_order",
         "src.orders.events.publish_order",
         file,
-        (1, 2),
+        (3, 5),
         json!({"language": "python"}),
     );
     insert_node_props(
@@ -770,13 +773,14 @@ fn synthesizes_python_message_topics() {
     let repo = temp_repo("python-message-topics");
     std::fs::write(
         repo.join("events.py"),
-        r#"from kafka import KafkaConsumer
+        r#"from kafka import KafkaConsumer, KafkaProducer
 
 def consume():
     consumer = KafkaConsumer("orders.created")
     return consumer
 
-def publish(producer):
+def publish():
+    producer = KafkaProducer()
     producer.send("orders.created", b"{}")
 "#,
     )
@@ -800,7 +804,7 @@ def publish(producer):
         "publish",
         "events.publish",
         "events.py",
-        (7, 8),
+        (7, 9),
         json!({
             "language": "python",
         }),
@@ -825,4 +829,120 @@ def publish(producer):
         .collect();
     assert!(edge_types.contains(&"CONSUMES_TOPIC".to_string()));
     assert!(edge_types.contains(&"PUBLISHES_TOPIC".to_string()));
+}
+
+#[test]
+fn ignores_python_message_topic_name_collisions_without_import_bindings() {
+    let repo = temp_repo("python-message-topic-name-collisions");
+    std::fs::write(
+        repo.join("events.py"),
+        r#"class Consumer:
+    pass
+
+def business_names(producer, channel, nc):
+    consumer = Consumer("orders.created")
+    producer.send("orders.created", b"{}")
+    channel.basic_consume(queue="orders.created")
+    channel.basic_publish(exchange="orders.created", routing_key="orders.created")
+    nc.subscribe("orders.created")
+    nc.publish("orders.created", b"{}")
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "business_names",
+        "events.business_names",
+        "events.py",
+        (4, 10),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert!(
+        synth
+            .topics
+            .iter()
+            .all(|topic| topic.name != "orders.created"),
+        "plain business variables named producer/channel/nc must not become message topics"
+    );
+}
+
+#[test]
+fn synthesizes_python_message_topics_from_import_bound_receivers() {
+    let repo = temp_repo("python-message-import-bound-topics");
+    std::fs::write(
+        repo.join("events.py"),
+        r#"from confluent_kafka import Consumer as CConsumer, Producer
+import pika
+import nats
+
+def consume_kafka():
+    consumer = CConsumer({"group.id": "orders-service"})
+    consumer.subscribe(["orders.created"])
+
+def publish_kafka():
+    p = Producer({})
+    p.produce("orders.created", b"{}")
+
+def rabbit_publish(conn):
+    ch = conn.channel()
+    ch.basic_publish(exchange="orders.exchange", routing_key="orders.created")
+
+async def nats_publish():
+    client = await nats.connect("nats://localhost:4222")
+    await client.publish("orders.created", b"{}")
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    for (id, name, qn, lines) in [
+        (1, "consume_kafka", "events.consume_kafka", (5, 7)),
+        (2, "publish_kafka", "events.publish_kafka", (9, 11)),
+        (3, "rabbit_publish", "events.rabbit_publish", (13, 15)),
+        (4, "nats_publish", "events.nats_publish", (17, 19)),
+    ] {
+        insert_function_node_props_at(
+            &conn,
+            id,
+            name,
+            qn,
+            "events.py",
+            lines,
+            json!({
+                "language": "python",
+            }),
+        );
+    }
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let kafka = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders.created" && topic.broker == "kafka")
+        .expect("kafka orders.created topic");
+    assert_eq!(kafka.consumers.len(), 1);
+    assert_eq!(kafka.producers.len(), 1);
+    assert_eq!(kafka.consumers[0].node_id, "cbm:1:events.consume_kafka");
+    assert_eq!(kafka.producers[0].node_id, "cbm:2:events.publish_kafka");
+
+    let rabbit = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders.exchange" && topic.broker == "rabbitmq")
+        .expect("rabbit exchange topic");
+    assert_eq!(rabbit.producers[0].node_id, "cbm:3:events.rabbit_publish");
+
+    let nats = synth
+        .topics
+        .iter()
+        .find(|topic| topic.name == "orders.created" && topic.broker == "nats")
+        .expect("nats orders.created topic");
+    assert_eq!(nats.producers[0].node_id, "cbm:4:events.nats_publish");
 }
