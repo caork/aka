@@ -240,6 +240,12 @@ copy_engine_resource() {
   assert_engine_resource_dir "${platform}" "${dst}"
 }
 
+assert_engine_file_nonempty() {
+  local engine_bin="$1"
+  [[ -f "${engine_bin}" ]] || { echo "error: engine 文件不存在: ${engine_bin}" >&2; return 1; }
+  [[ -s "${engine_bin}" ]] || { echo "error: engine 文件为空: ${engine_bin}" >&2; return 1; }
+}
+
 find_engine_resource_bin() {
   local platform dir exe
   platform="$1"
@@ -265,6 +271,7 @@ assert_engine_resource_dir() {
     echo "error: 桌面 engine 资源不可执行: ${engine_bin}" >&2
     return 1
   fi
+  assert_engine_file_nonempty "${engine_bin}"
   echo "==> 校验桌面 engine 资源: ${engine_bin}"
 }
 
@@ -678,7 +685,9 @@ package_windows_desktop() {
     embed_dir="${TAURI_DIR}/embedded-engine"
     rm -rf "${embed_dir}"
     mkdir -p "${embed_dir}"
+    assert_engine_file_nonempty "${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe"
     cp "${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe" "${embed_dir}/codebase-memory-mcp.exe"
+    assert_engine_file_nonempty "${embed_dir}/codebase-memory-mcp.exe"
     echo "==> 内嵌 Windows CBM engine: ${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe -> ${embed_dir}/codebase-memory-mcp.exe"
     rm -rf "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/engine"
     local tauri_args=(build --target "${win_triple}" --bundles nsis --ci)
@@ -708,7 +717,10 @@ package_windows_desktop() {
   fi
   [[ -f "${exe_path}" ]] || { echo "error: 找不到 Windows GUI exe（先去掉 --skip-build 构建一次）" >&2; return 1; }
 
-  setup_src="$(find "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/bundle/nsis" -maxdepth 1 -type f -name '*setup.exe' | sort | tail -n 1 || true)"
+  setup_src="$(find "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/bundle/nsis" -maxdepth 1 -type f -name "*${VERSION}*setup.exe" | sort | tail -n 1 || true)"
+  if [[ -z "${setup_src}" ]]; then
+    setup_src="$(find "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/bundle/nsis" -maxdepth 1 -type f -name '*setup.exe' | sort | tail -n 1 || true)"
+  fi
   [[ -f "${setup_src}" ]] || { echo "error: 找不到 Windows NSIS 安装器（先去掉 --skip-build 构建一次）" >&2; return 1; }
 
   setup_exe="${DIST_DIR}/aka-desktop-${VERSION}-${win_triple}-setup.exe"
@@ -727,8 +739,13 @@ package_windows_desktop() {
   rm -f "${portable_zip}"
   stage="$(mktemp -d)"
   cp "${exe_path}" "${stage}/AKA.exe"
-  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe)
+  mkdir -p "${stage}/engine"
+  assert_engine_file_nonempty "${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe"
+  cp "${TAURI_RESOURCES_DIR}/engine/codebase-memory-mcp.exe" "${stage}/engine/codebase-memory-mcp.exe"
+  assert_engine_file_nonempty "${stage}/engine/codebase-memory-mcp.exe"
+  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe engine/codebase-memory-mcp.exe)
   rm -rf "${stage}"
+  assert_zip_has_engine "${portable_zip}" "win-x64" ""
   echo "==> ${portable_zip}"
 }
 
