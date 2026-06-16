@@ -125,6 +125,100 @@ class OrderItem(Model):
 }
 
 #[test]
+fn synthesizes_python_django_columns_and_relationships() {
+    let repo = temp_repo("python-django-columns-relationships");
+    std::fs::create_dir_all(repo.join("orders")).unwrap();
+    std::fs::write(repo.join("orders/__init__.py"), "").unwrap();
+    std::fs::write(
+        repo.join("orders/models.py"),
+        r#"from django.db import models
+
+class Customer(models.Model):
+    email = models.EmailField(unique=True)
+
+class Tag(models.Model):
+    name = models.CharField(max_length=64)
+
+class Order(models.Model):
+    status = models.CharField(max_length=32)
+    total_cents = models.IntegerField()
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
+    tags = models.ManyToManyField("Tag")
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_node_props_at(
+        &conn,
+        1,
+        (
+            "Class",
+            "Customer",
+            "orders.models.Customer",
+            "orders/models.py",
+        ),
+        (3, 4),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        2,
+        ("Class", "Tag", "orders.models.Tag", "orders/models.py"),
+        (6, 7),
+        json!({
+            "language": "python",
+        }),
+    );
+    insert_node_props_at(
+        &conn,
+        3,
+        ("Class", "Order", "orders.models.Order", "orders/models.py"),
+        (9, 13),
+        json!({
+            "language": "python",
+        }),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    let order_table = synth
+        .persistence
+        .node_recs()
+        .into_iter()
+        .find(|node| {
+            node.label == "Table"
+                && node.properties.get("tableName").and_then(Value::as_str) == Some("orders_order")
+        })
+        .expect("orders_order table");
+    let columns: Vec<_> = order_table
+        .properties
+        .get("columns")
+        .and_then(Value::as_array)
+        .expect("columns")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(columns.contains(&"status"));
+    assert!(columns.contains(&"total_cents"));
+    assert!(columns.contains(&"customer_id"));
+    assert!(columns.contains(&"tags"));
+
+    let edges = synth.persistence.edge_recs();
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "HAS_RELATION"
+            && edge.source_id == "cbm:3:orders.models.Order"
+            && edge.target_id == "cbm:1:orders.models.Customer"
+    }));
+    assert!(edges.iter().any(|edge| {
+        edge.edge_type == "HAS_RELATION"
+            && edge.source_id == "cbm:3:orders.models.Order"
+            && edge.target_id == "cbm:2:orders.models.Tag"
+    }));
+}
+
+#[test]
 fn synthesizes_python_django_orm_write_table_access_edges() {
     let repo = temp_repo("python-django-orm-table-access");
     std::fs::write(

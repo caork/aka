@@ -775,6 +775,9 @@ fn python_column_names(text: &str, node: &SynthNode) -> Vec<String> {
             }
         }
     }
+    for column in python_django_column_names(body) {
+        columns.insert(column);
+    }
     columns.into_iter().collect()
 }
 
@@ -798,7 +801,83 @@ fn python_relationship_targets(text: &str) -> Vec<String> {
             offset = close + 1;
         }
     }
+    for target in python_django_relationship_targets(text) {
+        out.insert(target);
+    }
     out.into_iter().collect()
+}
+
+fn python_django_column_names(body: &str) -> Vec<String> {
+    let mut columns = BTreeSet::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let Some((name, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if !is_ident(name) {
+            continue;
+        }
+        let Some(field_kind) = python_django_field_kind(value.trim()) else {
+            continue;
+        };
+        if python_django_foreign_key_field(field_kind) {
+            columns.insert(format!("{name}_id"));
+        } else {
+            columns.insert(name.to_string());
+        }
+    }
+    columns.into_iter().collect()
+}
+
+fn python_django_relationship_targets(body: &str) -> Vec<String> {
+    let mut targets = BTreeSet::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let Some((_, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        let Some(field_kind) = python_django_field_kind(value) else {
+            continue;
+        };
+        if !python_django_relationship_field(field_kind) {
+            continue;
+        }
+        let Some(open) = value.find('(') else {
+            continue;
+        };
+        let close = find_matching_paren(value, open).unwrap_or(value.len());
+        let args = &value[open + 1..close];
+        if let Some(target) = split_top_level_commas(args)
+            .first()
+            .and_then(|arg| first_raw_string_literal(arg).or_else(|| first_type_token(arg)))
+        {
+            targets.insert(target);
+        }
+    }
+    targets.into_iter().collect()
+}
+
+fn python_django_field_kind(value: &str) -> Option<&str> {
+    let before_paren = value.split_once('(')?.0.trim();
+    let name = before_paren
+        .rsplit('.')
+        .next()
+        .unwrap_or(before_paren)
+        .trim();
+    (name.ends_with("Field") || python_django_relationship_field(name)).then_some(name)
+}
+
+fn python_django_relationship_field(field_kind: &str) -> bool {
+    matches!(
+        field_kind,
+        "ForeignKey" | "OneToOneField" | "ManyToManyField"
+    )
+}
+
+fn python_django_foreign_key_field(field_kind: &str) -> bool {
+    matches!(field_kind, "ForeignKey" | "OneToOneField")
 }
 
 fn java_column_names(text: &str) -> Vec<String> {
