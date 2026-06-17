@@ -122,6 +122,186 @@ OTEL_SERVICE_NAME = "orders-api"
     }));
 }
 
+#[test]
+fn synthesizes_python_observability_resources() {
+    let repo = temp_repo("python-observability-resources");
+    std::fs::write(
+        repo.join("observability.py"),
+        r#"import sentry_sdk
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
+
+def report_failure(exc):
+    sentry_sdk.capture_exception(exc)
+    sentry_sdk.capture_message("order failed")
+
+def trace_order(order):
+    with tracer.start_as_current_span("order.process"):
+        return order.id
+
+def ordinary_capture(exc):
+    return capture_exception(exc)
+"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "report_failure",
+        "observability.report_failure",
+        "observability.py",
+        (6, 8),
+        json!({"language": "python"}),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "trace_order",
+        "observability.trace_order",
+        "observability.py",
+        (10, 12),
+        json!({"language": "python"}),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "ordinary_capture",
+        "observability.ordinary_capture",
+        "observability.py",
+        (14, 15),
+        json!({"language": "python"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert_observability_config_edge(
+        &synth,
+        "observability:sentry",
+        "cbm:1:observability.report_failure",
+        "python-sentry-capture-exception",
+    );
+    assert_observability_config_edge(
+        &synth,
+        "observability:sentry",
+        "cbm:1:observability.report_failure",
+        "python-sentry-capture-message",
+    );
+    assert_observability_config_edge(
+        &synth,
+        "observability:opentelemetry",
+        "cbm:2:observability.trace_order",
+        "python-opentelemetry-current-span",
+    );
+    assert!(!synth
+        .resources
+        .iter()
+        .flat_map(|resource| resource.edge_recs())
+        .any(|edge| edge.source_id == "cbm:3:observability.ordinary_capture"));
+}
+
+#[test]
+fn synthesizes_java_observability_resources() {
+    let repo = temp_repo("java-observability-resources");
+    std::fs::create_dir_all(repo.join("src/main/java/com/example/observability")).unwrap();
+    let file = "src/main/java/com/example/observability/OrderObserver.java";
+    std::fs::write(
+        repo.join(file),
+        r#"package com.example.observability;
+
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.sentry.Sentry;
+
+class OrderObserver {
+    void report(Throwable error) {
+        Sentry.captureException(error);
+        Sentry.captureMessage("order failed");
+    }
+
+    void traceOrder() {
+        Span span = GlobalOpenTelemetry.getTracer("orders")
+            .spanBuilder("order.process")
+            .startSpan();
+        span.end();
+    }
+
+    void ordinaryCapture(Widget widget, Throwable error) {
+        widget.captureException(error);
+    }
+}"#,
+    )
+    .unwrap();
+
+    let conn = test_conn();
+    insert_function_node_props_at(
+        &conn,
+        1,
+        "report",
+        "com.example.observability.OrderObserver.report",
+        file,
+        (8, 11),
+        json!({"language": "java"}),
+    );
+    insert_function_node_props_at(
+        &conn,
+        2,
+        "traceOrder",
+        "com.example.observability.OrderObserver.traceOrder",
+        file,
+        (13, 18),
+        json!({"language": "java"}),
+    );
+    insert_function_node_props_at(
+        &conn,
+        3,
+        "ordinaryCapture",
+        "com.example.observability.OrderObserver.ordinaryCapture",
+        file,
+        (20, 22),
+        json!({"language": "java"}),
+    );
+
+    let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
+    assert_observability_config_edge(
+        &synth,
+        "observability:sentry",
+        "cbm:1:com.example.observability.OrderObserver.report",
+        "java-sentry-capture-exception",
+    );
+    assert_observability_config_edge(
+        &synth,
+        "observability:sentry",
+        "cbm:1:com.example.observability.OrderObserver.report",
+        "java-sentry-capture-message",
+    );
+    assert_observability_config_edge(
+        &synth,
+        "observability:opentelemetry",
+        "cbm:2:com.example.observability.OrderObserver.traceOrder",
+        "java-opentelemetry-tracer",
+    );
+    assert_observability_config_edge(
+        &synth,
+        "observability:opentelemetry",
+        "cbm:2:com.example.observability.OrderObserver.traceOrder",
+        "java-opentelemetry-span-builder",
+    );
+    assert_observability_config_edge(
+        &synth,
+        "observability:opentelemetry",
+        "cbm:2:com.example.observability.OrderObserver.traceOrder",
+        "java-opentelemetry-start-span",
+    );
+    assert!(!synth
+        .resources
+        .iter()
+        .flat_map(|resource| resource.edge_recs())
+        .any(|edge| edge.source_id
+            == "cbm:3:com.example.observability.OrderObserver.ordinaryCapture"));
+}
+
 fn assert_observability_config_edge(
     synth: &SynthGraph,
     url: &str,
@@ -134,11 +314,15 @@ fn assert_observability_config_edge(
         .find(|resource| resource.url == url)
         .unwrap_or_else(|| panic!("expected observability config resource {url}"));
     assert_eq!(resource.resource_type, "observability");
-    assert!(resource.edge_recs().iter().any(|edge| {
-        edge.source_id == source_id
-            && edge.edge_type == "ACCESSES_RESOURCE"
-            && edge.evidence.as_ref().unwrap()["strategy"] == strategy
-    }));
+    let edges = resource.edge_recs();
+    assert!(
+        edges.iter().any(|edge| {
+            edge.source_id == source_id
+                && edge.edge_type == "ACCESSES_RESOURCE"
+                && edge.evidence.as_ref().unwrap()["strategy"] == strategy
+        }),
+        "expected edge source={source_id} strategy={strategy}; edges={edges:#?}"
+    );
 }
 
 fn config_id(key: &str) -> String {

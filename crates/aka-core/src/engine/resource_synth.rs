@@ -115,7 +115,7 @@ pub(super) fn synthesize_resources_from_sources(
     let project_sources = ProjectSourceSet::discover(repo);
     let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
     let mut resources: BTreeMap<String, SynthResource> = BTreeMap::new();
-    let mut seen_edges: HashSet<(String, String)> = HashSet::new();
+    let mut seen_edges: HashSet<(String, String, String)> = HashSet::new();
     for (file_path, file_nodes) in by_file {
         let Some(text) = read_repo_text(repo, &file_path) else {
             continue;
@@ -146,7 +146,7 @@ pub(super) fn synthesize_resources_from_sources(
 
 fn ingest_resource_detection(
     resources: &mut BTreeMap<String, SynthResource>,
-    seen_edges: &mut HashSet<(String, String)>,
+    seen_edges: &mut HashSet<(String, String, String)>,
     file_path: &str,
     detection: ResourceDetection,
 ) {
@@ -165,7 +165,11 @@ fn ingest_resource_detection(
             resource_type: detection.resource_type.clone(),
             callers: Vec::new(),
         });
-    let edge_key = (resource.id.clone(), detection.node_id.clone());
+    let edge_key = (
+        resource.id.clone(),
+        detection.node_id.clone(),
+        edge_dedup_strategy(&detection),
+    );
     if !seen_edges.insert(edge_key) {
         return;
     }
@@ -174,6 +178,14 @@ fn ingest_resource_detection(
         file_path: file_path.to_string(),
         strategy: detection.strategy,
     });
+}
+
+fn edge_dedup_strategy(detection: &ResourceDetection) -> String {
+    if detection.resource_type == "http" {
+        "http".into()
+    } else {
+        detection.strategy.clone()
+    }
 }
 
 fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
@@ -371,6 +383,7 @@ fn extract_resource_detections(
     out.extend(extract_identity_resources(text, nodes));
     out.extend(extract_notification_resources(text, nodes));
     out.extend(extract_payment_resources(text, nodes));
+    out.extend(observability::extract_observability_resources(text, nodes));
     out.sort_by(|a, b| {
         a.url
             .cmp(&b.url)
