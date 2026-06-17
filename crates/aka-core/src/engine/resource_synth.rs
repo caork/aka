@@ -39,6 +39,8 @@ mod python_azure_blob;
 use python_azure_blob::extract_python_azure_blob_resources;
 mod search_index;
 use search_index::extract_search_index_resources;
+mod secret_provider;
+use secret_provider::extract_secret_provider_resources;
 mod storage_config;
 use storage_config::extract_storage_config_resources;
 mod vector_store;
@@ -210,6 +212,9 @@ fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
     out.extend(notification::extract_notification_config_resources(text));
     out.extend(observability::extract_observability_config_resources(text));
     out.extend(search_index::extract_search_index_config_resources(text));
+    out.extend(secret_provider::extract_secret_provider_config_resources(
+        text,
+    ));
     out.extend(ai_provider::extract_ai_provider_config_resources(text));
     out.extend(analytics::extract_analytics_config_resources(text));
     out.extend(business_api::extract_business_api_config_resources(text));
@@ -289,6 +294,15 @@ impl ResourceDetection {
         Self {
             url: format!("search-index:{index}"),
             resource_type: "search-index".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
+    fn secret_provider(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url: format!("secret-provider:{provider}"),
+            resource_type: "secret-provider".into(),
             node_id,
             strategy: strategy.into(),
         }
@@ -458,6 +472,7 @@ fn extract_resource_detections(
     out.extend(extract_notification_resources(text, nodes));
     out.extend(extract_payment_resources(text, nodes));
     out.extend(observability::extract_observability_resources(text, nodes));
+    out.extend(extract_secret_provider_resources(text, nodes));
     out.extend(extract_ai_provider_resources(text, nodes));
     out.extend(extract_analytics_resources(text, nodes));
     out.extend(extract_business_api_resources(text, nodes));

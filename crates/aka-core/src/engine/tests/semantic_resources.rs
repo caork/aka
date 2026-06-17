@@ -11,6 +11,7 @@ mod object_storage;
 mod observability;
 mod payment;
 mod search_index;
+mod secret_provider;
 mod storage_config;
 mod vector_store;
 mod warehouse;
