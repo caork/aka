@@ -20,7 +20,23 @@ Remove-Item -Recurse -Force $WorkDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $WorkDir | Out-Null
 $repo = Join-Path $WorkDir "spring-demo"
 $akaHome = Join-Path $WorkDir "aka-home"
-New-Item -ItemType Directory -Force $repo | Out-Null
+New-Item -ItemType Directory -Force $repo, (Join-Path $repo "src\main\java\com\example\demo") | Out-Null
+
+@"
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>spring-demo</artifactId>
+  <version>0.0.1</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+      <version>3.3.1</version>
+    </dependency>
+  </dependencies>
+</project>
+"@ | Set-Content -Encoding UTF8 (Join-Path $repo "pom.xml")
 
 @"
 package com.example.demo;
@@ -45,7 +61,7 @@ public class OrderController implements ApplicationRunner {
         service.reindexOrders();
     }
 }
-"@ | Set-Content -Encoding UTF8 (Join-Path $repo "OrderController.java")
+"@ | Set-Content -Encoding UTF8 (Join-Path $repo "src\main\java\com\example\demo\OrderController.java")
 
 @"
 package com.example.demo;
@@ -54,7 +70,7 @@ public class OrderService {
     public String loadOrder(String id) { return "order-" + id; }
     public void reindexOrders() { loadOrder("boot"); }
 }
-"@ | Set-Content -Encoding UTF8 (Join-Path $repo "OrderService.java")
+"@ | Set-Content -Encoding UTF8 (Join-Path $repo "src\main\java\com\example\demo\OrderService.java")
 
 function Wait-TcpPort {
     param(
@@ -172,20 +188,39 @@ function Get-ToolTextJson {
     $text | ConvertFrom-Json
 }
 
+function Get-DesktopLogTail {
+    $logPath = Join-Path $env:APPDATA "com.aka.desktop\logs\aka-desktop.log"
+    if (Test-Path $logPath) {
+        return Get-Content $logPath -Tail 160 | Out-String
+    }
+    return ""
+}
+
 function Wait-McpRepoReady {
-    param([int]$TimeoutSeconds = 120)
+    param(
+        [string]$ExpectedRepo,
+        [int]$TimeoutSeconds = 180
+    )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastText = ""
     while ((Get-Date) -lt $deadline) {
         $reposResult = Invoke-McpTool -Id 30 -Name "list_repos" -Arguments @{}
         if (!$reposResult.result.isError) {
             $text = ($reposResult.result.content | ForEach-Object { $_.text }) -join "`n"
-            if ($text -match "spring-demo" -and $text -notmatch "indexing") {
-                return $reposResult
+            $lastText = $text
+            $repos = $text | ConvertFrom-Json
+            foreach ($repoInfo in $repos.repos) {
+                if ($repoInfo.name -eq $ExpectedRepo -and $repoInfo.status -eq "ready") {
+                    return $repoInfo
+                }
+                if ($repoInfo.name -eq $ExpectedRepo -and $repoInfo.status -eq "failed") {
+                    throw "MCP repo $ExpectedRepo failed:`n$text`nDesktop log:`n$(Get-DesktopLogTail)"
+                }
             }
         }
         Start-Sleep -Seconds 1
     }
-    throw "MCP list_repos did not show a ready spring-demo repo within $TimeoutSeconds seconds"
+    throw "MCP list_repos did not show a ready $ExpectedRepo repo within $TimeoutSeconds seconds`nLast list_repos:`n$lastText`nDesktop log:`n$(Get-DesktopLogTail)"
 }
 
 Get-Process AKA -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -220,22 +255,24 @@ try {
 
     Write-Host "aka smoke: MCP analyze"
     $analyze = Invoke-McpTool -Id 3 -Name "analyze" -Arguments @{ repo_path = $repo }
-    Get-ToolTextJson -ToolResult $analyze | Out-Null
+    $analyzeOut = Get-ToolTextJson -ToolResult $analyze
+    $repoName = if ($analyzeOut.repo) { [string]$analyzeOut.repo } else { "spring-demo" }
+    Write-Host "aka smoke: analyze repo=$repoName status=$($analyzeOut.status)"
     Write-Host "aka smoke: waiting MCP repo readiness"
-    $readyRepos = Wait-McpRepoReady
+    $readyRepo = Wait-McpRepoReady -ExpectedRepo $repoName
 
     Write-Host "aka smoke: MCP list/search/context"
-    $listRepos = $readyRepos
-    $searchCode = Invoke-McpTool -Id 5 -Name "search_code" -Arguments @{ query = "reindexOrders"; limit = 5 }
-    $search = Invoke-McpTool -Id 6 -Name "query" -Arguments @{ query = "OrderController"; limit = 5 }
-    $context = Invoke-McpTool -Id 7 -Name "context" -Arguments @{ symbol = "OrderService" }
+    $listRepos = Invoke-McpTool -Id 4 -Name "list_repos" -Arguments @{}
+    $searchCode = Invoke-McpTool -Id 5 -Name "search_code" -Arguments @{ repo = $repoName; query = "reindexOrders"; limit = 5 }
+    $search = Invoke-McpTool -Id 6 -Name "query" -Arguments @{ repo = $repoName; query = "OrderController"; limit = 5 }
+    $context = Invoke-McpTool -Id 7 -Name "context" -Arguments @{ repo = $repoName; symbol = "OrderService" }
 
     $listText = $listRepos | ConvertTo-Json -Depth 32 -Compress
     $searchCodeText = $searchCode | ConvertTo-Json -Depth 32 -Compress
     $searchText = $search | ConvertTo-Json -Depth 32 -Compress
     $contextText = $context | ConvertTo-Json -Depth 32 -Compress
-    if ($listText -notmatch "spring-demo") {
-        throw "list_repos output did not include spring-demo"
+    if ($listText -notmatch $repoName) {
+        throw "list_repos output did not include $repoName"
     }
     if ($searchCodeText -notmatch "reindexOrders") {
         throw "search_code output did not include reindexOrders"
@@ -247,8 +284,7 @@ try {
         throw "context output did not include OrderService"
     }
 
-    $logPath = Join-Path $env:APPDATA "com.aka.desktop\logs\aka-desktop.log"
-    $logTail = if (Test-Path $logPath) { Get-Content $logPath -Tail 120 | Out-String } else { "" }
+    $logTail = Get-DesktopLogTail
     if ($logTail -notmatch "desktop runtime configured") {
         throw "desktop log did not include runtime configuration marker"
     }
@@ -260,10 +296,16 @@ try {
         ok = $true
         portableDir = $portable
         productShape = "single AKA.exe"
+        repo = $repoName
         repoPath = $repo
         akaHome = $akaHome
         mcpServer = $init.result.serverInfo
         mcpSession = [bool]$script:McpSessionId
+        stats = @{
+            nodes = $readyRepo.nodes
+            edges = $readyRepo.edges
+            status = $readyRepo.status
+        }
         desktopProcessAlive = (-not $desktop.HasExited)
         desktopMcpPort = 4112
         searchCodeMatched = ($searchCodeText -match "reindexOrders")
