@@ -7,16 +7,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $portable = (Resolve-Path $PortableDir).Path
 $akaExe = Join-Path $portable "AKA.exe"
-$engineExe = Join-Path $portable "engine\aka-engine.exe"
 if (!(Test-Path $akaExe)) {
     throw "Missing AKA.exe in $portable"
 }
-if (!(Test-Path $engineExe)) {
-    throw "Missing engine\aka-engine.exe in $portable"
-}
+Write-Host "aka smoke: portable=$portable"
 
 Remove-Item -Recurse -Force $WorkDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $WorkDir | Out-Null
@@ -58,78 +56,222 @@ public class OrderService {
 }
 "@ | Set-Content -Encoding UTF8 (Join-Path $repo "OrderService.java")
 
-function Invoke-Aka {
+function Wait-TcpPort {
     param(
-        [string[]]$Arguments,
-        [string]$Name
+        [string]$HostName,
+        [int]$Port,
+        [int]$TimeoutSeconds = 30
     )
-    $stdout = Join-Path $WorkDir "$Name.out.txt"
-    $stderr = Join-Path $WorkDir "$Name.err.txt"
-    $env:AKA_HOME = $akaHome
-    $process = Start-Process `
-        -FilePath $akaExe `
-        -ArgumentList $Arguments `
-        -NoNewWindow `
-        -Wait `
-        -PassThru `
-        -RedirectStandardOutput $stdout `
-        -RedirectStandardError $stderr
-    $out = if (Test-Path $stdout) { Get-Content $stdout -Raw } else { "" }
-    $err = if (Test-Path $stderr) { Get-Content $stderr -Raw } else { "" }
-    if ($process.ExitCode -ne 0) {
-        throw "$Name failed with exit code $($process.ExitCode)`nSTDOUT:`n$out`nSTDERR:`n$err"
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-NetConnection -ComputerName $HostName -Port $Port -InformationLevel Quiet) {
+            return
+        }
+        Start-Sleep -Milliseconds 500
     }
+    throw "$HostName`:$Port did not open within $TimeoutSeconds seconds"
+}
+
+$script:McpSessionId = $null
+
+function ConvertFrom-McpResponse {
+    param([string[]]$Lines)
+    foreach ($line in $Lines) {
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith("{")) {
+            return $trimmed | ConvertFrom-Json
+        }
+        if (!$trimmed.StartsWith("data:")) {
+            continue
+        }
+        $payload = $trimmed.Substring(5).Trim()
+        if ($payload.StartsWith("{")) {
+            return $payload | ConvertFrom-Json
+        }
+    }
+    throw "MCP response did not contain a JSON payload"
+}
+
+function Invoke-McpRaw {
+    param(
+        [hashtable]$Body,
+        [switch]$Notification,
+        [int]$TimeoutSeconds = 120
+    )
+    $json = $Body | ConvertTo-Json -Depth 16 -Compress
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $request = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:4112/mcp")
+    $request.Method = "POST"
+    $request.ContentType = "application/json"
+    $request.Accept = "application/json, text/event-stream"
+    $request.Timeout = $TimeoutSeconds * 1000
+    $request.ReadWriteTimeout = $TimeoutSeconds * 1000
+    $request.ContentLength = $bytes.Length
+    if ($script:McpSessionId) {
+        $request.Headers.Add("Mcp-Session-Id", $script:McpSessionId)
+    }
+    $requestStream = $request.GetRequestStream()
+    try {
+        $requestStream.Write($bytes, 0, $bytes.Length)
+    } finally {
+        $requestStream.Dispose()
+    }
+    if ($Notification) {
+        $response = $request.GetResponse()
+        $response.Dispose()
+        return $null
+    }
+    $response = $request.GetResponse()
+    $session = $response.Headers["Mcp-Session-Id"]
+    if ($session) {
+        $script:McpSessionId = [string]$session
+    }
+    $reader = [System.IO.StreamReader]::new($response.GetResponseStream(), [System.Text.Encoding]::UTF8)
+    try {
+        $lines = New-Object System.Collections.Generic.List[string]
+        while (($line = $reader.ReadLine()) -ne $null) {
+            $lines.Add($line)
+            $trimmed = $line.Trim()
+            if ($trimmed.StartsWith("{") -or ($trimmed.StartsWith("data:") -and $trimmed.Substring(5).Trim().StartsWith("{"))) {
+                return ConvertFrom-McpResponse -Lines $lines
+            }
+        }
+        ConvertFrom-McpResponse -Lines $lines
+    } finally {
+        $reader.Dispose()
+        $response.Dispose()
+    }
+}
+
+function Invoke-McpTool {
+    param(
+        [int]$Id,
+        [string]$Name,
+        [hashtable]$Arguments
+    )
+    Invoke-McpRaw -Body @{
+        jsonrpc = "2.0"
+        id = $Id
+        method = "tools/call"
+        params = @{
+            name = $Name
+            arguments = $Arguments
+        }
+    }
+}
+
+function Get-ToolTextJson {
+    param($ToolResult)
+    if ($ToolResult.result.isError) {
+        throw "MCP tool failed: $(($ToolResult.result.content | ForEach-Object { $_.text }) -join "`n")"
+    }
+    $text = ($ToolResult.result.content | ForEach-Object { $_.text }) -join "`n"
+    if (!$text.Trim().StartsWith("{") -and !$text.Trim().StartsWith("[")) {
+        return $text
+    }
+    $text | ConvertFrom-Json
+}
+
+function Wait-McpRepoReady {
+    param([int]$TimeoutSeconds = 120)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $reposResult = Invoke-McpTool -Id 30 -Name "list_repos" -Arguments @{}
+        if (!$reposResult.result.isError) {
+            $text = ($reposResult.result.content | ForEach-Object { $_.text }) -join "`n"
+            if ($text -match "spring-demo" -and $text -notmatch "indexing") {
+                return $reposResult
+            }
+        }
+        Start-Sleep -Seconds 1
+    }
+    throw "MCP list_repos did not show a ready spring-demo repo within $TimeoutSeconds seconds"
+}
+
+Get-Process AKA -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+$env:AKA_HOME = $akaHome
+Write-Host "aka smoke: starting AKA.exe"
+$desktop = Start-Process -FilePath $akaExe -PassThru
+try {
+    Wait-TcpPort -HostName "127.0.0.1" -Port 4112 -TimeoutSeconds 45
+    Write-Host "aka smoke: MCP port ready"
+
+    Write-Host "aka smoke: MCP initialize"
+    $init = Invoke-McpRaw -Body @{
+        jsonrpc = "2.0"
+        id = 1
+        method = "initialize"
+        params = @{
+            protocolVersion = "2025-06-18"
+            capabilities = @{}
+            clientInfo = @{
+                name = "aka-windows-portable-smoke"
+                version = "1.0"
+            }
+        }
+    }
+    Write-Host "aka smoke: MCP tools/list"
+    $tools = Invoke-McpRaw -Body @{ jsonrpc = "2.0"; id = 2; method = "tools/list"; params = @{} }
+    foreach ($toolName in @("analyze", "list_repos", "search_code", "query", "context")) {
+        if (!($tools.result.tools | Where-Object { $_.name -eq $toolName })) {
+            throw "MCP tools/list missing $toolName"
+        }
+    }
+
+    Write-Host "aka smoke: MCP analyze"
+    $analyze = Invoke-McpTool -Id 3 -Name "analyze" -Arguments @{ repo_path = $repo }
+    Get-ToolTextJson -ToolResult $analyze | Out-Null
+    Write-Host "aka smoke: waiting MCP repo readiness"
+    $readyRepos = Wait-McpRepoReady
+
+    Write-Host "aka smoke: MCP list/search/context"
+    $listRepos = $readyRepos
+    $searchCode = Invoke-McpTool -Id 5 -Name "search_code" -Arguments @{ query = "reindexOrders"; limit = 5 }
+    $search = Invoke-McpTool -Id 6 -Name "query" -Arguments @{ query = "OrderController"; limit = 5 }
+    $context = Invoke-McpTool -Id 7 -Name "context" -Arguments @{ symbol = "OrderService" }
+
+    $listText = $listRepos | ConvertTo-Json -Depth 32 -Compress
+    $searchCodeText = $searchCode | ConvertTo-Json -Depth 32 -Compress
+    $searchText = $search | ConvertTo-Json -Depth 32 -Compress
+    $contextText = $context | ConvertTo-Json -Depth 32 -Compress
+    if ($listText -notmatch "spring-demo") {
+        throw "list_repos output did not include spring-demo"
+    }
+    if ($searchCodeText -notmatch "reindexOrders") {
+        throw "search_code output did not include reindexOrders"
+    }
+    if ($searchText -notmatch "OrderController") {
+        throw "query output did not include OrderController"
+    }
+    if ($contextText -notmatch "OrderService") {
+        throw "context output did not include OrderService"
+    }
+
+    $logPath = Join-Path $env:APPDATA "com.aka.desktop\logs\aka-desktop.log"
+    $logTail = if (Test-Path $logPath) { Get-Content $logPath -Tail 120 | Out-String } else { "" }
+    if ($logTail -notmatch "desktop runtime configured") {
+        throw "desktop log did not include runtime configuration marker"
+    }
+    if ($logTail -notmatch "desktop MCP server started") {
+        throw "desktop log did not include MCP startup marker"
+    }
+
     [PSCustomObject]@{
-        ExitCode = $process.ExitCode
-        Stdout = $out
-        Stderr = $err
+        ok = $true
+        portableDir = $portable
+        productShape = "single AKA.exe"
+        repoPath = $repo
+        akaHome = $akaHome
+        mcpServer = $init.result.serverInfo
+        mcpSession = [bool]$script:McpSessionId
+        desktopProcessAlive = (-not $desktop.HasExited)
+        desktopMcpPort = 4112
+        searchCodeMatched = ($searchCodeText -match "reindexOrders")
+        queryMatched = ($searchText -match "OrderController")
+        contextMatched = ($contextText -match "OrderService")
+    } | ConvertTo-Json -Depth 12
+} finally {
+    if ($desktop -and !$desktop.HasExited) {
+        Stop-Process -Id $desktop.Id -Force -ErrorAction SilentlyContinue
     }
 }
-
-$engineVersion = & $engineExe --version
-$analyze = Invoke-Aka -Name "analyze" -Arguments @("analyze", $repo)
-$registryPath = Join-Path $akaHome "registry.json"
-if (!(Test-Path $registryPath)) {
-    throw "Missing registry.json after analyze"
-}
-$registry = Get-Content $registryPath -Raw | ConvertFrom-Json
-if (!$registry.repos -or $registry.repos.Count -lt 1) {
-    throw "registry.json has no repos"
-}
-$entry = $registry.repos[0]
-$dataDir = $entry.dataDir
-$required = @(
-    "artifact\manifest.json",
-    "artifact\nodes.ndjson",
-    "artifact\edges.ndjson",
-    "artifact\chunks.ndjson",
-    "graph.db",
-    "search\meta.json"
-)
-foreach ($relative in $required) {
-    $path = Join-Path $dataDir $relative
-    if (!(Test-Path $path)) {
-        throw "Missing smoke artifact: $path"
-    }
-}
-
-$searchCode = Invoke-Aka -Name "search-code" -Arguments @("search-code", "reindexOrders", "--limit", "5")
-if ($searchCode.Stdout -notmatch "reindexOrders") {
-    throw "search-code output did not include reindexOrders"
-}
-
-$search = Invoke-Aka -Name "search" -Arguments @("search", "OrderController", "--limit", "5")
-if ($search.Stdout -notmatch "OrderController") {
-    throw "search output did not include OrderController"
-}
-
-[PSCustomObject]@{
-    ok = $true
-    portableDir = $portable
-    engineVersion = ($engineVersion -join "`n")
-    repoPath = $repo
-    akaHome = $akaHome
-    stats = $entry.stats
-    searchCodeMatched = ($searchCode.Stdout -match "reindexOrders")
-    searchMatched = ($search.Stdout -match "OrderController")
-} | ConvertTo-Json -Depth 8

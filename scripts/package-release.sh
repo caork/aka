@@ -23,7 +23,7 @@
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe.sig
 #                                             Windows Tauri updater 签名（存在签名密钥时生成）
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-portable.zip
-#                                             Windows Tauri GUI portable app（engine/aka-engine.exe 随包携带）
+#                                             Windows Tauri GUI portable app（单文件 AKA.exe，engine 作为 Tauri 资源内置）
 #
 # 产物（--checksums-only 子命令，主流程不自动跑）:
 #   dist/SHA256SUMS                         dist/ 下所有产物（含 dist/docker/*）的 sha256
@@ -763,13 +763,9 @@ package_windows_desktop() {
   rm -f "${portable_zip}"
   stage="$(mktemp -d)"
   cp "${exe_path}" "${stage}/AKA.exe"
-  mkdir -p "${stage}/engine"
   assert_engine_file_nonempty "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe"
-  cp "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe" "${stage}/engine/aka-engine.exe"
-  assert_engine_file_nonempty "${stage}/engine/aka-engine.exe"
-  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe engine/aka-engine.exe)
+  (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe)
   rm -rf "${stage}"
-  assert_zip_has_engine "${portable_zip}" "win-x64" ""
   echo "==> ${portable_zip}"
 }
 
