@@ -12,3 +12,4 @@ mod payment;
 mod search_index;
 mod storage_config;
 mod vector_store;
+mod workflow_engine;
