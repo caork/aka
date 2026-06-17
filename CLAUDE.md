@@ -14,6 +14,7 @@
 - **产品形态只有桌面版 + 插件包**（用户拍板）：对外发布、文档、汇报、阶段状态和发包说明不要再说 aka CLI / CLI 版 / 裸 CLI，也不要写"aka-cli 自身编译/发包"这类口径。即使 cargo/CI 日志里出现 `aka-cli`，也只能称为"内部 runtime crate 编译/验证"。`apps/cli`、`aka-cli` crate、`AKA mcp/analyze/serve` 子命令只视为桌面包/插件 fallback/headless Docker 的内部宿主与源码调试入口；用户正常使用路径是启动 AKA 桌面端和安装 Claude Code / OpenCode / Codex 插件/配置包。
 - **发布/阶段状态口径检查**：任何阶段性汇报、发包清单、CI 说明、邮件和 PR 描述都必须围绕"桌面版"与"插件包"展开；如果需要提到 `cargo build -p aka-cli`、`aka-cli` 或 `apps/cli`，只能写成"内部 runtime/宿主 crate 的编译验证"，不能把它列为用户可见产品、独立交付物或发布步骤。
 - **Windows 发布硬门槛**：Windows portable 只按单文件 `AKA.exe` 用户形态交付，不要求也不展示外置 `engine\aka-engine.exe`；engine 必须作为 Tauri 资源内置并由 `AKA.exe` 实际驱动。准备发布 Windows 包时，必须在 Windows 侧运行发布产物 `AKA.exe` 做完整系统测试：启动桌面、确认 `127.0.0.1:4112/mcp`、经 MCP 调 `analyze` 完成索引构图、再经 MCP 调 `list_repos` / `search_code` / `query` / `context` 验证查询。平时开发可按改动面选择轻量测试，但发包不能只依赖 macOS/Linux 或 CI 编译。
+- **Windows 快速迭代验证优先本地打包，不默认等 GitHub CI**：日常验证 GUI/Rust/Tauri 改动时，先在本机用 `cargo-xwin` 交叉编译 Windows `AKA.exe`，跳过 NSIS 安装器、updater 签名、checksums 和 Release 上传；只有准备正式发版、需要签名/updater 资产、或用户明确要求 CI release 时，才走 GitHub Actions 发布流水线。engine C 源码未变时复用上一次可信的 Windows `aka-engine.exe`；engine 变更后先在 Windows/CI/可用 Windows 构建环境产出新的 `aka-engine.exe`，再作为 `AKA_ENGINE_BIN_WIN_X64` 输入本地快速包。
 - **渲染性能红线**：WebGL 渲染器每帧 draw call O(1)（与图规模无关），pan/zoom 60fps；动 `apps/desktop/src/graph/renderer.ts` 后必须实测 FPS（页面右下角徽章）。
 - **验证 Web/UI 用浏览器实际渲染**（Playwright MCP 打开页面看真实结果），不要只凭 curl 下结论。
 
@@ -52,6 +53,36 @@ scripts/sync-engine.sh
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 cd apps/desktop && npm run build
 ```
+
+### Windows 快速迭代验证（本地 smoke，不是正式发版）
+
+目标是快速得到可丢到 Windows 机器上跑的单文件 `AKA.exe`，用于确认桌面端/Tauri/Rust runtime 行为；不要为每次开发验证等待 GitHub Actions 的完整 release job。
+
+```bash
+# 一次性准备：本机需要 cargo-xwin 和 Windows Rust target
+cargo install cargo-xwin
+rustup target add x86_64-pc-windows-msvc
+
+# 需要一个可信的 Windows engine；engine 未变时可复用上一轮产物
+export AKA_ENGINE_BIN_WIN_X64=/absolute/path/to/aka-engine.exe
+
+# 准备 Tauri Windows 资源（必须命名为 aka-engine.exe，不能带旧名）
+rm -rf apps/desktop/src-tauri/resources/engine
+mkdir -p apps/desktop/src-tauri/resources/engine
+cp "$AKA_ENGINE_BIN_WIN_X64" apps/desktop/src-tauri/resources/engine/aka-engine.exe
+cp engine/ENGINE_SHA apps/desktop/src-tauri/resources/engine/ENGINE_SHA
+
+# 只构建 Windows exe，跳过 NSIS/updater/checksums/Release 上传
+cd apps/desktop
+npm run tauri -- build --runner cargo-xwin --target x86_64-pc-windows-msvc --no-bundle --ci
+cd ../..
+
+# 输出快速验证用单文件；正式 release 仍由 scripts/package-release.sh / CI 产出
+mkdir -p dist/quick
+cp apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/aka-desktop.exe dist/quick/AKA.exe
+```
+
+把 `dist/quick/AKA.exe` 放到 Windows 侧做轻量 smoke：启动桌面、确认本地 MCP 监听、跑一次 `analyze` 和基础查询。只有确认功能满足预期后，才触发正式 CI 发版；正式 Windows 发版仍必须按上面的硬门槛在 Windows 侧跑完整 `scripts/smoke-windows-portable.ps1`。
 
 ## 任务流程（每个任务必走）
 
