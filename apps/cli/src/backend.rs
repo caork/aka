@@ -3648,7 +3648,20 @@ mod tests {
         std::env::set_var("AKA_HOME", &home);
         let path = repo.canonicalize().unwrap();
         let name = derive_local_name(&repo);
-        finalize_entry(&path, &name, "local", None).unwrap();
+        let mut registry = Registry::load().unwrap();
+        registry.upsert(RepoEntry {
+            name: name.clone(),
+            repo_path: path.clone(),
+            data_dir: aka_home().join("repos").join("workspace-update-path"),
+            indexed_at: Some(1),
+            engine_sha: None,
+            stats: ArtifactStats::default(),
+            embeddings_enabled: false,
+            source_kind: "local".into(),
+            source_url: None,
+            render_max_nodes: None,
+        });
+        registry.save().unwrap();
 
         let backend = AkaBackend::new();
         let summary = backend
