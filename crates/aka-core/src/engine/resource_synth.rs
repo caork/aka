@@ -43,6 +43,8 @@ mod storage_config;
 use storage_config::extract_storage_config_resources;
 mod vector_store;
 use vector_store::extract_vector_store_resources;
+mod warehouse;
+use warehouse::extract_warehouse_resources;
 mod workflow_engine;
 use workflow_engine::extract_workflow_engine_resources;
 
@@ -212,6 +214,7 @@ fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
     out.extend(analytics::extract_analytics_config_resources(text));
     out.extend(business_api::extract_business_api_config_resources(text));
     out.extend(vector_store::extract_vector_store_config_resources(text));
+    out.extend(warehouse::extract_warehouse_config_resources(text));
     out.extend(workflow_engine::extract_workflow_engine_config_resources(
         text,
     ));
@@ -354,6 +357,15 @@ impl ResourceDetection {
         }
     }
 
+    fn warehouse(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url: format!("warehouse:{provider}"),
+            resource_type: "warehouse".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
     fn business_api(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
         Self {
             url: format!("business-api:{provider}"),
@@ -450,6 +462,7 @@ fn extract_resource_detections(
     out.extend(extract_analytics_resources(text, nodes));
     out.extend(extract_business_api_resources(text, nodes));
     out.extend(extract_vector_store_resources(text, nodes));
+    out.extend(extract_warehouse_resources(text, nodes));
     out.extend(extract_workflow_engine_resources(text, nodes));
     out.sort_by(|a, b| {
         a.url
