@@ -37,6 +37,8 @@ mod search_index;
 use search_index::extract_search_index_resources;
 mod storage_config;
 use storage_config::extract_storage_config_resources;
+mod vector_store;
+use vector_store::extract_vector_store_resources;
 
 #[derive(Debug, Clone)]
 pub(super) struct SynthResource {
@@ -201,6 +203,7 @@ fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
     out.extend(observability::extract_observability_config_resources(text));
     out.extend(search_index::extract_search_index_config_resources(text));
     out.extend(ai_provider::extract_ai_provider_config_resources(text));
+    out.extend(vector_store::extract_vector_store_config_resources(text));
     out
 }
 
@@ -322,6 +325,15 @@ impl ResourceDetection {
         }
     }
 
+    fn vector_store(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url: format!("vector-store:{provider}"),
+            resource_type: "vector-store".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
     fn identity(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
         Self {
             url: format!("identity:{provider}"),
@@ -397,6 +409,7 @@ fn extract_resource_detections(
     out.extend(extract_payment_resources(text, nodes));
     out.extend(observability::extract_observability_resources(text, nodes));
     out.extend(extract_ai_provider_resources(text, nodes));
+    out.extend(extract_vector_store_resources(text, nodes));
     out.sort_by(|a, b| {
         a.url
             .cmp(&b.url)

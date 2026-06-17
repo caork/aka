@@ -10,3 +10,4 @@ mod observability;
 mod payment;
 mod search_index;
 mod storage_config;
+mod vector_store;
