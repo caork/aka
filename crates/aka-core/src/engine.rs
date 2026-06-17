@@ -1766,13 +1766,61 @@ fn synthesize_graph_with_progress(
         0,
         0,
     );
+    emit_phase(
+        on_event,
+        "aka-engine:export-artifacts:synthesize:existing-call-pairs",
+        0,
+        0,
+    );
     let existing_call_pairs = load_existing_call_pairs(conn, project)?;
-    let synthetic_edges =
-        synthesize_dependency_edges_from_sources(repo, &nodes, &existing_call_pairs);
+    emit_phase(
+        on_event,
+        "aka-engine:export-artifacts:synthesize:dependency-edges",
+        0,
+        0,
+    );
+    let synthetic_edges = synthesize_dependency_edges_from_sources(
+        repo,
+        &nodes,
+        &existing_call_pairs,
+        |current, total| {
+            emit_phase(
+                on_event,
+                "aka-engine:export-artifacts:synthesize:dependency-edges",
+                current,
+                total,
+            );
+        },
+    );
+    emit_phase(
+        on_event,
+        format!(
+            "aka-engine:export-artifacts:synthesize:call-graph ({} synthetic edges)",
+            synthetic_edges.len()
+        ),
+        0,
+        0,
+    );
     let calls = load_call_graph(conn, project, &nodes, &synthetic_edges)?;
     let project_sources = ProjectSourceSet::discover(repo);
+    emit_phase(
+        on_event,
+        "aka-engine:export-artifacts:synthesize:project-subgraph",
+        0,
+        0,
+    );
     let process_nodes = project_process_nodes(repo, &nodes, &project_sources);
     let process_calls = calls.project_subgraph(&process_nodes);
+    emit_phase(
+        on_event,
+        format!(
+            "aka-engine:export-artifacts:synthesize:process-hints ({} process nodes / {} call edges)",
+            process_nodes.len(),
+            process_calls.edges.len()
+        ),
+        0,
+        0,
+    );
     let mut command_entry_hints = command_entry_hints_from_sources(repo, &nodes);
     for (handler_id, strategy) in job_entry_hints_from_sources(repo, &nodes) {
         command_entry_hints

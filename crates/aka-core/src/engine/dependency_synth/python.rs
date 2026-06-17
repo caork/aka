@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, HashSet};
 use serde_json::json;
 
 use super::super::{
-    find_call_args, node_at_offset, split_top_level_commas, stable_hash, EdgeRec, SynthNode,
+    find_call_args, find_matching_paren, node_at_offset, skip_ws, split_top_level_commas,
+    stable_hash, EdgeRec, SynthNode,
 };
 use super::dependency_edge;
 use super::lookup::NodeLookup;
@@ -86,21 +87,70 @@ fn detect_python_direct_call_edges(
         seen: &mut seen,
         out: &mut out,
     };
-    for target in callables {
-        for call in find_call_args(text, target.name) {
-            let Some(strategy) = python_direct_call_strategy(text, call.start, target.name) else {
-                continue;
-            };
-            context.push(target, call.start, strategy);
+    let mut callable_names: HashSet<&str> = HashSet::new();
+    for target in &callables {
+        callable_names.insert(target.name);
+    }
+    for call in scan_python_callable_calls(text) {
+        if !callable_names.contains(call.name) {
+            continue;
         }
-        let receiver_callee = format!(".{}", target.name);
-        for call in find_call_args(text, &receiver_callee) {
-            let Some(strategy) = python_receiver_call_strategy(text, call.start + 1, target.name)
-            else {
-                continue;
+        for target in callables
+            .iter()
+            .copied()
+            .filter(|target| target.name == call.name)
+        {
+            let strategy = if call.receiver_dot {
+                python_receiver_call_strategy(text, call.name_start, target.name)
+            } else {
+                python_direct_call_strategy(text, call.name_start, target.name)
             };
-            context.push(target, call.start, strategy);
+            if let Some(strategy) = strategy {
+                context.push(target, call.name_start, strategy);
+            }
         }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PythonCallableCall<'a> {
+    name: &'a str,
+    name_start: usize,
+    receiver_dot: bool,
+}
+
+fn scan_python_callable_calls(text: &str) -> Vec<PythonCallableCall<'_>> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if !(byte == b'_' || byte.is_ascii_alphabetic()) {
+            idx += 1;
+            continue;
+        }
+        let start = idx;
+        idx += 1;
+        while idx < bytes.len() && (bytes[idx] == b'_' || bytes[idx].is_ascii_alphanumeric()) {
+            idx += 1;
+        }
+        let name = &text[start..idx];
+        let open = skip_ws(text, idx);
+        if bytes.get(open) != Some(&b'(') {
+            continue;
+        }
+        let Some(close) = find_matching_paren(text, open) else {
+            idx = open.saturating_add(1);
+            continue;
+        };
+        let receiver_dot = text[..start].chars().rev().find(|ch| !ch.is_whitespace()) == Some('.');
+        out.push(PythonCallableCall {
+            name,
+            name_start: start,
+            receiver_dot,
+        });
+        idx = close.saturating_add(1);
     }
     out
 }

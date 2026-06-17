@@ -399,6 +399,21 @@ impl JobInfo {
                     self.push_log(format!("register: {phase}"));
                     return;
                 }
+                if phase_lc.contains("export-artifacts") {
+                    self.progress.stage = "adapter".into();
+                    self.progress.message = phase.clone();
+                    self.progress.current = (*total > 0 || *current > 0).then_some(*current);
+                    self.progress.total = (*total > 0).then_some(*total);
+                    self.progress.percent = adapter_percent(phase, *current, *total)
+                        .max(self.progress.percent)
+                        .min(92.0);
+                    if *total > 0 {
+                        self.push_log(format!("adapter: {phase} ({current}/{total})"));
+                    } else {
+                        self.push_log(format!("adapter: {phase}"));
+                    }
+                    return;
+                }
                 self.progress.stage = "engine".into();
                 self.progress.message = phase.clone();
                 self.progress.current = (*total > 0 || *current > 0).then_some(*current);
@@ -455,6 +470,53 @@ struct AutoIndexState {
     quick: RepoQuickState,
     first_seen_dirty: Option<Instant>,
     last_dirty_quick: Option<RepoQuickState>,
+}
+
+fn adapter_percent(phase: &str, current: u64, total: u64) -> f32 {
+    let phase = phase.to_ascii_lowercase();
+    if phase.contains("dependency-edges") && total > 0 {
+        let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
+        return 80.0 + ratio * 2.0;
+    }
+    if phase.contains("nodes") && total > 0 {
+        let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
+        return 86.0 + ratio;
+    }
+    if phase.contains("edges") && total > 0 {
+        let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
+        return 87.0 + ratio;
+    }
+    if phase.contains("chunks") && total > 0 {
+        let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
+        return 88.0 + ratio * 2.0;
+    }
+    if phase.contains("inspect-db") {
+        77.0
+    } else if phase.contains("synthesize:native-labels") {
+        78.0
+    } else if phase.contains("synthesize:nodes") {
+        79.0
+    } else if phase.contains("synthesize:dependency-edges") {
+        80.0
+    } else if phase.contains("synthesize:call-graph") {
+        82.0
+    } else if phase.contains("synthesize:project-subgraph") {
+        83.0
+    } else if phase.contains("synthesize:communities") {
+        84.0
+    } else if phase.contains("synthesize:processes") {
+        85.0
+    } else if phase.contains("nodes") {
+        86.0
+    } else if phase.contains("edges") {
+        87.0
+    } else if phase.contains("chunks") {
+        88.0
+    } else if phase.contains("manifest") {
+        91.0
+    } else {
+        81.0
+    }
 }
 
 fn engine_percent(phase: &str, current: u64, total: u64) -> f32 {

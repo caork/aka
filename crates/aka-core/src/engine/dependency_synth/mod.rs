@@ -19,14 +19,22 @@ pub(super) fn synthesize_dependency_edges_from_sources(
     repo: &Path,
     nodes: &BTreeMap<String, SynthNode>,
     existing_call_pairs: &HashSet<(String, String)>,
+    mut on_progress: impl FnMut(u64, u64),
 ) -> Vec<EdgeRec> {
     let project_sources = ProjectSourceSet::discover(repo);
     let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
+    let total = by_file.len() as u64;
     let lookup = NodeLookup::new(by_file.values().flatten().copied());
     let mut out = Vec::new();
     let mut seen = HashSet::new();
+    let mut processed = 0u64;
+    on_progress(0, total);
     for (file_path, file_nodes) in by_file {
+        processed += 1;
         let Some(text) = read_repo_text(repo, &file_path) else {
+            if processed == total || processed % 25 == 0 {
+                on_progress(processed, total);
+            }
             continue;
         };
         out.extend(detect_java_dependency_edges(
@@ -43,6 +51,9 @@ pub(super) fn synthesize_dependency_edges_from_sources(
             &lookup,
             existing_call_pairs,
         ));
+        if processed == total || processed % 25 == 0 {
+            on_progress(processed, total);
+        }
     }
     out.retain(|edge| {
         seen.insert((
