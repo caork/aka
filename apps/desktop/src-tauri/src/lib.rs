@@ -24,6 +24,12 @@ const APP_DATA_DIR_NAME: &str = "com.aka.desktop";
 const DESKTOP_MCP_ADDR: &str = "127.0.0.1:4112";
 const DESKTOP_LOG_FILE_NAME: &str = "aka-desktop.log";
 
+#[cfg(target_os = "windows")]
+const EMBEDDED_AKA_ENGINE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/resources/engine/aka-engine.exe"
+));
+
 struct DesktopMcpRuntime {
     _rt: tokio::runtime::Runtime,
 }
@@ -138,6 +144,39 @@ fn bundled_engine_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
     .find(|dir| has_native_engine(dir))
 }
 
+#[cfg(target_os = "windows")]
+fn materialize_embedded_engine(app_data_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+    let engine_dir = app_data_dir
+        .join("bundled-engine")
+        .join(env!("CARGO_PKG_VERSION"));
+    let engine_bin = engine_dir.join("aka-engine.exe");
+    let needs_write = std::fs::metadata(&engine_bin)
+        .map(|meta| meta.len() != EMBEDDED_AKA_ENGINE.len() as u64)
+        .unwrap_or(true);
+
+    if needs_write {
+        std::fs::create_dir_all(&engine_dir)?;
+        let tmp = engine_dir.join(format!("aka-engine.exe.tmp-{}", std::process::id()));
+        std::fs::write(&tmp, EMBEDDED_AKA_ENGINE)?;
+        std::fs::rename(&tmp, &engine_bin).or_else(|rename_err| {
+            let _ = std::fs::remove_file(&engine_bin);
+            std::fs::rename(&tmp, &engine_bin).map_err(|_| rename_err)
+        })?;
+        log_desktop_event(format!(
+            "desktop embedded engine materialized path={} bytes={}",
+            engine_bin.display(),
+            EMBEDDED_AKA_ENGINE.len()
+        ));
+    } else {
+        log_desktop_event(format!(
+            "desktop embedded engine already present path={}",
+            engine_bin.display()
+        ));
+    }
+
+    Ok(engine_dir)
+}
+
 #[derive(Debug, Deserialize)]
 struct ImportRequest {
     kind: String,
@@ -227,22 +266,34 @@ pub fn configure_cli_runtime() -> anyhow::Result<()> {
 #[cfg(target_os = "windows")]
 fn configure_backend(
     app: &tauri::App,
-    _app_data_dir: &std::path::Path,
+    app_data_dir: &std::path::Path,
 ) -> anyhow::Result<AkaBackend> {
     let resource_dir = app
         .path()
         .resource_dir()
         .unwrap_or_else(|_| fallback_resource_dir());
     log_desktop_event(format!("desktop resource dir={}", resource_dir.display()));
-    let backend = if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
-        log_desktop_event(format!("desktop engine dir={}", engine_dir.display()));
-        AkaBackend::with_engine_dir(engine_dir)
-    } else {
-        log_desktop_event(format!(
-            "desktop engine dir unavailable under {}; falling back to runtime discovery",
-            resource_dir.display()
-        ));
-        AkaBackend::new()
+    let backend = match materialize_embedded_engine(app_data_dir) {
+        Ok(engine_dir) => {
+            log_desktop_event(format!(
+                "desktop engine dir={} source=embedded",
+                engine_dir.display()
+            ));
+            AkaBackend::with_engine_dir(engine_dir)
+        }
+        Err(err) => {
+            log_desktop_event(format!("desktop embedded engine unavailable: {err:#}"));
+            if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+                log_desktop_event(format!("desktop engine dir={}", engine_dir.display()));
+                AkaBackend::with_engine_dir(engine_dir)
+            } else {
+                log_desktop_event(format!(
+                    "desktop engine dir unavailable under {}; falling back to runtime discovery",
+                    resource_dir.display()
+                ));
+                AkaBackend::new()
+            }
+        }
     };
     Ok(backend
         .with_job_event_sink(|message| log_desktop_event(format!("backend job: {message}")))
@@ -250,14 +301,12 @@ fn configure_backend(
 }
 
 #[cfg(target_os = "windows")]
-fn configure_cli_engine_runtime(_app_data_dir: &std::path::Path) -> anyhow::Result<()> {
+fn configure_cli_engine_runtime(app_data_dir: &std::path::Path) -> anyhow::Result<()> {
     if std::env::var_os("AKA_ENGINE_DIR").is_none()
         && std::env::var_os("AKA_ENGINE_BIN").is_none()
     {
-        let resource_dir = fallback_resource_dir();
-        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
-            std::env::set_var("AKA_ENGINE_DIR", engine_dir);
-        }
+        let engine_dir = materialize_embedded_engine(app_data_dir)?;
+        std::env::set_var("AKA_ENGINE_DIR", engine_dir);
     }
     Ok(())
 }

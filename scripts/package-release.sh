@@ -258,6 +258,24 @@ assert_engine_file_nonempty() {
   [[ -s "${engine_bin}" ]] || { echo "error: engine 文件为空: ${engine_bin}" >&2; return 1; }
 }
 
+assert_windows_exe_embeds_engine() {
+  local exe_path engine_bin exe_size engine_size min_size
+  exe_path="$1"
+  engine_bin="$2"
+  assert_engine_file_nonempty "${exe_path}"
+  assert_engine_file_nonempty "${engine_bin}"
+  exe_size="$(wc -c < "${exe_path}" | tr -d '[:space:]')"
+  engine_size="$(wc -c < "${engine_bin}" | tr -d '[:space:]')"
+  min_size=$((engine_size + 1024 * 1024))
+  if (( exe_size < min_size )); then
+    echo "error: Windows AKA.exe 未包含内置 AKA engine。" >&2
+    echo "       exe_size=${exe_size} engine_size=${engine_size} expected_at_least=${min_size}" >&2
+    echo "       portable 用户形态是单文件 AKA.exe，不能依赖外置 engine\\aka-engine.exe。" >&2
+    return 1
+  fi
+  echo "==> 校验 Windows AKA.exe 已内置 engine: exe=${exe_size} engine=${engine_size}"
+}
+
 find_engine_resource_bin() {
   local platform dir exe
   platform="$1"
@@ -735,6 +753,7 @@ package_windows_desktop() {
     exe_path="${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/aka-desktop.exe"
   fi
   [[ -f "${exe_path}" ]] || { echo "error: 找不到 Windows GUI exe（先去掉 --skip-build 构建一次）" >&2; return 1; }
+  assert_windows_exe_embeds_engine "${exe_path}" "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe"
 
   setup_src="$(find "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/bundle/nsis" -maxdepth 1 -type f -name "*${VERSION}*setup.exe" | sort | tail -n 1 || true)"
   if [[ -z "${setup_src}" ]]; then
@@ -763,7 +782,6 @@ package_windows_desktop() {
   rm -f "${portable_zip}"
   stage="$(mktemp -d)"
   cp "${exe_path}" "${stage}/AKA.exe"
-  assert_engine_file_nonempty "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe"
   (cd "${stage}" && create_zip_archive "${portable_zip}" AKA.exe)
   rm -rf "${stage}"
   echo "==> ${portable_zip}"
