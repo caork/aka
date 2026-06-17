@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -113,6 +113,7 @@ const PROCESS_MIN_STEPS: usize = 3;
 const MIN_SYNTH_COMMUNITY_SIZE: usize = 2;
 const MIN_TRACE_CONFIDENCE: f64 = 0.5;
 const COMMUNITY_LABEL_PROPAGATION_PASSES: usize = 4;
+const DEFAULT_SYNTH_STAGE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[cfg(windows)]
 fn hide_child_console(cmd: &mut Command) {
@@ -262,6 +263,7 @@ impl EngineRunner {
             .arg("index_repository")
             .arg(&args)
             .env("AKA_ENGINE_CACHE_DIR", &cache_root)
+            .env("CBM_CACHE_DIR", &cache_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         hide_child_console(&mut cmd);
@@ -382,7 +384,14 @@ impl EngineRunner {
         }
 
         emit_phase(&mut on_event, "aka-engine:export-artifacts", 0, 0);
-        let (project, db_path) = find_single_project_db(&cache_root)?;
+        let (project, db_path) = find_single_project_db(&cache_root, repo)?;
+        on_event(&EngineEvent::Log {
+            stream: "adapter".into(),
+            line: format!(
+                "using engine db project={project} path={}",
+                db_path.display()
+            ),
+        });
         let stats = export_artifacts(repo, out_dir, &db_path, &project, no_chunks, &mut on_event)?;
         let done = EngineEvent::Done {
             stats: stats.clone(),
@@ -443,6 +452,60 @@ fn emit_phase(
     });
 }
 
+fn synth_stage_timeout() -> Duration {
+    std::env::var("AKA_SYNTH_STAGE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_SYNTH_STAGE_TIMEOUT)
+}
+
+fn synthesize_with_timeout<T, F>(
+    on_event: &mut impl FnMut(&EngineEvent),
+    phase: &str,
+    timeout: Duration,
+    default: T,
+    f: F,
+) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    emit_phase(on_event, phase, 0, 0);
+    let started = Instant::now();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = f();
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => {
+            on_event(&EngineEvent::Log {
+                stream: "adapter".into(),
+                line: format!("{phase}:done elapsed_ms={}", started.elapsed().as_millis()),
+            });
+            result
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            on_event(&EngineEvent::Log {
+                stream: "adapter".into(),
+                line: format!(
+                    "{phase}:timeout elapsed_ms={} skipped=true",
+                    started.elapsed().as_millis()
+                ),
+            });
+            default
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            on_event(&EngineEvent::Warning {
+                message: format!("{phase} worker disconnected; continuing without this synthesis"),
+            });
+            default
+        }
+    }
+}
+
 fn push_tail(tail: &mut Vec<String>, line: String, limit: usize) {
     tail.push(line);
     if tail.len() > limit {
@@ -496,29 +559,126 @@ fn parse_engine_progress_phase(line: &str) -> Option<String> {
     None
 }
 
-fn find_single_project_db(cache_root: &Path) -> Result<(String, PathBuf), EngineError> {
+fn find_single_project_db(
+    cache_root: &Path,
+    repo: &Path,
+) -> Result<(String, PathBuf), EngineError> {
     let mut candidates = Vec::new();
-    for entry in std::fs::read_dir(cache_root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("db") {
-            candidates.push(path);
-        }
+    for root in project_db_search_roots(cache_root) {
+        collect_engine_db_candidates(&root, &mut candidates)?;
     }
-    candidates.sort();
+    candidates.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.path.cmp(&b.path))
+    });
 
-    for db_path in candidates {
-        let conn = open_engine_db(&db_path)?;
-        let project: Result<String, rusqlite::Error> =
-            conn.query_row("SELECT name FROM projects LIMIT 1", [], |row| row.get(0));
+    let expected_root = normalize_project_root(repo);
+    let mut fallback = None;
+    for candidate in candidates {
+        let conn = match open_engine_db(&candidate.path) {
+            Ok(conn) => conn,
+            Err(_) => continue,
+        };
+        let project = conn.query_row("SELECT name, root_path FROM projects LIMIT 1", [], |row| {
+            Ok(ProjectDbRow {
+                name: row.get(0)?,
+                root_path: row.get(1).ok(),
+            })
+        });
         match project {
-            Ok(project) => return Ok((project, db_path)),
+            Ok(project) => {
+                if project
+                    .root_path
+                    .as_deref()
+                    .map(normalize_root_str)
+                    .as_deref()
+                    == Some(expected_root.as_str())
+                {
+                    return Ok((project.name, candidate.path));
+                }
+                fallback.get_or_insert((project.name, candidate.path));
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => continue,
             Err(err) => return Err(err.into()),
         }
     }
 
-    Err(EngineError::MissingProject(cache_root.to_path_buf()))
+    fallback.ok_or_else(|| EngineError::MissingProject(cache_root.to_path_buf()))
+}
+
+fn project_db_search_roots(cache_root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![cache_root.to_path_buf()];
+    if let Some(home) = home_dir() {
+        roots.push(home.join(".cache").join("aka-engine"));
+        roots.push(home.join(".cache").join("codebase-memory-mcp"));
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|home| !home.is_empty()))
+        .map(PathBuf::from)
+}
+
+#[derive(Debug)]
+struct ProjectDbCandidate {
+    path: PathBuf,
+    modified: SystemTime,
+}
+
+#[derive(Debug)]
+struct ProjectDbRow {
+    name: String,
+    root_path: Option<String>,
+}
+
+fn collect_engine_db_candidates(
+    dir: &Path,
+    candidates: &mut Vec<ProjectDbCandidate>,
+) -> Result<(), EngineError> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.is_dir() {
+            collect_engine_db_candidates(&path, candidates)?;
+        } else if metadata.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("db")
+            && !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("_config.db"))
+        {
+            candidates.push(ProjectDbCandidate {
+                path,
+                modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn normalize_project_root(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+        .replace('\\', "/")
+}
+
+fn normalize_root_str(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 fn open_engine_db(path: &Path) -> Result<Connection, rusqlite::Error> {
@@ -1908,13 +2068,19 @@ fn synthesize_graph_with_progress(
             symbol_count,
         )
     };
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:routes",
-        0,
-        0,
-    );
-    let routes = synthesize_routes_from_sources(repo, &nodes, &processes, &native_routes);
+    let routes = {
+        let repo = repo.to_path_buf();
+        let nodes = nodes.clone();
+        let processes = processes.clone();
+        let native_routes = native_routes.clone();
+        synthesize_with_timeout(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:routes",
+            synth_stage_timeout(),
+            Vec::new(),
+            move || synthesize_routes_from_sources(&repo, &nodes, &processes, &native_routes),
+        )
+    };
     emit_phase(
         on_event,
         "aka-engine:export-artifacts:synthesize:tools",

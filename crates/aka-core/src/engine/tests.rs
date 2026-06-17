@@ -161,8 +161,57 @@ fn run_git(repo: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+fn write_engine_project_db(path: &Path, project: &str, root_path: &Path) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE projects (
+            name TEXT PRIMARY KEY,
+            indexed_at TEXT,
+            root_path TEXT
+        );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO projects (name, indexed_at, root_path) VALUES (?1, 'now', ?2)",
+        rusqlite::params![project, root_path.display().to_string()],
+    )
+    .unwrap();
+}
+
 fn synthesize_graph_quiet(conn: &Connection, repo: &Path) -> Result<SynthGraph, EngineError> {
     synthesize_graph(conn, "demo", repo)
+}
+
+#[test]
+fn finds_project_db_recursively() {
+    let repo = temp_repo("recursive-project-db-repo");
+    let cache = temp_repo("recursive-project-db-cache");
+    let db_path = cache.join("nested").join("C-repo.db");
+    write_engine_project_db(&db_path, "C-repo", &repo);
+
+    let (project, found_path) = find_single_project_db(&cache, &repo).unwrap();
+
+    assert_eq!(project, "C-repo");
+    assert_eq!(found_path, db_path);
+}
+
+#[test]
+fn prefers_project_db_matching_repo_root() {
+    let repo = temp_repo("matching-project-db-repo");
+    let other_repo = temp_repo("matching-project-db-other");
+    let cache = temp_repo("matching-project-db-cache");
+    let old_db = cache.join("old.db");
+    let wanted_db = cache.join("nested").join("wanted.db");
+    write_engine_project_db(&old_db, "old", &other_repo);
+    write_engine_project_db(&wanted_db, "wanted", &repo);
+
+    let (project, found_path) = find_single_project_db(&cache, &repo).unwrap();
+
+    assert_eq!(project, "wanted");
+    assert_eq!(found_path, wanted_db);
 }
 
 #[test]
