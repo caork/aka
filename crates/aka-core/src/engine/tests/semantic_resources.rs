@@ -1,3 +1,4 @@
+mod ai_provider;
 mod feature_flag;
 mod http;
 mod http_config;
