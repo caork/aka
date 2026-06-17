@@ -314,7 +314,7 @@ fn node_content(repo_root: &Path, row: &NodeRow) -> Result<Option<String>> {
 /// 后台任务状态（import / update）。不在 map 里 = ready。
 #[derive(Debug, Clone)]
 struct JobInfo {
-    /// `indexing` 或 `failed`。
+    /// `indexing` / `ready` / `failed`。
     status: String,
     /// 失败原因（status = failed 时携带）。
     detail: Option<String>,
@@ -371,6 +371,17 @@ impl JobInfo {
         self.progress.current = None;
         self.progress.total = None;
         self.push_log(format!("{stage}: {message}"));
+    }
+
+    fn mark_done(&mut self) {
+        self.status = "ready".into();
+        self.detail = None;
+        self.progress.stage = "done".into();
+        self.progress.message = "Index ready".into();
+        self.progress.percent = 100.0;
+        self.progress.current = None;
+        self.progress.total = None;
+        self.push_log("done: Index ready");
     }
 
     fn apply_engine_event(&mut self, ev: &EngineEvent) {
@@ -476,19 +487,19 @@ fn adapter_percent(phase: &str, current: u64, total: u64) -> f32 {
     let phase = phase.to_ascii_lowercase();
     if phase.contains("dependency-edges") && total > 0 {
         let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
-        return 80.0 + ratio * 2.0;
+        return 80.0 + ratio * 6.0;
     }
     if phase.contains("nodes") && total > 0 {
         let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
-        return 86.0 + ratio;
+        return 89.0 + ratio;
     }
     if phase.contains("edges") && total > 0 {
         let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
-        return 87.0 + ratio;
+        return 90.0 + ratio;
     }
     if phase.contains("chunks") && total > 0 {
         let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
-        return 88.0 + ratio * 2.0;
+        return 91.0 + ratio;
     }
     if phase.contains("inspect-db") {
         77.0
@@ -505,15 +516,19 @@ fn adapter_percent(phase: &str, current: u64, total: u64) -> f32 {
     } else if phase.contains("synthesize:communities") {
         84.0
     } else if phase.contains("synthesize:processes") {
-        85.0
-    } else if phase.contains("nodes") {
-        86.0
-    } else if phase.contains("edges") {
         87.0
-    } else if phase.contains("chunks") {
+    } else if phase.contains("synthesize:routes") {
+        87.5
+    } else if phase.contains("synthesize:topics") {
         88.0
-    } else if phase.contains("manifest") {
+    } else if phase.contains("nodes") {
+        89.0
+    } else if phase.contains("edges") {
+        90.0
+    } else if phase.contains("chunks") {
         91.0
+    } else if phase.contains("manifest") {
+        92.0
     } else {
         81.0
     }
@@ -565,7 +580,7 @@ fn run_analyze_job(
     crate::run_analyze_with_progress(repo, engine_dir, false, Some(&mut on_progress))
         .map_err(|e| anyhow!("{e:#}"))?;
     update_job(jobs, name, |job| {
-        job.set_stage("done", "Index ready", 99.0);
+        job.set_stage("index", "Index artifacts ready", 96.0);
     });
     Ok(())
 }
@@ -777,6 +792,9 @@ fn spawn_auto_index_job(
         match run_auto_analyze_job(&jobs, &name, repo_path.clone(), engine_dir) {
             Ok(()) => {
                 handles.lock().expect("handles lock").remove(&repo_path);
+                update_job(&jobs, &name, |job| {
+                    job.mark_done();
+                });
                 jobs.lock().expect("jobs lock").remove(&name);
                 emit_job_event(&job_event_sink, format!("auto-index completed name={name}"));
             }
@@ -1915,6 +1933,9 @@ impl AkaBackend {
             match work(Arc::clone(&jobs), name.clone()) {
                 Ok(repo_path) => {
                     handles.lock().expect("handles lock").remove(&repo_path);
+                    update_job(&jobs, &name, |job| {
+                        job.mark_done();
+                    });
                     jobs.lock().expect("jobs lock").remove(&name);
                     emit_job_event(
                         &job_event_sink,
@@ -3426,6 +3447,43 @@ mod tests {
             matches!(status, "indexing" | "failed"),
             "expected queued job to be visible as indexing or failed when the test host has no engine, got {status:?}"
         );
+    }
+
+    #[test]
+    fn adapter_progress_tracks_synthesis_before_artifact_writes() {
+        let synth_nodes = adapter_percent("aka-engine:export-artifacts:synthesize:nodes", 0, 0);
+        let deps_start = adapter_percent(
+            "aka-engine:export-artifacts:synthesize:dependency-edges",
+            0,
+            570,
+        );
+        let deps_mid = adapter_percent(
+            "aka-engine:export-artifacts:synthesize:dependency-edges",
+            285,
+            570,
+        );
+        let processes = adapter_percent("aka-engine:export-artifacts:synthesize:processes", 0, 0);
+        let write_nodes = adapter_percent("aka-engine:export-artifacts:nodes", 0, 12_687);
+
+        assert!(deps_start > synth_nodes);
+        assert!(deps_mid > deps_start);
+        assert!(processes > deps_mid);
+        assert!(write_nodes > processes);
+    }
+
+    #[test]
+    fn completed_jobs_report_ready_at_one_hundred_percent() {
+        let mut job = JobInfo::new("local", None, PathBuf::from("/tmp/repo"));
+        job.set_stage("adapter", "Writing artifacts", 91.0);
+
+        job.mark_done();
+
+        assert_eq!(job.status, "ready");
+        assert_eq!(job.progress.stage, "done");
+        assert_eq!(job.progress.message, "Index ready");
+        assert_eq!(job.progress.percent, 100.0);
+        assert!(job.progress.current.is_none());
+        assert!(job.progress.total.is_none());
     }
 
     #[test]

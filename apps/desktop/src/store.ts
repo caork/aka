@@ -152,6 +152,8 @@ function mapRepo(x: RepoOut): Repo {
     x.source?.kind === "git" || x.source?.kind === "zip"
       ? x.source.kind
       : "local";
+  const progressPercent =
+    status === "ready" && x.progress ? 100 : clampPercent(x.progress?.percent);
   return {
     id: x.name,
     name: x.name,
@@ -167,7 +169,7 @@ function mapRepo(x: RepoOut): Repo {
       ? {
           stage: x.progress.stage ?? status,
           message: x.progress.message ?? status,
-          percent: clampPercent(x.progress.percent),
+          percent: progressPercent,
           current: typeof x.progress.current === "number" ? x.progress.current : null,
           total: typeof x.progress.total === "number" ? x.progress.total : null,
           files: x.progress.files ?? 0,
