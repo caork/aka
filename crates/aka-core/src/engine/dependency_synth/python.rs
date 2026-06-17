@@ -8,6 +8,7 @@ use super::super::{
 };
 use super::dependency_edge;
 use super::lookup::NodeLookup;
+use super::{DependencyBudget, DependencyDetection};
 
 pub(super) fn detect_python_dependency_edges(
     text: &str,
@@ -15,17 +16,25 @@ pub(super) fn detect_python_dependency_edges(
     nodes: &[&SynthNode],
     lookup: &NodeLookup<'_>,
     existing_call_pairs: &HashSet<(String, String)>,
-) -> Vec<EdgeRec> {
+    budget: DependencyBudget,
+) -> DependencyDetection {
     if !is_python_file(file_path, nodes) {
-        return Vec::new();
+        return DependencyDetection::new(Vec::new(), false);
     }
     let mut out = Vec::new();
-    out.extend(detect_python_direct_call_edges(
-        text,
-        nodes,
-        existing_call_pairs,
-    ));
-    for call in find_python_dependency_calls(text) {
+    let direct = detect_python_direct_call_edges(text, nodes, existing_call_pairs, budget);
+    let mut timed_out = direct.timed_out;
+    out.extend(direct.edges);
+    if timed_out {
+        return DependencyDetection::new(out, true);
+    }
+    let calls = find_python_dependency_calls(text, budget);
+    timed_out |= calls.timed_out;
+    for call in calls.calls {
+        if budget.exceeded() {
+            timed_out = true;
+            break;
+        }
         let Some(source) = node_at_offset(text, nodes, call.start)
             .or_else(|| next_python_function_node(text, nodes, call.start))
         else {
@@ -69,14 +78,15 @@ pub(super) fn detect_python_dependency_edges(
             });
         }
     }
-    out
+    DependencyDetection::new(out, timed_out)
 }
 
 fn detect_python_direct_call_edges(
     text: &str,
     nodes: &[&SynthNode],
     existing_call_pairs: &HashSet<(String, String)>,
-) -> Vec<EdgeRec> {
+    budget: DependencyBudget,
+) -> DependencyDetection {
     let callables = python_file_callables(nodes);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -91,7 +101,12 @@ fn detect_python_direct_call_edges(
     for target in &callables {
         callable_names.insert(target.name);
     }
-    for call in scan_python_callable_calls(text) {
+    let calls = scan_python_callable_calls(text, budget);
+    let timed_out = calls.timed_out;
+    for call in calls.calls {
+        if budget.exceeded() {
+            return DependencyDetection::new(out, true);
+        }
         if !callable_names.contains(call.name) {
             continue;
         }
@@ -110,7 +125,12 @@ fn detect_python_direct_call_edges(
             }
         }
     }
-    out
+    DependencyDetection::new(out, timed_out)
+}
+
+struct PythonCallableScan<'a> {
+    calls: Vec<PythonCallableCall<'a>>,
+    timed_out: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,11 +140,17 @@ struct PythonCallableCall<'a> {
     receiver_dot: bool,
 }
 
-fn scan_python_callable_calls(text: &str) -> Vec<PythonCallableCall<'_>> {
+fn scan_python_callable_calls(text: &str, budget: DependencyBudget) -> PythonCallableScan<'_> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
     let mut idx = 0usize;
     while idx < bytes.len() {
+        if idx.is_multiple_of(4096) && budget.exceeded() {
+            return PythonCallableScan {
+                calls: out,
+                timed_out: true,
+            };
+        }
         let byte = bytes[idx];
         if !(byte == b'_' || byte.is_ascii_alphabetic()) {
             idx += 1;
@@ -152,7 +178,10 @@ fn scan_python_callable_calls(text: &str) -> Vec<PythonCallableCall<'_>> {
         });
         idx = close.saturating_add(1);
     }
-    out
+    PythonCallableScan {
+        calls: out,
+        timed_out: false,
+    }
 }
 
 struct PythonDirectCallContext<'a, 'b> {
@@ -321,10 +350,27 @@ struct PythonDependencyCall {
     strategy: String,
 }
 
-fn find_python_dependency_calls(text: &str) -> Vec<PythonDependencyCall> {
+struct PythonDependencyScan {
+    calls: Vec<PythonDependencyCall>,
+    timed_out: bool,
+}
+
+fn find_python_dependency_calls(text: &str, budget: DependencyBudget) -> PythonDependencyScan {
     let mut out = Vec::new();
     for callee in ["Depends", "Security"] {
+        if budget.exceeded() {
+            return PythonDependencyScan {
+                calls: out,
+                timed_out: true,
+            };
+        }
         for call in find_call_args(text, callee) {
+            if budget.exceeded() {
+                return PythonDependencyScan {
+                    calls: out,
+                    timed_out: true,
+                };
+            }
             if let Some(callable) = first_depends_callable(call.args) {
                 out.push(PythonDependencyCall {
                     start: call.start,
@@ -334,9 +380,22 @@ fn find_python_dependency_calls(text: &str) -> Vec<PythonDependencyCall> {
             }
         }
     }
-    let aliases = python_annotated_dependency_aliases(text, &out);
-    for (alias, calls) in aliases {
-        for usage in python_annotation_alias_usages(text, &alias) {
+    let aliases = python_annotated_dependency_aliases(text, &out, budget);
+    if aliases.timed_out {
+        return PythonDependencyScan {
+            calls: out,
+            timed_out: true,
+        };
+    }
+    for (alias, calls) in aliases.aliases {
+        let usages = python_annotation_alias_usages(text, &alias, budget);
+        if usages.timed_out {
+            return PythonDependencyScan {
+                calls: out,
+                timed_out: true,
+            };
+        }
+        for usage in usages.usages {
             for call in &calls {
                 out.push(PythonDependencyCall {
                     start: usage,
@@ -352,16 +411,31 @@ fn find_python_dependency_calls(text: &str) -> Vec<PythonDependencyCall> {
             .then_with(|| a.callable.cmp(&b.callable))
     });
     out.dedup_by(|a, b| a.start == b.start && a.callable == b.callable);
-    out
+    PythonDependencyScan {
+        calls: out,
+        timed_out: false,
+    }
+}
+
+struct PythonAliasScan {
+    aliases: BTreeMap<String, Vec<PythonDependencyCall>>,
+    timed_out: bool,
 }
 
 fn python_annotated_dependency_aliases(
     text: &str,
     calls: &[PythonDependencyCall],
-) -> BTreeMap<String, Vec<PythonDependencyCall>> {
+    budget: DependencyBudget,
+) -> PythonAliasScan {
     let mut aliases: BTreeMap<String, Vec<PythonDependencyCall>> = BTreeMap::new();
     let mut offset = 0usize;
     while let Some(rel) = text[offset..].find("Annotated[") {
+        if budget.exceeded() {
+            return PythonAliasScan {
+                aliases,
+                timed_out: true,
+            };
+        }
         let annotated_pos = offset + rel;
         let line_start = text[..annotated_pos]
             .rfind('\n')
@@ -385,7 +459,10 @@ fn python_annotated_dependency_aliases(
         }
         offset = close + 1;
     }
-    aliases
+    PythonAliasScan {
+        aliases,
+        timed_out: false,
+    }
 }
 
 fn python_annotated_alias_name(prefix: &str) -> Option<String> {
@@ -432,12 +509,40 @@ fn find_matching_square_bracket(text: &str, open: usize) -> Option<usize> {
     None
 }
 
-fn python_annotation_alias_usages(text: &str, alias: &str) -> Vec<usize> {
+struct PythonAliasUsageScan {
+    usages: Vec<usize>,
+    timed_out: bool,
+}
+
+fn python_annotation_alias_usages(
+    text: &str,
+    alias: &str,
+    budget: DependencyBudget,
+) -> PythonAliasUsageScan {
     let mut out = Vec::new();
-    for call in find_python_function_defs(text) {
+    let defs = find_python_function_defs(text, budget);
+    if defs.timed_out {
+        return PythonAliasUsageScan {
+            usages: out,
+            timed_out: true,
+        };
+    }
+    for call in defs.defs {
+        if budget.exceeded() {
+            return PythonAliasUsageScan {
+                usages: out,
+                timed_out: true,
+            };
+        }
         let args = call.args;
         let mut offset = 0usize;
         while let Some(rel) = args[offset..].find(alias) {
+            if budget.exceeded() {
+                return PythonAliasUsageScan {
+                    usages: out,
+                    timed_out: true,
+                };
+            }
             let start = offset + rel;
             if python_alias_annotation_boundary_ok(args, start, alias) {
                 out.push(call.start + start);
@@ -447,7 +552,10 @@ fn python_annotation_alias_usages(text: &str, alias: &str) -> Vec<usize> {
     }
     out.sort();
     out.dedup();
-    out
+    PythonAliasUsageScan {
+        usages: out,
+        timed_out: false,
+    }
 }
 
 #[derive(Debug)]
@@ -456,10 +564,21 @@ struct PythonFunctionDef<'a> {
     args: &'a str,
 }
 
-fn find_python_function_defs(text: &str) -> Vec<PythonFunctionDef<'_>> {
+struct PythonFunctionDefScan<'a> {
+    defs: Vec<PythonFunctionDef<'a>>,
+    timed_out: bool,
+}
+
+fn find_python_function_defs(text: &str, budget: DependencyBudget) -> PythonFunctionDefScan<'_> {
     let mut out = Vec::new();
     let mut offset = 0usize;
     while let Some(rel) = text[offset..].find("def ") {
+        if budget.exceeded() {
+            return PythonFunctionDefScan {
+                defs: out,
+                timed_out: true,
+            };
+        }
         let def_pos = offset + rel;
         if !python_keyword_boundary_ok(text, def_pos, "def") {
             offset = def_pos + "def".len();
@@ -479,7 +598,10 @@ fn find_python_function_defs(text: &str) -> Vec<PythonFunctionDef<'_>> {
         });
         offset = close + 1;
     }
-    out
+    PythonFunctionDefScan {
+        defs: out,
+        timed_out: false,
+    }
 }
 
 fn python_alias_annotation_boundary_ok(args: &str, start: usize, alias: &str) -> bool {

@@ -563,6 +563,22 @@ fn update_job(
     }
 }
 
+fn mark_job_done(
+    jobs: &Arc<Mutex<HashMap<String, JobInfo>>>,
+    completed: &Arc<Mutex<HashMap<String, RepoProgress>>>,
+    name: &str,
+) {
+    if let Some(progress) = jobs.lock().expect("jobs lock").get_mut(name).map(|job| {
+        job.mark_done();
+        job.progress.clone()
+    }) {
+        completed
+            .lock()
+            .expect("completed jobs lock")
+            .insert(name.to_string(), progress);
+    }
+}
+
 fn run_analyze_job(
     jobs: &Arc<Mutex<HashMap<String, JobInfo>>>,
     name: &str,
@@ -620,6 +636,7 @@ fn looks_like_local_path(key: &str) -> bool {
 fn run_auto_indexer(
     auto: Arc<AutoIndexer>,
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
+    completed: Arc<Mutex<HashMap<String, RepoProgress>>>,
     handles: Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
     engine_dir: Option<PathBuf>,
     job_event_sink: Option<JobEventSink>,
@@ -629,6 +646,7 @@ fn run_auto_indexer(
             auto_index_scan(
                 &auto,
                 &jobs,
+                &completed,
                 &handles,
                 engine_dir.clone(),
                 job_event_sink.clone(),
@@ -643,6 +661,7 @@ fn run_auto_indexer(
 fn auto_index_scan(
     auto: &Arc<AutoIndexer>,
     jobs: &Arc<Mutex<HashMap<String, JobInfo>>>,
+    completed: &Arc<Mutex<HashMap<String, RepoProgress>>>,
     handles: &Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
     engine_dir: Option<PathBuf>,
     job_event_sink: Option<JobEventSink>,
@@ -695,6 +714,7 @@ fn auto_index_scan(
             spawn_auto_index_job(
                 entry,
                 Arc::clone(jobs),
+                Arc::clone(completed),
                 Arc::clone(handles),
                 engine_dir.clone(),
                 job_event_sink.clone(),
@@ -761,6 +781,7 @@ fn auto_index_has_delta(entry: &RepoEntry) -> bool {
 fn spawn_auto_index_job(
     entry: RepoEntry,
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
+    completed: Arc<Mutex<HashMap<String, RepoProgress>>>,
     handles: Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
     engine_dir: Option<PathBuf>,
     job_event_sink: Option<JobEventSink>,
@@ -792,9 +813,7 @@ fn spawn_auto_index_job(
         match run_auto_analyze_job(&jobs, &name, repo_path.clone(), engine_dir) {
             Ok(()) => {
                 handles.lock().expect("handles lock").remove(&repo_path);
-                update_job(&jobs, &name, |job| {
-                    job.mark_done();
-                });
+                mark_job_done(&jobs, &completed, &name);
                 jobs.lock().expect("jobs lock").remove(&name);
                 emit_job_event(&job_event_sink, format!("auto-index completed name={name}"));
             }
@@ -902,6 +921,7 @@ fn is_auto_index_skipped_file(name: &str) -> bool {
 pub struct AkaBackend {
     handles: Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
+    completed_jobs: Arc<Mutex<HashMap<String, RepoProgress>>>,
     auto_indexer: Arc<AutoIndexer>,
     engine_dir: Option<PathBuf>,
     auto_discover_workspace: bool,
@@ -1716,6 +1736,7 @@ impl AkaBackend {
         Self {
             handles: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            completed_jobs: Arc::new(Mutex::new(HashMap::new())),
             auto_indexer: Arc::new(AutoIndexer::new()),
             engine_dir: None,
             auto_discover_workspace: false,
@@ -1746,6 +1767,7 @@ impl AkaBackend {
         Self {
             handles: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            completed_jobs: Arc::new(Mutex::new(HashMap::new())),
             auto_indexer: Arc::new(AutoIndexer::new()),
             engine_dir: Some(engine_dir),
             auto_discover_workspace: false,
@@ -1786,11 +1808,12 @@ impl AkaBackend {
         }
         auto.stop.store(false, Ordering::Relaxed);
         let jobs = Arc::clone(&self.jobs);
+        let completed = Arc::clone(&self.completed_jobs);
         let handles = Arc::clone(&self.handles);
         let engine_dir = self.engine_dir();
         let job_event_sink = self.job_event_sink.clone();
         std::thread::spawn(move || {
-            run_auto_indexer(auto, jobs, handles, engine_dir, job_event_sink);
+            run_auto_indexer(auto, jobs, completed, handles, engine_dir, job_event_sink);
         });
     }
 
@@ -1916,6 +1939,7 @@ impl AkaBackend {
     ) {
         let path = user_facing_path(&path);
         let jobs = Arc::clone(&self.jobs);
+        let completed = Arc::clone(&self.completed_jobs);
         let handles = Arc::clone(&self.handles);
         let job_event_sink = self.job_event_sink.clone();
         emit_job_event(
@@ -1933,9 +1957,7 @@ impl AkaBackend {
             match work(Arc::clone(&jobs), name.clone()) {
                 Ok(repo_path) => {
                     handles.lock().expect("handles lock").remove(&repo_path);
-                    update_job(&jobs, &name, |job| {
-                        job.mark_done();
-                    });
+                    mark_job_done(&jobs, &completed, &name);
                     jobs.lock().expect("jobs lock").remove(&name);
                     emit_job_event(
                         &job_event_sink,
@@ -2096,6 +2118,11 @@ impl Backend for AkaBackend {
         let _ = self.ensure_current_workspace_queued();
         let registry = Registry::load()?;
         let jobs = self.jobs.lock().expect("jobs lock").clone();
+        let completed = self
+            .completed_jobs
+            .lock()
+            .expect("completed jobs lock")
+            .clone();
         let mut out: Vec<RepoInfo> = registry
             .repos
             .iter()
@@ -2116,7 +2143,10 @@ impl Backend for AkaBackend {
                     source_url: r.source_url.clone(),
                     detail,
                     render_max_nodes: r.render_max_nodes,
-                    progress: jobs.get(&r.name).map(|j| j.progress.clone()),
+                    progress: jobs
+                        .get(&r.name)
+                        .map(|j| j.progress.clone())
+                        .or_else(|| completed.get(&r.name).cloned()),
                 }
             })
             .collect();

@@ -35,6 +35,7 @@ export default function RepoSettingsModal({
   const [renderDraft, setRenderDraft] = useState(RENDER_MAX_DEFAULT);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [logsCopied, setLogsCopied] = useState(false);
   const [busy, setBusy] = useState<
     "" | "toggle" | "render" | "update" | "zip" | "delete"
   >("");
@@ -47,6 +48,7 @@ export default function RepoSettingsModal({
     setRenderDraft(repo?.renderMaxNodes ?? RENDER_MAX_DEFAULT);
     setError(null);
     setNotice(null);
+    setLogsCopied(false);
     setBusy("");
     setConfirmDelete(false);
   }, [repo?.id, repo?.embeddings, repo?.renderMaxNodes]);
@@ -188,6 +190,26 @@ export default function RepoSettingsModal({
       : repo.source.kind === "zip"
         ? "zip 导入"
         : repo.path;
+  const logs = repo.progress?.logs ?? [];
+  const logText = [
+    `repo=${repo.name}`,
+    `path=${repo.path}`,
+    `status=${repo.status}`,
+    repo.detail ? `detail=${repo.detail}` : "",
+    "",
+    ...logs,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const copyLogs = () => {
+    void navigator.clipboard
+      ?.writeText(logText)
+      .then(() => {
+        setLogsCopied(true);
+        window.setTimeout(() => setLogsCopied(false), 1200);
+      })
+      .catch(() => undefined);
+  };
 
   return (
     <Modal
@@ -345,6 +367,29 @@ export default function RepoSettingsModal({
             {busy === "update" ? "请求中…" : "检查更新并重建索引"}
           </button>
         )}
+      </div>
+
+      <div className="themed-divider mb-4 border-t pt-4">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="text-[13px] font-medium text-ink">Index logs</div>
+          <button
+            type="button"
+            onClick={copyLogs}
+            disabled={logs.length === 0}
+            className="focus-ring rounded-[8px] px-2 py-1 text-[11.5px] text-ink-3 transition-colors duration-150 ease-out hover:text-ink disabled:opacity-50"
+            style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
+            data-testid="settings-copy-index-logs"
+          >
+            {logsCopied ? "Copied" : "Copy"}
+          </button>
+        </div>
+        <div className="scroll-area max-h-[180px] rounded-[10px] bg-[var(--subtle-fill-2)] px-3 py-2">
+          {(logs.length > 0 ? logs.slice(-80) : ["No recent index logs"]).map((line, idx) => (
+            <div key={`${idx}-${line}`} className="mono py-0.5 text-[11px] leading-relaxed text-ink-2">
+              {line}
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* danger zone */}

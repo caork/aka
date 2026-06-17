@@ -64,7 +64,9 @@ use command_synth::{
     SynthCommand,
 };
 use config_synth::{synthesize_configs_from_sources, SynthConfig};
-use dependency_synth::synthesize_dependency_edges_from_sources;
+use dependency_synth::{
+    synthesize_dependency_edges_from_sources, DependencyProgress, DependencyProgressPhase,
+};
 use event_synth::{synthesize_events_from_sources, SynthEvent};
 use graphql_synth::{synthesize_graphql_from_sources, SynthGraphqlOperation};
 use job_synth::{job_entry_hints_from_sources, synthesize_jobs_from_sources, SynthJob};
@@ -853,12 +855,19 @@ fn export_nodes(
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
+    emit_phase(
+        on_event,
+        "aka-engine:export-artifacts:nodes:query",
+        0,
+        total,
+    );
     let mut stmt = conn.prepare(
         "SELECT id, label, name, qualified_name, file_path, start_line, end_line, properties \
          FROM nodes WHERE project = ?1 ORDER BY id",
     )?;
     let mut rows = stmt.query([project])?;
     let mut count = 0;
+    let mut progress = ExportProgress::new("nodes", total);
     while let Some(row) = rows.next()? {
         let cbm_id: i64 = row.get(0)?;
         let label = text_col(row, 1)?;
@@ -901,8 +910,14 @@ fn export_nodes(
         serde_json::to_writer(&mut out, &node)?;
         out.write_all(b"\n")?;
         count += 1;
-        emit_export_progress(on_event, "nodes", count, total);
+        progress.emit(on_event, count);
     }
+    emit_phase(
+        on_event,
+        "aka-engine:export-artifacts:nodes:synthetic",
+        count,
+        total,
+    );
     for community in &synth.communities {
         let node = community.node_rec();
         serde_json::to_writer(&mut out, &node)?;
@@ -1013,7 +1028,7 @@ fn export_nodes(
         out.write_all(b"\n")?;
         count += 1;
     }
-    emit_export_progress(on_event, "nodes", count, total);
+    progress.emit_force(on_event, count);
     Ok(count)
 }
 
@@ -1027,6 +1042,12 @@ fn export_edges(
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
+    emit_phase(
+        on_event,
+        "aka-engine:export-artifacts:edges:query",
+        0,
+        total,
+    );
     let mut stmt = conn.prepare(
         "SELECT e.id, e.source_id, e.target_id, e.type, e.properties, \
                 s.qualified_name, t.qualified_name, s.label, t.label \
@@ -1038,6 +1059,7 @@ fn export_edges(
     let mut rows = stmt.query([project])?;
     let mut count = 0;
     let mut semantic = SemanticEdgeSynthesizer::load(conn, project)?;
+    let mut progress = ExportProgress::new("edges", total);
     while let Some(row) = rows.next()? {
         let edge_id: i64 = row.get(0)?;
         let source_id: i64 = row.get(1)?;
@@ -1074,8 +1096,14 @@ fn export_edges(
         serde_json::to_writer(&mut out, &edge)?;
         out.write_all(b"\n")?;
         count += 1;
-        emit_export_progress(on_event, "edges", count, total);
+        progress.emit(on_event, count);
     }
+    emit_phase(
+        on_event,
+        "aka-engine:export-artifacts:edges:synthetic",
+        count,
+        total,
+    );
     for edge in semantic.edge_recs() {
         serde_json::to_writer(&mut out, &edge)?;
         out.write_all(b"\n")?;
@@ -1120,22 +1148,41 @@ fn export_edges(
         out.write_all(b"\n")?;
         count += 1;
     }
-    emit_export_progress(on_event, "edges", count, total);
+    progress.emit_force(on_event, count);
     Ok(count)
 }
 
-fn emit_export_progress(
-    on_event: &mut impl FnMut(&EngineEvent),
+struct ExportProgress {
     name: &'static str,
-    count: u64,
     total: u64,
-) {
-    if count == 0 || count.is_multiple_of(1_000) || (total > 0 && count >= total) {
+    last_emit: Instant,
+}
+
+impl ExportProgress {
+    fn new(name: &'static str, total: u64) -> Self {
+        Self {
+            name,
+            total,
+            last_emit: Instant::now(),
+        }
+    }
+
+    fn emit(&mut self, on_event: &mut impl FnMut(&EngineEvent), count: u64) {
+        let enough_rows = count == 1 || count.is_multiple_of(100);
+        let enough_time = self.last_emit.elapsed() >= Duration::from_secs(1);
+        let complete = self.total > 0 && count >= self.total;
+        if enough_rows || enough_time || complete {
+            self.emit_force(on_event, count);
+        }
+    }
+
+    fn emit_force(&mut self, on_event: &mut impl FnMut(&EngineEvent), count: u64) {
+        self.last_emit = Instant::now();
         emit_phase(
             on_event,
-            format!("aka-engine:export-artifacts:{name}"),
+            format!("aka-engine:export-artifacts:{}", self.name),
             count,
-            total,
+            self.total,
         );
     }
 }
@@ -1779,19 +1826,11 @@ fn synthesize_graph_with_progress(
         0,
         0,
     );
-    let synthetic_edges = synthesize_dependency_edges_from_sources(
-        repo,
-        &nodes,
-        &existing_call_pairs,
-        |current, total| {
-            emit_phase(
-                on_event,
-                "aka-engine:export-artifacts:synthesize:dependency-edges",
-                current,
-                total,
-            );
-        },
-    );
+    let synthetic_edges =
+        synthesize_dependency_edges_from_sources(repo, &nodes, &existing_call_pairs, |progress| {
+            let (phase, current, total) = dependency_progress_phase(progress);
+            emit_phase(on_event, phase, current, total);
+        });
     emit_phase(
         on_event,
         format!(
@@ -1985,6 +2024,66 @@ fn synthesize_graph_with_progress(
         source_symbols,
         edges: synthetic_edges,
     })
+}
+
+fn dependency_progress_phase(progress: DependencyProgress) -> (String, u64, u64) {
+    let base = "aka-engine:export-artifacts:synthesize:dependency-edges";
+    let phase = match progress.phase {
+        DependencyProgressPhase::Start => base.to_string(),
+        DependencyProgressPhase::FileStart {
+            file_path,
+            node_count,
+        } => format!("{base}:file-start path={file_path} nodes={node_count}"),
+        DependencyProgressPhase::FileRead {
+            file_path,
+            byte_count,
+        } => format!("{base}:file-read path={file_path} bytes={byte_count}"),
+        DependencyProgressPhase::FileMissing { file_path } => {
+            format!("{base}:file-missing path={file_path}")
+        }
+        DependencyProgressPhase::JavaStart { file_path } => {
+            format!("{base}:java-start path={file_path}")
+        }
+        DependencyProgressPhase::JavaDone {
+            file_path,
+            edge_count,
+            elapsed_ms,
+        } => {
+            format!("{base}:java-done path={file_path} edges={edge_count} elapsed_ms={elapsed_ms}")
+        }
+        DependencyProgressPhase::JavaTimeout {
+            file_path,
+            edge_count,
+            elapsed_ms,
+        } => format!(
+            "{base}:java-timeout path={file_path} partial_edges={edge_count} elapsed_ms={elapsed_ms}"
+        ),
+        DependencyProgressPhase::PythonStart { file_path } => {
+            format!("{base}:python-start path={file_path}")
+        }
+        DependencyProgressPhase::PythonDone {
+            file_path,
+            edge_count,
+            elapsed_ms,
+        } => format!(
+            "{base}:python-done path={file_path} edges={edge_count} elapsed_ms={elapsed_ms}"
+        ),
+        DependencyProgressPhase::PythonTimeout {
+            file_path,
+            edge_count,
+            elapsed_ms,
+        } => format!(
+            "{base}:python-timeout path={file_path} partial_edges={edge_count} elapsed_ms={elapsed_ms}"
+        ),
+        DependencyProgressPhase::FileDone {
+            file_path,
+            edge_count,
+            elapsed_ms,
+        } => format!(
+            "{base}:file-done path={file_path} total_edges={edge_count} elapsed_ms={elapsed_ms}"
+        ),
+    };
+    (phase, progress.current, progress.total)
 }
 
 #[cfg(test)]
@@ -4106,6 +4205,12 @@ fn export_chunks(
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
+    emit_phase(
+        on_event,
+        "aka-engine:export-artifacts:chunks:query",
+        0,
+        total,
+    );
     let mut stmt = conn.prepare(
         "SELECT id, qualified_name, label, file_path, start_line, end_line \
          FROM nodes \
@@ -4115,6 +4220,7 @@ fn export_chunks(
     let mut rows = stmt.query([project])?;
     let mut count = 0;
     let mut sources = SourceCache::new(repo);
+    let mut progress = ExportProgress::new("chunks", total);
     while let Some(row) = rows.next()? {
         let cbm_id: i64 = row.get(0)?;
         let qn = text_col(row, 1)?;
@@ -4136,9 +4242,9 @@ fn export_chunks(
         serde_json::to_writer(&mut out, &chunk)?;
         out.write_all(b"\n")?;
         count += 1;
-        emit_export_progress(on_event, "chunks", count, total);
+        progress.emit(on_event, count);
     }
-    emit_export_progress(on_event, "chunks", count, total);
+    progress.emit_force(on_event, count);
     Ok(count)
 }
 

@@ -8,6 +8,7 @@ use super::super::{
 };
 use super::dependency_edge;
 use super::lookup::{is_meaningful_java_type, simple_type_name, NodeLookup};
+use super::{DependencyBudget, DependencyDetection};
 
 pub(super) fn detect_java_dependency_edges(
     text: &str,
@@ -15,21 +16,27 @@ pub(super) fn detect_java_dependency_edges(
     nodes: &[&SynthNode],
     lookup: &NodeLookup<'_>,
     existing_call_pairs: &HashSet<(String, String)>,
-) -> Vec<EdgeRec> {
+    budget: DependencyBudget,
+) -> DependencyDetection {
     if !is_java_like_file(file_path, nodes) {
-        return Vec::new();
+        return DependencyDetection::new(Vec::new(), false);
     }
     let mut out = Vec::new();
-    out.extend(detect_java_direct_call_edges(
-        text,
-        nodes,
-        existing_call_pairs,
-    ));
+    let direct = detect_java_direct_call_edges(text, nodes, existing_call_pairs, budget);
+    let mut timed_out = direct.timed_out;
+    out.extend(direct.edges);
+    if timed_out {
+        return DependencyDetection::new(out, true);
+    }
     for class_node in nodes
         .iter()
         .copied()
         .filter(|node| matches!(node.label.as_str(), "Class" | "Interface" | "Type"))
     {
+        if budget.exceeded() {
+            timed_out = true;
+            break;
+        }
         let Some(body) = class_source_slice(text, class_node) else {
             continue;
         };
@@ -56,6 +63,10 @@ pub(super) fn detect_java_dependency_edges(
         .copied()
         .filter(|node| matches!(node.label.as_str(), "Function" | "Method"))
     {
+        if budget.exceeded() {
+            timed_out = true;
+            break;
+        }
         for dep in detect_java_bean_method_dependencies(text, method) {
             if let Some(target) = lookup.resolve_type("java", &dep.type_name) {
                 if target.aka_id != method.aka_id {
@@ -71,14 +82,15 @@ pub(super) fn detect_java_dependency_edges(
             }
         }
     }
-    out
+    DependencyDetection::new(out, timed_out)
 }
 
 fn detect_java_direct_call_edges(
     text: &str,
     nodes: &[&SynthNode],
     existing_call_pairs: &HashSet<(String, String)>,
-) -> Vec<EdgeRec> {
+    budget: DependencyBudget,
+) -> DependencyDetection {
     let methods = java_file_methods(nodes);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -93,7 +105,12 @@ fn detect_java_direct_call_edges(
     for target in &methods {
         method_names.insert(target.name);
     }
-    for call in scan_java_method_calls(text) {
+    let calls = scan_java_method_calls(text, budget);
+    let timed_out = calls.timed_out;
+    for call in calls.calls {
+        if budget.exceeded() {
+            return DependencyDetection::new(out, true);
+        }
         if !method_names.contains(call.name) {
             continue;
         }
@@ -112,7 +129,12 @@ fn detect_java_direct_call_edges(
             }
         }
     }
-    out
+    DependencyDetection::new(out, timed_out)
+}
+
+struct JavaMethodScan<'a> {
+    calls: Vec<JavaMethodCall<'a>>,
+    timed_out: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -122,11 +144,17 @@ struct JavaMethodCall<'a> {
     receiver_dot: bool,
 }
 
-fn scan_java_method_calls(text: &str) -> Vec<JavaMethodCall<'_>> {
+fn scan_java_method_calls(text: &str, budget: DependencyBudget) -> JavaMethodScan<'_> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
     let mut idx = 0usize;
     while idx < bytes.len() {
+        if idx.is_multiple_of(4096) && budget.exceeded() {
+            return JavaMethodScan {
+                calls: out,
+                timed_out: true,
+            };
+        }
         let byte = bytes[idx];
         if !(byte == b'_' || byte == b'$' || byte.is_ascii_alphabetic()) {
             idx += 1;
@@ -156,7 +184,10 @@ fn scan_java_method_calls(text: &str) -> Vec<JavaMethodCall<'_>> {
         });
         idx = close.saturating_add(1);
     }
-    out
+    JavaMethodScan {
+        calls: out,
+        timed_out: false,
+    }
 }
 
 struct JavaDirectCallContext<'a, 'b> {
