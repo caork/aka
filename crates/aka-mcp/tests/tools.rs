@@ -113,6 +113,27 @@ fn repo_path_aliases_deserialize_for_query_tools() {
         serde_json::from_value(serde_json::json!({"repo_path": "/work/service", "query": "Order"}))
             .unwrap();
     assert_eq!(augment.repo.as_deref(), Some("/work/service"));
+
+    let analyze: AnalyzeParams =
+        serde_json::from_value(serde_json::json!({"path": "/work/service/src"})).unwrap();
+    assert_eq!(analyze.repo_path, "/work/service/src");
+
+    let import_git: ImportRepoParams =
+        serde_json::from_value(serde_json::json!({"url": "https://example.com/service.git"}))
+            .unwrap();
+    assert_eq!(import_git.kind, "git");
+    assert_eq!(import_git.src, "https://example.com/service.git");
+
+    let import_local: ImportRepoParams = serde_json::from_value(
+        serde_json::json!({"kind": "local", "workspace_path": "/work/service/src"}),
+    )
+    .unwrap();
+    assert_eq!(import_local.kind, "local");
+    assert_eq!(import_local.src, "/work/service/src");
+
+    let update: UpdateRepoParams =
+        serde_json::from_value(serde_json::json!({"path": "/work/service"})).unwrap();
+    assert_eq!(update.repo, "/work/service");
 }
 
 #[tokio::test]

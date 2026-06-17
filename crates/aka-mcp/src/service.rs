@@ -299,6 +299,13 @@ pub struct AnalyzeParams {
     /// Repository path to (re)index. Absolute paths, relative paths, and nested
     /// workspace subdirectories are accepted; aka resolves them to the git or
     /// project root before indexing.
+    #[serde(
+        alias = "path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "repository",
+        alias = "src"
+    )]
     pub repo_path: String,
 }
 
@@ -308,6 +315,16 @@ pub struct ImportRepoParams {
     #[serde(default = "default_import_kind")]
     pub kind: String,
     /// Git clone URL or local directory path.
+    #[serde(
+        alias = "url",
+        alias = "repo_url",
+        alias = "clone_url",
+        alias = "path",
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "repository"
+    )]
     pub src: String,
     /// Optional repository name. Omit to derive it from the URL/path.
     #[serde(default)]
@@ -320,7 +337,14 @@ fn default_import_kind() -> String {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateRepoParams {
-    /// Repository name returned by list_repos/import_repo/analyze.
+    /// Repository name returned by list_repos/import_repo/analyze, or a local workspace path.
+    #[serde(
+        alias = "repo_path",
+        alias = "workspace_path",
+        alias = "workspace",
+        alias = "path",
+        alias = "repository"
+    )]
     pub repo: String,
 }
 

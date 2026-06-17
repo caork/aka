@@ -171,8 +171,16 @@ where
     let backend = Arc::clone(&backend);
     tauri::async_runtime::spawn_blocking(move || f(backend))
         .await
-        .map_err(|e| format!("backend task failed: {e}"))?
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| {
+            let detail = format!("backend task failed: {e}");
+            log_desktop_event(format!("backend error: {detail}"));
+            detail
+        })?
+        .map_err(|e| {
+            let detail = format!("{e:#}");
+            log_desktop_event(format!("backend error: {detail}"));
+            detail
+        })
 }
 
 fn copy_zip_to_temp(path: &str) -> anyhow::Result<std::path::PathBuf> {
@@ -225,12 +233,20 @@ fn configure_backend(
         .path()
         .resource_dir()
         .unwrap_or_else(|_| fallback_resource_dir());
+    log_desktop_event(format!("desktop resource dir={}", resource_dir.display()));
     let backend = if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+        log_desktop_event(format!("desktop engine dir={}", engine_dir.display()));
         AkaBackend::with_engine_dir(engine_dir)
     } else {
+        log_desktop_event(format!(
+            "desktop engine dir unavailable under {}; falling back to runtime discovery",
+            resource_dir.display()
+        ));
         AkaBackend::new()
     };
-    Ok(backend.with_workspace_auto_index())
+    Ok(backend
+        .with_job_event_sink(|message| log_desktop_event(format!("backend job: {message}")))
+        .with_workspace_auto_index())
 }
 
 #[cfg(target_os = "windows")]
@@ -255,12 +271,20 @@ fn configure_backend(
         .path()
         .resource_dir()
         .unwrap_or_else(|_| fallback_resource_dir());
+    log_desktop_event(format!("desktop resource dir={}", resource_dir.display()));
     let backend = if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
+        log_desktop_event(format!("desktop engine dir={}", engine_dir.display()));
         AkaBackend::with_engine_dir(engine_dir)
     } else {
+        log_desktop_event(format!(
+            "desktop engine dir unavailable under {}; falling back to runtime discovery",
+            resource_dir.display()
+        ));
         AkaBackend::new()
     };
-    Ok(backend.with_workspace_auto_index())
+    Ok(backend
+        .with_job_event_sink(|message| log_desktop_event(format!("backend job: {message}")))
+        .with_workspace_auto_index())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -285,6 +309,7 @@ fn start_desktop_mcp_server(backend: BackendState) -> anyhow::Result<DesktopMcpR
     let backend: Arc<dyn Backend> = backend;
     rt.spawn(async move {
         if let Err(e) = aka_mcp::serve_http(backend, addr).await {
+            log_desktop_event(format!("desktop MCP server stopped: {e:#}"));
             eprintln!("aka desktop MCP server stopped: {e:#}");
         }
     });

@@ -78,6 +78,8 @@ const RENAME_REFERENCE_LIMIT: usize = 500;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+type JobEventSink = Arc<dyn Fn(String) + Send + Sync + 'static>;
+
 #[cfg(windows)]
 fn hide_child_console(cmd: &mut Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -543,10 +545,18 @@ fn run_auto_indexer(
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     handles: Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
     engine_dir: Option<PathBuf>,
+    job_event_sink: Option<JobEventSink>,
 ) {
     while !auto.stop.load(Ordering::Relaxed) {
         if let Ok(registry) = Registry::load() {
-            auto_index_scan(&auto, &jobs, &handles, engine_dir.clone(), registry);
+            auto_index_scan(
+                &auto,
+                &jobs,
+                &handles,
+                engine_dir.clone(),
+                job_event_sink.clone(),
+                registry,
+            );
         }
         std::thread::sleep(AUTO_INDEX_SCAN_INTERVAL);
     }
@@ -558,6 +568,7 @@ fn auto_index_scan(
     jobs: &Arc<Mutex<HashMap<String, JobInfo>>>,
     handles: &Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
     engine_dir: Option<PathBuf>,
+    job_event_sink: Option<JobEventSink>,
     registry: Registry,
 ) {
     if jobs
@@ -609,6 +620,7 @@ fn auto_index_scan(
                 Arc::clone(jobs),
                 Arc::clone(handles),
                 engine_dir.clone(),
+                job_event_sink.clone(),
             );
             return;
         }
@@ -674,6 +686,7 @@ fn spawn_auto_index_job(
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     handles: Arc<Mutex<HashMap<PathBuf, Arc<RepoHandle>>>>,
     engine_dir: Option<PathBuf>,
+    job_event_sink: Option<JobEventSink>,
 ) {
     {
         let mut jobs_guard = jobs.lock().expect("jobs lock");
@@ -693,24 +706,40 @@ fn spawn_auto_index_job(
     }
     let name = entry.name.clone();
     let repo_path = entry.repo_path.clone();
+    emit_job_event(
+        &job_event_sink,
+        format!("auto-index queued name={name} path={}", repo_path.display()),
+    );
     std::thread::spawn(move || {
+        emit_job_event(&job_event_sink, format!("auto-index started name={name}"));
         match run_auto_analyze_job(&jobs, &name, repo_path.clone(), engine_dir) {
             Ok(()) => {
                 handles.lock().expect("handles lock").remove(&repo_path);
                 jobs.lock().expect("jobs lock").remove(&name);
+                emit_job_event(&job_event_sink, format!("auto-index completed name={name}"));
             }
             Err(e) => {
+                let detail = format!("{e:#}");
                 if let Some(job) = jobs.lock().expect("jobs lock").get_mut(&name) {
                     job.status = "failed".into();
-                    let detail = format!("{e:#}");
                     job.detail = Some(detail.clone());
                     job.progress.stage = "failed".into();
                     job.progress.message = "Auto index failed".into();
                     job.push_log(format!("failed: {detail}"));
                 }
+                emit_job_event(
+                    &job_event_sink,
+                    format!("auto-index failed name={name}: {detail}"),
+                );
             }
         }
     });
+}
+
+fn emit_job_event(sink: &Option<JobEventSink>, message: impl Into<String>) {
+    if let Some(sink) = sink {
+        sink(message.into());
+    }
 }
 
 impl RepoQuickState {
@@ -796,6 +825,7 @@ pub struct AkaBackend {
     auto_indexer: Arc<AutoIndexer>,
     engine_dir: Option<PathBuf>,
     auto_discover_workspace: bool,
+    job_event_sink: Option<JobEventSink>,
 }
 
 struct AutoIndexer {
@@ -1584,6 +1614,23 @@ fn finalize_entry(repo_path: &Path, name: &str, kind: &str, url: Option<String>)
     Ok(())
 }
 
+fn resolve_registered_repo_for_update(registry: &Registry, key: &str) -> Result<Option<RepoEntry>> {
+    if let Some(entry) = registry.find_by_name(key).cloned() {
+        return Ok(Some(entry));
+    }
+    if !looks_like_local_path(key) {
+        return Ok(None);
+    }
+    let requested = PathBuf::from(key);
+    let Some(path) = discover_workspace_root(&requested)?
+        .or_else(|| requested.canonicalize().ok())
+        .map(|path| user_facing_path(&path))
+    else {
+        return Ok(None);
+    };
+    Ok(registry.find(&path).cloned())
+}
+
 impl AkaBackend {
     pub fn new() -> Self {
         Self {
@@ -1592,6 +1639,7 @@ impl AkaBackend {
             auto_indexer: Arc::new(AutoIndexer::new()),
             engine_dir: None,
             auto_discover_workspace: false,
+            job_event_sink: None,
         }
     }
 
@@ -1621,11 +1669,17 @@ impl AkaBackend {
             auto_indexer: Arc::new(AutoIndexer::new()),
             engine_dir: Some(engine_dir),
             auto_discover_workspace: false,
+            job_event_sink: None,
         }
     }
 
     pub fn with_workspace_auto_index(mut self) -> Self {
         self.auto_discover_workspace = true;
+        self
+    }
+
+    pub fn with_job_event_sink(mut self, sink: impl Fn(String) + Send + Sync + 'static) -> Self {
+        self.job_event_sink = Some(Arc::new(sink));
         self
     }
 
@@ -1654,8 +1708,9 @@ impl AkaBackend {
         let jobs = Arc::clone(&self.jobs);
         let handles = Arc::clone(&self.handles);
         let engine_dir = self.engine_dir();
+        let job_event_sink = self.job_event_sink.clone();
         std::thread::spawn(move || {
-            run_auto_indexer(auto, jobs, handles, engine_dir);
+            run_auto_indexer(auto, jobs, handles, engine_dir, job_event_sink);
         });
     }
 
@@ -1782,22 +1837,44 @@ impl AkaBackend {
         let path = user_facing_path(&path);
         let jobs = Arc::clone(&self.jobs);
         let handles = Arc::clone(&self.handles);
+        let job_event_sink = self.job_event_sink.clone();
+        emit_job_event(
+            &job_event_sink,
+            format!(
+                "index job queued name={name} kind={kind} path={}",
+                path.display()
+            ),
+        );
         jobs.lock()
             .expect("jobs lock")
             .insert(name.clone(), JobInfo::new(kind, url, path));
-        std::thread::spawn(move || match work(Arc::clone(&jobs), name.clone()) {
-            Ok(repo_path) => {
-                handles.lock().expect("handles lock").remove(&repo_path);
-                jobs.lock().expect("jobs lock").remove(&name);
-            }
-            Err(e) => {
-                if let Some(job) = jobs.lock().expect("jobs lock").get_mut(&name) {
-                    job.status = "failed".into();
+        std::thread::spawn(move || {
+            emit_job_event(&job_event_sink, format!("index job started name={name}"));
+            match work(Arc::clone(&jobs), name.clone()) {
+                Ok(repo_path) => {
+                    handles.lock().expect("handles lock").remove(&repo_path);
+                    jobs.lock().expect("jobs lock").remove(&name);
+                    emit_job_event(
+                        &job_event_sink,
+                        format!(
+                            "index job completed name={name} path={}",
+                            repo_path.display()
+                        ),
+                    );
+                }
+                Err(e) => {
                     let detail = format!("{e:#}");
-                    job.detail = Some(detail.clone());
-                    job.progress.stage = "failed".into();
-                    job.progress.message = "Indexing failed".into();
-                    job.push_log(format!("failed: {detail}"));
+                    if let Some(job) = jobs.lock().expect("jobs lock").get_mut(&name) {
+                        job.status = "failed".into();
+                        job.detail = Some(detail.clone());
+                        job.progress.stage = "failed".into();
+                        job.progress.message = "Indexing failed".into();
+                        job.push_log(format!("failed: {detail}"));
+                    }
+                    emit_job_event(
+                        &job_event_sink,
+                        format!("index job failed name={name}: {detail}"),
+                    );
                 }
             }
         });
@@ -2878,12 +2955,13 @@ impl Backend for AkaBackend {
 
     fn update_repo(&self, name: &str) -> Result<String> {
         let registry = Registry::load()?;
-        let Some(entry) = registry.find_by_name(name).cloned() else {
+        let Some(entry) = resolve_registered_repo_for_update(&registry, name)? else {
             bail!("repo not registered: {name}");
         };
+        let name = entry.name.clone();
         {
             let jobs = self.jobs.lock().expect("jobs lock");
-            if jobs.get(name).is_some_and(|j| j.status == "indexing") {
+            if jobs.get(&name).is_some_and(|j| j.status == "indexing") {
                 bail!("a job is already running for repo: {name}");
             }
         }
@@ -2893,7 +2971,7 @@ impl Backend for AkaBackend {
                 let job_dir = dir.clone();
                 let engine_dir = self.engine_dir();
                 self.spawn_job(
-                    name.to_string(),
+                    name.clone(),
                     "git",
                     entry.source_url.clone(),
                     dir,
@@ -2916,7 +2994,7 @@ impl Backend for AkaBackend {
                 let dir = entry.repo_path.clone();
                 let job_dir = dir.clone();
                 let engine_dir = self.engine_dir();
-                self.spawn_job(name.to_string(), "local", None, dir, move |jobs, name| {
+                self.spawn_job(name.clone(), "local", None, dir, move |jobs, name| {
                     run_analyze_job(&jobs, &name, job_dir.clone(), engine_dir)?;
                     Ok(job_dir)
                 });
@@ -3551,6 +3629,36 @@ mod tests {
             repos[0].path,
             repo.canonicalize().unwrap().to_string_lossy()
         );
+        assert_job_visible_status(&repos[0].status);
+    }
+
+    #[test]
+    fn update_repo_accepts_registered_workspace_path() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let repo = temp_repo("workspace-update-path");
+        let home = temp_repo("workspace-update-path-home");
+        std::fs::create_dir_all(repo.join("src/app/api")).unwrap();
+        std::fs::write(repo.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
+        std::fs::write(
+            repo.join("src/app/api/views.py"),
+            "def list_orders(): pass\n",
+        )
+        .unwrap();
+        std::env::set_var("AKA_HOME", &home);
+        let path = repo.canonicalize().unwrap();
+        let name = derive_local_name(&repo);
+        finalize_entry(&path, &name, "local", None).unwrap();
+
+        let backend = AkaBackend::new();
+        let summary = backend
+            .update_repo(repo.join("src/app/api").to_str().unwrap())
+            .unwrap();
+
+        assert_eq!(summary, format!("update scheduled: {name} (re-analyze)"));
+        let repos = backend.list_repos().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, name);
         assert_job_visible_status(&repos[0].status);
     }
 
