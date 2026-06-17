@@ -14,6 +14,8 @@ mod http_config;
 use http_config::extract_http_config_resources;
 mod ai_provider;
 use ai_provider::extract_ai_provider_resources;
+mod business_api;
+use business_api::extract_business_api_resources;
 mod identity;
 use identity::extract_identity_resources;
 pub(super) mod infra_config;
@@ -203,6 +205,7 @@ fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
     out.extend(observability::extract_observability_config_resources(text));
     out.extend(search_index::extract_search_index_config_resources(text));
     out.extend(ai_provider::extract_ai_provider_config_resources(text));
+    out.extend(business_api::extract_business_api_config_resources(text));
     out.extend(vector_store::extract_vector_store_config_resources(text));
     out
 }
@@ -334,6 +337,15 @@ impl ResourceDetection {
         }
     }
 
+    fn business_api(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url: format!("business-api:{provider}"),
+            resource_type: "business-api".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
     fn identity(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
         Self {
             url: format!("identity:{provider}"),
@@ -409,6 +421,7 @@ fn extract_resource_detections(
     out.extend(extract_payment_resources(text, nodes));
     out.extend(observability::extract_observability_resources(text, nodes));
     out.extend(extract_ai_provider_resources(text, nodes));
+    out.extend(extract_business_api_resources(text, nodes));
     out.extend(extract_vector_store_resources(text, nodes));
     out.sort_by(|a, b| {
         a.url
