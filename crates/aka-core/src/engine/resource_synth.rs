@@ -14,6 +14,8 @@ mod http_config;
 use http_config::extract_http_config_resources;
 mod ai_provider;
 use ai_provider::extract_ai_provider_resources;
+mod analytics;
+use analytics::extract_analytics_resources;
 mod business_api;
 use business_api::extract_business_api_resources;
 mod identity;
@@ -207,6 +209,7 @@ fn extract_config_resource_detections(text: &str) -> Vec<ResourceDetection> {
     out.extend(observability::extract_observability_config_resources(text));
     out.extend(search_index::extract_search_index_config_resources(text));
     out.extend(ai_provider::extract_ai_provider_config_resources(text));
+    out.extend(analytics::extract_analytics_config_resources(text));
     out.extend(business_api::extract_business_api_config_resources(text));
     out.extend(vector_store::extract_vector_store_config_resources(text));
     out.extend(workflow_engine::extract_workflow_engine_config_resources(
@@ -333,6 +336,15 @@ impl ResourceDetection {
         }
     }
 
+    fn analytics(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
+        Self {
+            url: format!("analytics:{provider}"),
+            resource_type: "analytics".into(),
+            node_id,
+            strategy: strategy.into(),
+        }
+    }
+
     fn vector_store(provider: String, node_id: String, strategy: impl Into<String>) -> Self {
         Self {
             url: format!("vector-store:{provider}"),
@@ -435,6 +447,7 @@ fn extract_resource_detections(
     out.extend(extract_payment_resources(text, nodes));
     out.extend(observability::extract_observability_resources(text, nodes));
     out.extend(extract_ai_provider_resources(text, nodes));
+    out.extend(extract_analytics_resources(text, nodes));
     out.extend(extract_business_api_resources(text, nodes));
     out.extend(extract_vector_store_resources(text, nodes));
     out.extend(extract_workflow_engine_resources(text, nodes));

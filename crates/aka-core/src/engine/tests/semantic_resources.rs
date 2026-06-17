@@ -1,4 +1,5 @@
 mod ai_provider;
+mod analytics;
 mod business_api;
 mod feature_flag;
 mod http;
