@@ -6,7 +6,7 @@ url = "http://127.0.0.1:4112/mcp"
 # 可选项：
 # startup_timeout_sec = 20            # 首次启动慢（冷启动/大注册表）时调大
 # tool_timeout_sec = 60               # analyze 大仓库可能超默认时长
-# default_tools_approval_mode = "auto"  # aka 工具全部只读（analyze 除外），可放心 auto
+# default_tools_approval_mode = "prompt" # 推荐保守审批；rename dry_run:false 会改文件，analyze/import_repo/update_repo 会写本地索引/checkout
 
 # 桌面不常开或客户端不支持 HTTP MCP 时，可改用 stdio fallback：
 # command = "/absolute/path/to/AKA"

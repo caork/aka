@@ -13,14 +13,21 @@ Route/GraphQL/Tool/Topic/Channel/Command/Config/Table/Repository/Migration/Trans
 
 ## 第一步：永远先 list_repos
 
-调用任何检索工具前先 `list_repos`。HTTP MCP 会连接 AKA 桌面端本地服务；每次 MCP 工具调用都会尝试通过 roots 读取当前客户端 workspace 并自动排队索引，stdio fallback 会在工具调用时自动发现当前工作区。确认目标仓库已索引且 `status: "ready"` 后再做检索：
+调用任何检索工具前先 `list_repos`。HTTP MCP 会连接 AKA 桌面端本地服务；每次 MCP 工具调用都会优先通过 roots 读取当前客户端 workspace 并自动排队索引；如果 roots 不可用，服务端会用进程工作目录兜底，本地路径参数也会提升到 git/project root 并排队索引；stdio fallback 启动和工具调用时也会自动发现当前工作区。所以第一次看到当前仓库 `status: "indexing"` 是正常的：
 
 - `status: "indexing"` → 稍后重试；`"failed"` → 看 `detail` 字段，必要时用 `analyze` 重建。
-- 本地仓库的后续工具 `repo` 参数既可传 `list_repos` 返回的 `name`，也可直接传本地仓库根目录或仓库内任意子目录；未注册时 aka 会提升到 workspace root、自动排队索引，并提示正在 indexing。
+- 本地仓库的后续查询/分析工具可以直接传当前 workspace 路径：`repo`、`repo_path`、`workspace_path`、`workspace`、`path`、`repository` 都接受本地仓库根目录或仓库内任意子目录；未注册时 aka 会提升到 workspace root、自动排队索引，并提示正在 indexing。拿得到本地路径时优先传路径，避免先问用户仓库名。
 - 本地目标仓库不在列表里 → 用 `analyze` 确保索引；`repo_path` 可传当前项目根目录、相对路径或仓库内任意子目录，aka 会提升到 git/project root。aka 会把本地仓库注册到同一份 GUI 可见知识库并后台索引，已注册仓库则排队更新。
 - 远程 GitHub/Git 仓库不在本机 → 用 `import_repo`，传 `kind:"git"` 和 clone URL，可选 `name`；aka 会 clone 到受管 checkout 并后台索引。已索引仓库需要刷新时用 `update_repo`。
 - `analyze`/`import_repo`/`update_repo` 返回里的 `repo` 是后续工具要传的仓库名，`status:"indexing"` 时稍后先重试 `list_repos`。
-- 多仓库时，后续所有工具都带 `repo` 参数（用 list_repos 返回的 `name`）锁定范围，避免跨库噪音。
+- 多仓库时，后续所有工具都带 `repo`/`repo_path` 参数锁定范围，避免跨库噪音。
+
+## 高可用与降级
+
+- **连不上 aka**（connection refused、timeout、MCP server unavailable）时，先提示用户启动/重启 AKA 桌面端，再重试 `list_repos`；如果当前客户端已配置 stdio fallback，可用 `AKA mcp` 兜底，它和 GUI 共用同一份数据。不要在未说明 aka 不可用的情况下退回大范围 grep/read。
+- **索引未就绪**时，不要把空结果当事实。看到 `status:"indexing"`，等待几秒后重试 `list_repos`；看到 `failed`，读 `detail`，本地库用 `analyze` 或 `update_repo` 重建，远程库用 `import_repo` 或 `update_repo`。
+- **查询无结果**时按轻量链路降级：`query` 无命中 → 用 `search_code` 查代码里实际出现的关键词/字符串 → 知道精确名字再用 `find_definition` → 需要关系全景再用 `context`/`impact`。Route/GraphQL/Tool/Topic/shape 工具空结果只表示语义层可能缺数据。
+- **写操作边界**：`rename dry_run:false` 会改工作区文件；`analyze`/`import_repo`/`update_repo` 会写 aka 本地索引/受管 checkout。执行这些操作前要确认目标 `repo`/路径明确，并遵守宿主客户端的审批要求。
 
 ## 选哪个工具：决策表
 

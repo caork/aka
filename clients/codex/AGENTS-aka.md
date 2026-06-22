@@ -16,6 +16,13 @@ aka can index the current project without the user opening the desktop import fl
 - If a repo status is `indexing`, retry `list_repos` later before relying on search results. If status is `failed`, inspect `detail` and retry `analyze` or `update_repo`.
 - When multiple repos are listed, pass `repo` or `repo_path` to all follow-up tools to avoid cross-repo noise.
 
+## High Availability And Fallbacks
+
+- If aka is unreachable (`connection refused`, timeout, or MCP server unavailable), ask the user to start or restart AKA Desktop, then retry `list_repos`. If stdio fallback is configured, `AKA mcp` can be used and shares the same GUI-visible data. Do not silently fall back to broad grep/read loops without saying aka is unavailable.
+- Do not treat empty results as evidence while a repo is `indexing` or `failed`. Poll `list_repos` after a short wait for indexing repos; inspect `detail` and use `analyze`/`update_repo` for local repos or `import_repo`/`update_repo` for remote repos.
+- If a search misses, degrade cheaply: `query` -> `search_code` with code-like terms or literals -> `find_definition` when the exact name is known -> `context`/`impact` when relationships matter. Empty route/GraphQL/tool/topic/shape results mean unknown semantic coverage, not no risk.
+- Write boundary: `rename` with `dry_run:false` edits workspace files; `analyze`, `import_repo`, and `update_repo` write aka local indexes or managed checkouts. Make the target `repo`/path explicit and follow the host client's approval policy before using them.
+
 ## Tool Choice
 
 - Fuzzy code search or "where is X handled?" -> `query`.

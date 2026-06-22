@@ -55,7 +55,7 @@ stdio fallback: agent ─spawn─▶ 桌面包 AKA mcp ──读写同一 app da
 
 ### Claude Code 插件（[clients/claude-code/](../clients/claude-code/)）
 
-- 清单 `.claude-plugin/plugin.json`，**`name` 是唯一必填字段**；`mcpServers` 字段指向 `.mcp.json`（或内联）。默认 `.mcp.json` 使用 HTTP MCP：`{ "aka": { "type": "http", "url": "http://127.0.0.1:4112/mcp" } }`，要求 AKA 桌面端运行；stdio fallback 另走 `claude mcp add --transport stdio aka -- /path/to/AKA mcp`。
+- 清单 `.claude-plugin/plugin.json`，**`name` 是唯一必填字段**；`mcpServers` 字段指向 `.mcp.json`（或内联）。默认 `.mcp.json` 使用标准 MCP 配置外壳：`{ "mcpServers": { "aka": { "type": "http", "url": "http://127.0.0.1:4112/mcp" } } }`，要求 AKA 桌面端运行；stdio fallback 另走 `claude mcp add --transport stdio aka -- /path/to/AKA mcp`。
 - skills 放 `skills/<name>/SKILL.md`（YAML frontmatter：name + description）。
 - 分发：仓库根 `.claude-plugin/marketplace.json` 声明 `plugins[].source: "./clients/claude-code"`，用户 `claude plugin marketplace add <repo>` → `claude plugin install aka@aka`。安装时插件目录被**拷贝**进缓存，不能引用目录外文件；本地调试用 `claude --plugin-dir`。
 - 校验：`claude plugin validate <path>`（`--strict` 把未知字段警告升级为错误）。
@@ -76,7 +76,7 @@ stdio fallback: agent ─spawn─▶ 桌面包 AKA mcp ──读写同一 app da
 ## 5. 版本兼容策略
 
 - **MCP 工具面即合同**：工具的名称、参数、输出字段视同 `docs/contracts/artifacts.md` 的同级合同——**只增不改不删**。新能力 = 新工具或新可选参数；废弃工具先在 description 标注 deprecated 一个版本周期再移除。三个客户端都直接消费工具 schema，没有中间适配层可以吸收破坏性变更。
-- **插件版本**：`plugin.json` 的 `version` 跟随 aka 二进制的 minor 版本手动 bump（不 bump 用户就不会收到更新）；插件只含 HTTP MCP 配置和 markdown，与二进制弱耦合，硬依赖是「AKA 桌面端提供 `127.0.0.1:4112/mcp`」。
+- **插件版本**：`plugin.json` 的 `version` 跟随 workspace version；`scripts/smoke-client-packages.sh` 会校验二者一致（不 bump 用户就不会收到更新）。插件只含 HTTP MCP 配置和 markdown，与二进制弱耦合，硬依赖是「AKA 桌面端提供 `127.0.0.1:4112/mcp`」。
 - **客户端版本下限**：Claude Code 用到的特性（plugin.json + .mcp.json + skills + marketplace）为 2025 年底已稳定的核心集，刻意不用新版才有的字段（`displayName` 需 ≥2.1.143、`defaultEnabled` 需 ≥2.1.154、`userConfig` 等），保证老版本可装。Codex/OpenCode 片段同样只用各自文档标注的稳定字段。
 - **格式漂移的防线**：三家配置格式仍在演进，`clients/` 各 README 标注「2026-06 核实」与来源 URL；install.sh 优先走官方 CLI（`claude mcp add`、`codex mcp add`），格式变更由官方 CLI 吸收，手写文件仅作 fallback（OpenCode MCP 配置用 jq 合并而非整文件覆盖，本地 plugin 用发现目录安装）。
 

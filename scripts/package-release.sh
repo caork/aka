@@ -557,6 +557,14 @@ NODE
 }
 
 package_clients() {
+  local plugin_version
+  plugin_version="$(awk -F'"' '/"version"[[:space:]]*:/ {print $4; exit}' "${REPO_ROOT}/clients/claude-code/.claude-plugin/plugin.json")"
+  if [[ "${plugin_version}" != "${VERSION}" ]]; then
+    echo "error: Claude Code plugin version (${plugin_version}) must match release version (${VERSION})." >&2
+    echo "       Update clients/claude-code/.claude-plugin/plugin.json before packaging." >&2
+    exit 1
+  fi
+
   PLUGIN_ZIP="${DIST_DIR}/aka-claude-code-plugin-${VERSION}.zip"
   rm -f "${PLUGIN_ZIP}"
   (

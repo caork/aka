@@ -33,6 +33,7 @@ clients/install.sh --client codex --stdio --bin /absolute/path/to/AKA
 - **桌面端**：HTTP MCP 需要 AKA 桌面端正在运行；端口固定为本机 `127.0.0.1:4112`，不暴露到局域网。
 - **stdio fallback 路径**：Codex 启动 stdio server 时继承的 PATH 可能与你的交互 shell 不同；`command` 用桌面 AKA 可执行文件的绝对路径最稳。
 - **超时**：`analyze` 大仓库耗时较长，必要时在该表里加 `tool_timeout_sec = 120`。
+- **审批**：不要把 aka 整个 server 无脑设成 `auto`。`rename dry_run:false` 会改工作区文件，`analyze` / `import_repo` / `update_repo` 会写 aka 本地索引或受管 checkout；默认保持 Codex 审批或按工具细分。
 - **环境变量**：默认不需要额外 env。stdio fallback 使用桌面包里的 `AKA` 时也会和 GUI 共用同一份桌面数据。
 - **自动索引**：会话里先调用 `list_repos`。HTTP MCP 会优先读取 Codex workspace roots 并自动排队索引；如果客户端未暴露 roots，服务端会用进程工作目录兜底，本地路径参数也会自动提升到 git/project root 并排队索引；本地目标仓库仍不在列表里时，调用 `analyze` 并传仓库绝对路径、相对路径或仓库内任意子目录。远程 GitHub/Git 仓库用 `import_repo`，传 `kind:"git"` 和 clone URL；已索引仓库要刷新用 `update_repo`。返回的 `repo` 是后续查询要带的仓库名。看到 `status: "indexing"` 时稍后重试 `list_repos` / 查询即可。
 - **使用策略**：建议安装/引用 [`AGENTS-aka.md`](./AGENTS-aka.md)。不要让 agent 先逐文件 grep；让它先 `list_repos`，必要时自动/显式索引，再按任务选择 `query`、`search_code`、`context`、`impact`、`route_map` 等工具。

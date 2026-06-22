@@ -1,7 +1,7 @@
 {
   "name": "aka",
   "metadata": {
-    "description": "aka 代码知识引擎的官方插件 marketplace（MCP 八工具 + 代码图谱使用策略 skill）"
+    "description": "aka 代码知识引擎的官方插件 marketplace（19 个 MCP 代码图谱工具 + 使用策略 skill）"
   },
   "owner": {
     "name": "caork",
@@ -11,7 +11,7 @@
     {
       "name": "aka",
       "source": "./clients/claude-code",
-      "description": "aka 代码知识引擎插件：捆绑 aka MCP server（八工具）与代码图谱使用策略 skill"
+      "description": "aka 代码知识引擎插件：捆绑 AKA 桌面端本地 HTTP MCP 配置、19 个代码图谱工具与使用策略 skill"
     }
   ]
 }

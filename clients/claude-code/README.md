@@ -7,7 +7,7 @@
 ```
 clients/claude-code/            # 插件根
 ├── .claude-plugin/plugin.json  # 插件清单（name 是唯一必填字段）
-├── .mcp.json                   # 捆绑的 MCP server 配置（默认连接 http://127.0.0.1:4112/mcp）
+├── .mcp.json                   # 标准 MCP server 配置（mcpServers.aka -> http://127.0.0.1:4112/mcp）
 └── skills/aka-code-graph/SKILL.md
 ```
 
@@ -22,6 +22,7 @@ http://127.0.0.1:4112/mcp
 ```
 
 Claude Code 通过这个本地 HTTP MCP 调用 aka 工具；不需要单独启动额外命令行程序。
+插件安装后如果 `claude mcp list` 看不到 aka，优先检查 AKA 桌面端是否运行，再用 `claude plugin validate clients/claude-code` 校验插件结构。
 
 ## 安装
 
