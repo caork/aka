@@ -104,6 +104,7 @@ use transaction_synth::{synthesize_transactions_from_sources, SynthTransaction};
 const DEFAULT_ENGINE_MODE: &str = "fast";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const ENGINE_SILENCE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const PROCESS_MAX_STARTS: usize = 200;
 const PROCESS_MIN_COUNT: usize = 20;
 const PROCESS_MAX_COUNT: usize = 300;
@@ -306,12 +307,17 @@ impl EngineRunner {
 
         let mut stdout_tail: Vec<String> = Vec::new();
         let mut stderr_tail: Vec<String> = Vec::new();
+        let child_id = child.id();
+        let started = Instant::now();
+        let mut last_line_at = started;
+        let mut last_silence_log_at = started;
         let status = loop {
             match line_rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(EngineLine::Stdout(line)) => {
                     if line.trim().is_empty() {
                         continue;
                     }
+                    last_line_at = Instant::now();
                     push_tail(&mut stdout_tail, line.clone(), 80);
                     on_event(&EngineEvent::Log {
                         stream: "stdout".into(),
@@ -326,6 +332,7 @@ impl EngineRunner {
                     if line.trim().is_empty() {
                         continue;
                     }
+                    last_line_at = Instant::now();
                     if let Some(phase) = parse_engine_progress_phase(&line) {
                         emit_phase(&mut on_event, phase, 0, 0);
                     }
@@ -336,6 +343,21 @@ impl EngineRunner {
                     });
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let now = Instant::now();
+                    if now.duration_since(last_line_at) >= ENGINE_SILENCE_LOG_INTERVAL
+                        && now.duration_since(last_silence_log_at) >= ENGINE_SILENCE_LOG_INTERVAL
+                    {
+                        last_silence_log_at = now;
+                        on_event(&EngineEvent::Log {
+                            stream: "engine".into(),
+                            line: format!(
+                                "waiting for engine output pid={} silent_for_ms={} elapsed_ms={}",
+                                child_id,
+                                now.duration_since(last_line_at).as_millis(),
+                                now.duration_since(started).as_millis()
+                            ),
+                        });
+                    }
                     if let Some(done) = child.try_wait()? {
                         break done;
                     }

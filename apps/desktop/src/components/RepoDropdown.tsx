@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useRef, useState } from "react";
+import { compactIndexStatus } from "../index-log";
 import { useAppStore } from "../store";
 import AppSettingsModal from "./AppSettingsModal";
 import ImportRepoModal from "./ImportRepoModal";
@@ -135,9 +136,7 @@ export default function RepoDropdown() {
                         }`}
                       >
                         {repo.status === "indexing"
-                          ? `${Math.round(repo.progress?.percent ?? 0)}% · ${
-                              repo.progress?.stage ?? "indexing"
-                            }`
+                          ? compactIndexStatus(repo)
                           : repo.status === "failed"
                             ? (repo.detail ?? "failed")
                             : repo.status === "idle"

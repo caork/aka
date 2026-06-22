@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
 import { useState } from "react";
+import { compactIndexStatus } from "../index-log";
 import { useAppStore } from "../store";
 import AppSettingsModal from "./AppSettingsModal";
 import ImportRepoModal from "./ImportRepoModal";
@@ -89,7 +90,7 @@ export default function Sidebar() {
                 >
                   <span className={repo.status === "failed" ? "" : "text-ink-3"}>
                     {repo.status === "indexing"
-                      ? "indexing…"
+                      ? compactIndexStatus(repo)
                       : repo.status === "failed"
                         ? (repo.detail ?? "索引失败")
                         : repo.status === "idle"

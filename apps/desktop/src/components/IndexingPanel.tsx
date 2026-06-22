@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
-import { useMemo, useState } from "react";
+import { useState } from "react";
+import { buildIndexLogText, indexLogLines } from "../index-log";
 import type { Repo } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
@@ -11,24 +12,8 @@ export default function IndexingPanel({ repo }: { repo: Repo }) {
     repo.status === "failed"
       ? progress?.percent ?? 0
       : Math.max(2, progress?.percent ?? 4);
-  const logs =
-    progress?.logs && progress.logs.length > 0
-      ? progress.logs
-      : [repo.status === "failed" ? (repo.detail ?? "Indexing failed") : "Waiting for indexing events"];
-  const logText = useMemo(
-    () =>
-      [
-        `repo=${repo.name}`,
-        `path=${repo.path}`,
-        `status=${repo.status}`,
-        repo.detail ? `detail=${repo.detail}` : "",
-        "",
-        ...logs,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    [logs, repo.detail, repo.name, repo.path, repo.status],
-  );
+  const logs = indexLogLines(repo);
+  const logText = buildIndexLogText(repo);
 
   const copyLogs = () => {
     void navigator.clipboard

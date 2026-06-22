@@ -87,6 +87,13 @@ pub fn run_analyze_with_progress(
         .ok()
         .map(|s| s.trim().to_string());
 
+    if let Some(cb) = progress.as_mut() {
+        cb(&EngineEvent::Phase {
+            phase: "Preparing index state".into(),
+            current: 0,
+            total: 0,
+        });
+    }
     let current_state = IndexState::compute(&repo, engine_sha.clone(), no_chunks)
         .with_context(|| format!("compute file hashes for {}", repo.display()))?;
     let previous_state = load_index_state(&paths.index_state_path())
@@ -116,6 +123,12 @@ pub fn run_analyze_with_progress(
     }
 
     if artifact_dir.exists() {
+        if let Some(cb) = progress.as_mut() {
+            cb(&EngineEvent::Log {
+                stream: "runtime".into(),
+                line: format!("clear stale artifact dir {}", artifact_dir.display()),
+            });
+        }
         std::fs::remove_dir_all(&artifact_dir)
             .with_context(|| format!("clear stale artifact dir {}", artifact_dir.display()))?;
     }
@@ -179,27 +192,63 @@ pub fn run_analyze_with_progress(
             total: 0,
         });
     }
+    if let Some(cb) = progress.as_mut() {
+        cb(&EngineEvent::Log {
+            stream: "runtime".into(),
+            line: format!("open emitted artifact manifest {}", artifact_dir.display()),
+        });
+    }
     let artifact = open_artifact_after_emit(&artifact_dir, &stats)?;
     eprintln!("aka ▸ 构建索引 …");
-    let idx = match previous_state.as_ref() {
-        Some(previous) if !delta.is_empty() => match indexer::index_artifact_incremental(
-            &artifact,
-            &paths,
-            &delta,
-            previous,
-            &current_state,
-        )? {
-            indexer::IncrementalIndexOutcome::Applied(idx) => {
-                eprintln!("  ✓ 增量替换完成");
-                idx
-            }
-            indexer::IncrementalIndexOutcome::FullRebuildRequired(reason) => {
-                eprintln!("  · 增量不可用，回退全量：{reason}");
-                indexer::index_artifact(&artifact, &paths)?
-            }
-        },
-        _ => indexer::index_artifact(&artifact, &paths)?,
+    let mut index_progress = |ev: indexer::IndexProgressEvent| {
+        eprintln!("  · index {}: {}", ev.stage, ev.message);
+        if let Some(cb) = progress.as_deref_mut() {
+            cb(&EngineEvent::Phase {
+                phase: format!("index:{}", ev.stage),
+                current: ev.current.unwrap_or(0),
+                total: ev.total.unwrap_or(0),
+            });
+            cb(&EngineEvent::Log {
+                stream: "index".into(),
+                line: format!("{}: {}", ev.stage, ev.message),
+            });
+        }
     };
+    let idx = match previous_state.as_ref() {
+        Some(previous) if !delta.is_empty() => {
+            match indexer::index_artifact_incremental_with_progress(
+                &artifact,
+                &paths,
+                &delta,
+                previous,
+                &current_state,
+                Some(&mut index_progress),
+            )? {
+                indexer::IncrementalIndexOutcome::Applied(idx) => {
+                    eprintln!("  ✓ 增量替换完成");
+                    idx
+                }
+                indexer::IncrementalIndexOutcome::FullRebuildRequired(reason) => {
+                    eprintln!("  · 增量不可用，回退全量：{reason}");
+                    indexer::index_artifact_with_progress(
+                        &artifact,
+                        &paths,
+                        Some(&mut index_progress),
+                    )?
+                }
+            }
+        }
+        _ => indexer::index_artifact_with_progress(&artifact, &paths, Some(&mut index_progress))?,
+    };
+    if let Some(cb) = progress.as_mut() {
+        cb(&EngineEvent::Log {
+            stream: "runtime".into(),
+            line: format!(
+                "save parse cache manifest {}",
+                paths.parse_cache_manifest_path().display()
+            ),
+        });
+    }
     save_parse_cache_snapshot(&paths, &artifact, &current_state, delta.clone())?;
 
     if let Some(cb) = progress.as_mut() {
@@ -210,6 +259,12 @@ pub fn run_analyze_with_progress(
         });
     }
     register(&repo, &paths, &artifact, engine_sha)?;
+    if let Some(cb) = progress.as_mut() {
+        cb(&EngineEvent::Log {
+            stream: "runtime".into(),
+            line: format!("save index state {}", paths.index_state_path().display()),
+        });
+    }
     save_index_state(&paths.index_state_path(), &current_state)
         .with_context(|| format!("save index state {}", paths.index_state_path().display()))?;
 

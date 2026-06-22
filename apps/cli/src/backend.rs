@@ -326,10 +326,15 @@ struct JobInfo {
     path: PathBuf,
     /// 当前进度和日志尾部。
     progress: RepoProgress,
+    /// 后台任务开始时间，用于日志定位卡点。
+    started_at: Instant,
+    /// 最后一次进度事件时间。
+    last_event_at: Instant,
 }
 
 impl JobInfo {
     fn new(kind: &str, url: Option<String>, path: PathBuf) -> Self {
+        let now = Instant::now();
         Self {
             status: "indexing".into(),
             detail: None,
@@ -346,21 +351,35 @@ impl JobInfo {
                 nodes: 0,
                 edges: 0,
                 chunks: 0,
-                logs: vec!["Queued for indexing".into()],
+                logs: vec!["t+0.0s queued: Queued for indexing".into()],
             },
+            started_at: now,
+            last_event_at: now,
         }
     }
 
     fn push_log(&mut self, line: impl Into<String>) {
-        let line = line.into();
-        if self.progress.logs.last() == Some(&line) {
+        let body = line.into();
+        self.last_event_at = Instant::now();
+        if self
+            .progress
+            .logs
+            .last()
+            .and_then(|line| line.split_once(' ').map(|(_, body)| body))
+            == Some(body.as_str())
+        {
             return;
         }
+        let line = format!("{} {body}", self.elapsed_label());
         self.progress.logs.push(line);
         if self.progress.logs.len() > JOB_LOG_LIMIT {
             let drop_count = self.progress.logs.len() - JOB_LOG_LIMIT;
             self.progress.logs.drain(0..drop_count);
         }
+    }
+
+    fn elapsed_label(&self) -> String {
+        format!("t+{:.1}s", self.started_at.elapsed().as_secs_f32())
     }
 
     fn set_stage(&mut self, stage: &str, message: impl Into<String>, percent: f32) {
@@ -408,6 +427,21 @@ impl JobInfo {
                     self.progress.total = None;
                     self.progress.percent = self.progress.percent.clamp(96.0, 99.0);
                     self.push_log(format!("register: {phase}"));
+                    return;
+                }
+                if let Some(index_phase) = phase.strip_prefix("index:") {
+                    self.progress.stage = index_phase.to_string();
+                    self.progress.message = phase.clone();
+                    self.progress.current = (*total > 0 || *current > 0).then_some(*current);
+                    self.progress.total = (*total > 0).then_some(*total);
+                    self.progress.percent = index_percent(index_phase, *current, *total)
+                        .max(self.progress.percent)
+                        .min(96.0);
+                    if *total > 0 {
+                        self.push_log(format!("index: {index_phase} ({current}/{total})"));
+                    } else {
+                        self.push_log(format!("index: {index_phase}"));
+                    }
                     return;
                 }
                 if phase_lc.contains("export-artifacts") {
@@ -553,6 +587,34 @@ fn engine_percent(phase: &str, current: u64, total: u64) -> f32 {
     }
 }
 
+fn index_percent(phase: &str, current: u64, total: u64) -> f32 {
+    if total > 0 {
+        let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
+        if phase.contains("nodes") {
+            return 87.0 + ratio * 2.0;
+        }
+        if phase.contains("edges") {
+            return 89.0 + ratio * 2.0;
+        }
+        if phase.contains("chunks") {
+            return 93.0 + ratio * 2.0;
+        }
+    }
+    if phase.contains("preflight") || phase.contains("slice") {
+        86.5
+    } else if phase.contains("graph") {
+        88.0
+    } else if phase.contains("layout") {
+        91.5
+    } else if phase.contains("search") {
+        94.0
+    } else if phase.contains("commit") || phase.contains("done") {
+        95.5
+    } else {
+        90.0
+    }
+}
+
 fn update_job(
     jobs: &Arc<Mutex<HashMap<String, JobInfo>>>,
     name: &str,
@@ -586,6 +648,14 @@ fn run_analyze_job(
     engine_dir: Option<PathBuf>,
 ) -> Result<()> {
     update_job(jobs, name, |job| {
+        let engine = engine_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "auto-discover".into());
+        job.push_log(format!(
+            "runtime: analyze repo={} engine_dir={engine}",
+            repo.display()
+        ));
         job.set_stage("engine", "Starting AST parser", 14.0);
     });
     let mut on_progress = |ev: &EngineEvent| {
@@ -597,6 +667,7 @@ fn run_analyze_job(
         .map_err(|e| anyhow!("{e:#}"))?;
     update_job(jobs, name, |job| {
         job.set_stage("index", "Index artifacts ready", 96.0);
+        job.push_log("runtime: analyze pipeline returned successfully");
     });
     Ok(())
 }
@@ -2982,9 +3053,16 @@ impl Backend for AkaBackend {
                     dest.clone(),
                     move |jobs, name| {
                         update_job(&jobs, &name, |job| {
-                            job.set_stage("checkout", "Cloning git repository", 6.0);
+                            job.set_stage(
+                                "checkout",
+                                format!("Cloning git repository into {}", dest.display()),
+                                6.0,
+                            );
                         });
                         clone_git_repo(&job_url, &dest)?;
+                        update_job(&jobs, &name, |job| {
+                            job.push_log(format!("checkout: clone complete {}", dest.display()));
+                        });
                         let repo = user_facing_path(&dest.canonicalize()?);
                         run_analyze_job(&jobs, &name, repo.clone(), engine_dir)?;
                         update_job(&jobs, &name, |job| {
@@ -3048,9 +3126,16 @@ impl Backend for AkaBackend {
             move |jobs, name| {
                 let result = (|| {
                     update_job(&jobs, &name, |job| {
-                        job.set_stage("extract", "Extracting zip archive", 8.0);
+                        job.set_stage(
+                            "extract",
+                            format!("Extracting zip archive into {}", dest.display()),
+                            8.0,
+                        );
                     });
                     extract_zip(&zip, &dest)?;
+                    update_job(&jobs, &name, |job| {
+                        job.push_log(format!("extract: zip complete {}", dest.display()));
+                    });
                     let repo = user_facing_path(&dest.canonicalize()?);
                     run_analyze_job(&jobs, &name, repo.clone(), engine_dir)?;
                     update_job(&jobs, &name, |job| {
@@ -3090,9 +3175,19 @@ impl Backend for AkaBackend {
                     dir,
                     move |jobs, name| {
                         update_job(&jobs, &name, |job| {
-                            job.set_stage("checkout", "Fetching git updates", 6.0);
+                            job.set_stage(
+                                "checkout",
+                                format!("Fetching git updates in {}", job_dir.display()),
+                                6.0,
+                            );
                         });
                         fast_forward_git_repo(&job_dir)?;
+                        update_job(&jobs, &name, |job| {
+                            job.push_log(format!(
+                                "checkout: git update complete {}",
+                                job_dir.display()
+                            ));
+                        });
                         // register() 继承旧条目的 name/source/embeddings，无须再 finalize。
                         run_analyze_job(&jobs, &name, job_dir.clone(), engine_dir)?;
                         Ok(job_dir)
@@ -3109,6 +3204,12 @@ impl Backend for AkaBackend {
                 let engine_dir = self.engine_dir();
                 self.spawn_job(name.clone(), "local", None, dir, move |jobs, name| {
                     run_analyze_job(&jobs, &name, job_dir.clone(), engine_dir)?;
+                    update_job(&jobs, &name, |job| {
+                        job.push_log(format!(
+                            "runtime: local re-analyze complete {}",
+                            job_dir.display()
+                        ));
+                    });
                     Ok(job_dir)
                 });
                 Ok(format!("update scheduled: {name} (re-analyze)"))
@@ -3154,12 +3255,28 @@ impl Backend for AkaBackend {
             move |jobs, name| {
                 let result = (|| {
                     update_job(&jobs, &name, |job| {
-                        job.set_stage("extract", "Replacing zip checkout", 6.0);
+                        job.set_stage(
+                            "extract",
+                            format!("Replacing zip checkout at {}", dest.display()),
+                            6.0,
+                        );
                     });
                     if dest.exists() {
+                        update_job(&jobs, &name, |job| {
+                            job.push_log(format!(
+                                "extract: removing old checkout {}",
+                                dest.display()
+                            ));
+                        });
                         std::fs::remove_dir_all(&dest)?;
                     }
                     extract_zip(&zip, &dest)?;
+                    update_job(&jobs, &name, |job| {
+                        job.push_log(format!(
+                            "extract: zip replacement complete {}",
+                            dest.display()
+                        ));
+                    });
                     let repo = user_facing_path(&dest.canonicalize()?);
                     run_analyze_job(&jobs, &name, repo.clone(), engine_dir)?;
                     update_job(&jobs, &name, |job| {
@@ -3514,6 +3631,36 @@ mod tests {
         assert_eq!(job.progress.percent, 100.0);
         assert!(job.progress.current.is_none());
         assert!(job.progress.total.is_none());
+    }
+
+    #[test]
+    fn index_progress_events_update_stage_counts_and_logs() {
+        let mut job = JobInfo::new("local", None, PathBuf::from("/tmp/repo"));
+
+        job.apply_engine_event(&EngineEvent::Phase {
+            phase: "index:graph:edges".into(),
+            current: 4,
+            total: 8,
+        });
+        job.apply_engine_event(&EngineEvent::Log {
+            stream: "index".into(),
+            line: "graph:edges: ingesting 8 artifact edges".into(),
+        });
+
+        assert_eq!(job.progress.stage, "graph:edges");
+        assert_eq!(job.progress.current, Some(4));
+        assert_eq!(job.progress.total, Some(8));
+        assert!(job.progress.percent >= 89.0);
+        assert!(job
+            .progress
+            .logs
+            .iter()
+            .any(|line| line.contains("index: graph:edges (4/8)")));
+        assert!(job
+            .progress
+            .logs
+            .iter()
+            .any(|line| line.contains("[index] graph:edges: ingesting 8 artifact edges")));
     }
 
     #[test]

@@ -26,6 +26,16 @@ pub enum IncrementalIndexOutcome {
     FullRebuildRequired(String),
 }
 
+pub type IndexProgress<'a> = dyn FnMut(IndexProgressEvent) + 'a;
+
+#[derive(Debug, Clone)]
+pub struct IndexProgressEvent {
+    pub stage: &'static str,
+    pub message: String,
+    pub current: Option<u64>,
+    pub total: Option<u64>,
+}
+
 struct IncrementalSlice {
     changed_paths: BTreeSet<String>,
     nodes: Vec<NodeRec>,
@@ -42,14 +52,36 @@ struct NodeInfo {
 
 /// 从工件目录全量重建图与搜索索引（幂等：先清旧再建新）。
 pub fn index_artifact(artifact: &ArtifactDir, paths: &RepoPaths) -> Result<IndexSummary> {
+    index_artifact_with_progress(artifact, paths, None)
+}
+
+pub fn index_artifact_with_progress(
+    artifact: &ArtifactDir,
+    paths: &RepoPaths,
+    mut progress: Option<&mut IndexProgress<'_>>,
+) -> Result<IndexSummary> {
     let mut bad_lines = 0u64;
 
     // ── 图存储 ───────────────────────────────────────────────
     let db_path = paths.graph_db();
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "graph",
+        format!("creating graph database {}", db_path.display()),
+        None,
+        None,
+    );
     remove_if_exists(&db_path)?;
     let mut store = GraphStore::create(&db_path)
         .with_context(|| format!("创建图库失败 {}", db_path.display()))?;
 
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "graph:nodes",
+        format!("ingesting {} artifact nodes", artifact.manifest.stats.nodes),
+        Some(0),
+        Some(artifact.manifest.stats.nodes),
+    );
     let nodes = artifact.nodes()?.filter_map(|r| match r {
         Ok(n) => Some(n),
         Err(_) => {
@@ -59,6 +91,21 @@ pub fn index_artifact(artifact: &ArtifactDir, paths: &RepoPaths) -> Result<Index
     });
     // 借用检查：nodes/edges 两个迭代器都要捕获 bad_lines，分两次摄取。
     store.ingest(nodes, std::iter::empty())?;
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "graph:nodes",
+        "node ingest complete".into(),
+        Some(artifact.manifest.stats.nodes),
+        Some(artifact.manifest.stats.nodes),
+    );
+
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "graph:edges",
+        format!("ingesting {} artifact edges", artifact.manifest.stats.edges),
+        Some(0),
+        Some(artifact.manifest.stats.edges),
+    );
     let mut bad_edge_lines = 0u64;
     let edges = artifact.edges()?.filter_map(|r| match r {
         Ok(e) => Some(e),
@@ -69,13 +116,44 @@ pub fn index_artifact(artifact: &ArtifactDir, paths: &RepoPaths) -> Result<Index
     });
     let stats_edges = store.ingest(std::iter::empty(), edges)?;
     bad_lines += bad_edge_lines;
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "graph:edges",
+        format!(
+            "edge ingest complete; dangling_edges={}",
+            stats_edges.dangling_edges
+        ),
+        Some(artifact.manifest.stats.edges),
+        Some(artifact.manifest.stats.edges),
+    );
 
     // 布局（确定性 phyllotaxis，给可视化用）。
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "graph:layout",
+        "building adjacency and deterministic layout".into(),
+        None,
+        None,
+    );
     let adj = Adjacency::build(&store)?;
     compute_layout(&store, &adj)?;
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "graph:layout",
+        "layout complete".into(),
+        None,
+        None,
+    );
 
     // ── 搜索索引 ─────────────────────────────────────────────
     let search_dir = paths.search_dir();
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "search",
+        format!("creating search index {}", search_dir.display()),
+        None,
+        None,
+    );
     if search_dir.exists() {
         std::fs::remove_dir_all(&search_dir)?;
     }
@@ -85,12 +163,68 @@ pub fn index_artifact(artifact: &ArtifactDir, paths: &RepoPaths) -> Result<Index
     let chunk_count = {
         let mut search = SearchIndexWriter::create(&search_dir)?;
         // 节点先于 chunk 摄取：chunk 文档要携带所属节点的真实 label。
+        emit_index_progress(
+            progress.as_deref_mut(),
+            "search:nodes",
+            format!(
+                "adding {} nodes to search index",
+                artifact.manifest.stats.nodes
+            ),
+            Some(0),
+            Some(artifact.manifest.stats.nodes),
+        );
         search.add_nodes(artifact.nodes()?.filter_map(|r| r.ok()))?;
+        emit_index_progress(
+            progress.as_deref_mut(),
+            "search:nodes",
+            "search node add complete".into(),
+            Some(artifact.manifest.stats.nodes),
+            Some(artifact.manifest.stats.nodes),
+        );
         let mut chunk_count = 0u64;
         if let Some(chunks) = artifact.chunks()? {
+            emit_index_progress(
+                progress.as_deref_mut(),
+                "search:chunks",
+                format!(
+                    "adding {} chunks to search index",
+                    artifact.manifest.stats.chunks
+                ),
+                Some(0),
+                Some(artifact.manifest.stats.chunks),
+            );
             search.add_chunks(chunks.filter_map(|r| r.ok()).inspect(|_| chunk_count += 1))?;
+            emit_index_progress(
+                progress.as_deref_mut(),
+                "search:chunks",
+                "search chunk add complete".into(),
+                Some(chunk_count),
+                Some(artifact.manifest.stats.chunks),
+            );
+        } else {
+            emit_index_progress(
+                progress.as_deref_mut(),
+                "search:chunks",
+                "chunks disabled; skipping search chunks".into(),
+                Some(0),
+                Some(0),
+            );
         }
+        emit_index_progress(
+            progress.as_deref_mut(),
+            "search:commit",
+            "committing search index".into(),
+            None,
+            None,
+        );
         search.commit()?;
+        emit_index_progress(
+            progress.as_deref_mut(),
+            "search:commit",
+            "search index commit complete".into(),
+            None,
+            None,
+        );
         chunk_count
     };
 
@@ -118,15 +252,63 @@ pub fn index_artifact_incremental(
     previous_state: &IndexState,
     current_state: &IndexState,
 ) -> Result<IncrementalIndexOutcome> {
+    index_artifact_incremental_with_progress(
+        artifact,
+        paths,
+        delta,
+        previous_state,
+        current_state,
+        None,
+    )
+}
+
+pub fn index_artifact_incremental_with_progress(
+    artifact: &ArtifactDir,
+    paths: &RepoPaths,
+    delta: &IndexDelta,
+    previous_state: &IndexState,
+    current_state: &IndexState,
+    mut progress: Option<&mut IndexProgress<'_>>,
+) -> Result<IncrementalIndexOutcome> {
     if let Some(reason) = incremental_preflight(paths, delta, previous_state, current_state) {
+        emit_index_progress(
+            progress.as_deref_mut(),
+            "incremental:preflight",
+            format!("full rebuild required: {reason}"),
+            None,
+            None,
+        );
         return Ok(IncrementalIndexOutcome::FullRebuildRequired(reason));
     }
 
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "incremental:slice",
+        format!("building incremental slice ({})", delta.summary()),
+        None,
+        None,
+    );
     let slice = match build_incremental_slice(artifact, delta)? {
         Ok(slice) => slice,
-        Err(reason) => return Ok(IncrementalIndexOutcome::FullRebuildRequired(reason)),
+        Err(reason) => {
+            emit_index_progress(
+                progress.as_deref_mut(),
+                "incremental:slice",
+                format!("full rebuild required: {reason}"),
+                None,
+                None,
+            );
+            return Ok(IncrementalIndexOutcome::FullRebuildRequired(reason));
+        }
     };
 
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "incremental:open",
+        "opening existing graph and search indexes".into(),
+        None,
+        None,
+    );
     let mut store = match GraphStore::open(&paths.graph_db()) {
         Ok(store) => store,
         Err(err) => {
@@ -149,14 +331,41 @@ pub fn index_artifact_incremental(
         ));
     }
 
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "incremental:graph",
+        format!(
+            "replacing {} changed files in graph",
+            slice.changed_paths.len()
+        ),
+        Some(0),
+        Some(slice.changed_paths.len() as u64),
+    );
     for file_path in &slice.changed_paths {
         store.delete_file(file_path)?;
     }
     let stats_nodes = store.ingest(slice.nodes.clone().into_iter(), std::iter::empty())?;
     let stats_edges = store.ingest(std::iter::empty(), slice.edges.into_iter())?;
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "incremental:layout",
+        "rebuilding adjacency and layout".into(),
+        None,
+        None,
+    );
     let adj = Adjacency::build(&store)?;
     compute_layout(&store, &adj)?;
 
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "incremental:search",
+        format!(
+            "replacing {} changed files in search index",
+            slice.changed_paths.len()
+        ),
+        Some(0),
+        Some(slice.changed_paths.len() as u64),
+    );
     for file_path in &slice.changed_paths {
         if !search.delete_file(file_path)? {
             return Ok(IncrementalIndexOutcome::FullRebuildRequired(
@@ -166,7 +375,24 @@ pub fn index_artifact_incremental(
     }
     search.add_nodes(slice.nodes.into_iter())?;
     search.add_chunks(slice.chunks.into_iter())?;
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "incremental:commit",
+        "committing incremental search index".into(),
+        None,
+        None,
+    );
     search.commit()?;
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "incremental:done",
+        format!(
+            "incremental replacement complete; dangling_edges={}",
+            stats_nodes.dangling_edges + stats_edges.dangling_edges
+        ),
+        None,
+        None,
+    );
 
     Ok(IncrementalIndexOutcome::Applied(IndexSummary {
         nodes: store.node_count()?,
@@ -176,6 +402,23 @@ pub fn index_artifact_incremental(
         bad_lines: slice.bad_lines,
         incremental: true,
     }))
+}
+
+fn emit_index_progress(
+    progress: Option<&mut IndexProgress<'_>>,
+    stage: &'static str,
+    message: String,
+    current: Option<u64>,
+    total: Option<u64>,
+) {
+    if let Some(progress) = progress {
+        progress(IndexProgressEvent {
+            stage,
+            message,
+            current,
+            total,
+        });
+    }
 }
 
 fn incremental_preflight(

@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isDesktopRuntime } from "../desktop-api";
+import { buildIndexLogText, indexLogLines } from "../index-log";
 import {
   deleteRepo,
   setRepoSettings,
@@ -190,17 +191,8 @@ export default function RepoSettingsModal({
       : repo.source.kind === "zip"
         ? "zip 导入"
         : repo.path;
-  const logs = repo.progress?.logs ?? [];
-  const logText = [
-    `repo=${repo.name}`,
-    `path=${repo.path}`,
-    `status=${repo.status}`,
-    repo.detail ? `detail=${repo.detail}` : "",
-    "",
-    ...logs,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const logs = indexLogLines(repo);
+  const logText = buildIndexLogText(repo);
   const copyLogs = () => {
     void navigator.clipboard
       ?.writeText(logText)
@@ -375,7 +367,7 @@ export default function RepoSettingsModal({
           <button
             type="button"
             onClick={copyLogs}
-            disabled={logs.length === 0}
+            disabled={logText.trim().length === 0}
             className="focus-ring rounded-[8px] px-2 py-1 text-[11.5px] text-ink-3 transition-colors duration-150 ease-out hover:text-ink disabled:opacity-50"
             style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
             data-testid="settings-copy-index-logs"
@@ -384,7 +376,7 @@ export default function RepoSettingsModal({
           </button>
         </div>
         <div className="scroll-area max-h-[180px] rounded-[10px] bg-[var(--subtle-fill-2)] px-3 py-2">
-          {(logs.length > 0 ? logs.slice(-80) : ["No recent index logs"]).map((line, idx) => (
+          {logs.slice(-80).map((line, idx) => (
             <div key={`${idx}-${line}`} className="mono py-0.5 text-[11px] leading-relaxed text-ink-2">
               {line}
             </div>
