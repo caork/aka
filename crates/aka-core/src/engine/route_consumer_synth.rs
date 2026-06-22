@@ -11,10 +11,11 @@ use super::{
     source_annotations_before_node, spring_mapping_path, SynthNode, SynthRoute, SynthRouteConsumer,
 };
 
-pub(super) fn attach_route_consumers(
+pub(super) fn attach_route_consumers_with_progress(
     repo: &Path,
     nodes: &BTreeMap<String, SynthNode>,
     routes: &mut BTreeMap<(String, String, Option<String>), SynthRoute>,
+    on_scan_progress: &mut dyn FnMut(u64, u64),
 ) {
     if routes.is_empty() {
         return;
@@ -23,8 +24,11 @@ pub(super) fn attach_route_consumers(
     let mut route_names: Vec<String> = routes.values().map(|route| route.route.clone()).collect();
     route_names.sort();
     route_names.dedup();
-    for (file_path, file_nodes) in by_file {
+    let total_files = by_file.len() as u64;
+    on_scan_progress(0, total_files);
+    for (idx, (file_path, file_nodes)) in by_file.into_iter().enumerate() {
         let Some(text) = read_repo_text(repo, &file_path) else {
+            on_scan_progress((idx + 1) as u64, total_files);
             continue;
         };
         for (route, node_id) in java_declarative_http_route_consumers(&text, &file_nodes) {
@@ -47,6 +51,7 @@ pub(super) fn attach_route_consumers(
                 candidate.consumers.push(consumer.clone());
             }
         }
+        on_scan_progress((idx + 1) as u64, total_files);
     }
     for route in routes.values_mut() {
         route.consumers.sort_by(|a, b| a.node_id.cmp(&b.node_id));

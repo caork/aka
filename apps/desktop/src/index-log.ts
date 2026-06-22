@@ -27,7 +27,7 @@ export function buildIndexLogText(repo: Repo): string {
     `source=${repo.source.kind}${repo.source.url ? ` ${repo.source.url}` : ""}`,
     progress ? `stage=${progress.stage}` : "",
     progress ? `message=${progress.message}` : "",
-    progress ? `percent=${Math.round(progress.percent * 10) / 10}` : "",
+    progress ? `activity=${compactIndexStatus(repo)}` : "",
     progress && progress.current !== null ? `current=${progress.current}` : "",
     progress && progress.total !== null ? `total=${progress.total}` : "",
     progress ? `files=${progress.files}` : "",

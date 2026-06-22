@@ -148,6 +148,7 @@ pub(super) fn java_interface_routes_by_method(
     }
 
     let mut out: HashMap<String, Vec<RouteCandidate>> = HashMap::new();
+    let mut text_by_file: HashMap<String, String> = HashMap::new();
     for node in nodes.values().filter(|node| {
         matches!(node.label.as_str(), "Function" | "Method")
             && !is_python_route_node(node)
@@ -157,7 +158,7 @@ pub(super) fn java_interface_routes_by_method(
                 .and_then(|parent| owner_labels.get(parent))
                 .is_some_and(|label| label == "Interface")
     }) {
-        let text = read_repo_text(repo, &node.file_path).unwrap_or_default();
+        let text = cached_repo_text(repo, &node.file_path, &mut text_by_file);
         let decorators = decorators_for_node(&text, node);
         let Some(method_path) = node
             .route_path
@@ -186,13 +187,24 @@ pub(super) fn java_interface_routes_by_method(
         }
     }
     let interface_routes = out.clone();
+    let mut methods_by_parent: BTreeMap<String, Vec<&SynthNode>> = BTreeMap::new();
+    for node in nodes.values().filter(|node| {
+        matches!(node.label.as_str(), "Function" | "Method")
+            && !is_python_route_node(node)
+            && node.parent_class.is_some()
+    }) {
+        if let Some(parent) = node.parent_class.as_ref() {
+            methods_by_parent
+                .entry(parent.clone())
+                .or_default()
+                .push(node);
+        }
+    }
     for class_node in nodes
         .values()
         .filter(|node| matches!(node.label.as_str(), "Class"))
     {
-        let Some(text) = read_repo_text(repo, &class_node.file_path) else {
-            continue;
-        };
+        let text = cached_repo_text(repo, &class_node.file_path, &mut text_by_file);
         let implemented = java_implemented_interfaces(&text, &class_node.name);
         if implemented.is_empty() {
             continue;
@@ -201,16 +213,18 @@ pub(super) fn java_interface_routes_by_method(
             .get(&class_node.aka_id)
             .cloned()
             .unwrap_or_else(|| java_type_aliases(class_node));
-        for method in nodes.values().filter(|node| {
-            let method_text = read_repo_text(repo, &node.file_path).unwrap_or_default();
-            matches!(node.label.as_str(), "Function" | "Method")
-                && node
-                    .parent_class
-                    .as_ref()
-                    .is_some_and(|parent| class_aliases.iter().any(|alias| alias == parent))
-                && node.route_path.is_none()
-                && spring_mapping_path(&decorators_for_node(&method_text, node)).is_none()
-        }) {
+        let candidate_methods = class_aliases
+            .iter()
+            .filter_map(|alias| methods_by_parent.get(alias))
+            .flat_map(|methods| methods.iter().copied());
+        for method in candidate_methods {
+            if method.route_path.is_some() {
+                continue;
+            }
+            let method_text = cached_repo_text(repo, &method.file_path, &mut text_by_file);
+            if spring_mapping_path(&decorators_for_node(&method_text, method)).is_some() {
+                continue;
+            }
             for iface in &implemented {
                 let possible = possible_interface_method_ids_from_name(
                     &class_node.qn,
@@ -235,6 +249,17 @@ pub(super) fn java_interface_routes_by_method(
         dedup_route_candidates(routes);
     }
     out
+}
+
+fn cached_repo_text<'a>(
+    repo: &Path,
+    file_path: &str,
+    text_by_file: &'a mut HashMap<String, String>,
+) -> &'a str {
+    text_by_file
+        .entry(file_path.to_string())
+        .or_insert_with(|| read_repo_text(repo, file_path).unwrap_or_default())
+        .as_str()
 }
 
 fn decorators_for_node(text: &str, node: &SynthNode) -> Vec<String> {

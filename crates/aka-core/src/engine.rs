@@ -79,7 +79,7 @@ use resource_synth::{synthesize_resources_from_sources, SynthResource};
 use route_annotated_synth::{
     dedup_route_candidates, extract_annotated_routes, java_interface_routes_by_method,
 };
-use route_consumer_synth::attach_route_consumers;
+use route_consumer_synth::attach_route_consumers_with_progress;
 use route_django_synth::django_urlconf_routes_from_repo;
 use route_python_prefix_synth::{python_router_prefixes_by_file, PythonRoutePrefixes};
 use route_realtime_synth::realtime_routes_by_file;
@@ -483,7 +483,16 @@ fn synth_stage_timeout() -> Duration {
         .unwrap_or(DEFAULT_SYNTH_STAGE_TIMEOUT)
 }
 
-fn synthesize_with_timeout<T, F>(
+enum SynthWorkerMessage<T> {
+    Progress {
+        phase: String,
+        current: u64,
+        total: u64,
+    },
+    Done(T),
+}
+
+fn synthesize_with_timeout_and_progress<T, F>(
     on_event: &mut impl FnMut(&EngineEvent),
     phase: &str,
     timeout: Duration,
@@ -492,24 +501,27 @@ fn synthesize_with_timeout<T, F>(
 ) -> T
 where
     T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
+    F: FnOnce(&mut dyn FnMut(String, u64, u64)) -> T + Send + 'static,
 {
     emit_phase(on_event, phase, 0, 0);
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = f();
-        let _ = tx.send(result);
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(result) => {
-            on_event(&EngineEvent::Log {
-                stream: "adapter".into(),
-                line: format!("{phase}:done elapsed_ms={}", started.elapsed().as_millis()),
+        let progress_tx = tx.clone();
+        let mut progress = move |phase: String, current: u64, total: u64| {
+            let _ = progress_tx.send(SynthWorkerMessage::Progress {
+                phase,
+                current,
+                total,
             });
-            result
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
+        };
+        let result = f(&mut progress);
+        let _ = tx.send(SynthWorkerMessage::Done(result));
+    });
+
+    loop {
+        let elapsed = started.elapsed();
+        let Some(remaining) = timeout.checked_sub(elapsed) else {
             on_event(&EngineEvent::Log {
                 stream: "adapter".into(),
                 line: format!(
@@ -517,13 +529,41 @@ where
                     started.elapsed().as_millis()
                 ),
             });
-            default
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            on_event(&EngineEvent::Warning {
-                message: format!("{phase} worker disconnected; continuing without this synthesis"),
-            });
-            default
+            return default;
+        };
+        match rx.recv_timeout(remaining.min(Duration::from_secs(1))) {
+            Ok(SynthWorkerMessage::Progress {
+                phase,
+                current,
+                total,
+            }) => emit_phase(on_event, phase, current, total),
+            Ok(SynthWorkerMessage::Done(result)) => {
+                on_event(&EngineEvent::Log {
+                    stream: "adapter".into(),
+                    line: format!("{phase}:done elapsed_ms={}", started.elapsed().as_millis()),
+                });
+                return result;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if started.elapsed() >= timeout {
+                    on_event(&EngineEvent::Log {
+                        stream: "adapter".into(),
+                        line: format!(
+                            "{phase}:timeout elapsed_ms={} skipped=true",
+                            started.elapsed().as_millis()
+                        ),
+                    });
+                    return default;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                on_event(&EngineEvent::Warning {
+                    message: format!(
+                        "{phase} worker disconnected; continuing without this synthesis"
+                    ),
+                });
+                return default;
+            }
         }
     }
 }
@@ -2095,12 +2135,20 @@ fn synthesize_graph_with_progress(
         let nodes = nodes.clone();
         let processes = processes.clone();
         let native_routes = native_routes.clone();
-        synthesize_with_timeout(
+        synthesize_with_timeout_and_progress(
             on_event,
             "aka-engine:export-artifacts:synthesize:routes",
             synth_stage_timeout(),
             Vec::new(),
-            move || synthesize_routes_from_sources(&repo, &nodes, &processes, &native_routes),
+            move |progress| {
+                synthesize_routes_from_sources_with_progress(
+                    &repo,
+                    &nodes,
+                    &processes,
+                    &native_routes,
+                    progress,
+                )
+            },
         )
     };
     emit_phase(
@@ -3123,15 +3171,42 @@ fn synthesize_routes_from_sources(
     processes: &[SynthProcess],
     native_routes: &[NativeAppNode],
 ) -> Vec<SynthRoute> {
+    let mut progress = |_: String, _: u64, _: u64| {};
+    synthesize_routes_from_sources_with_progress(
+        repo,
+        nodes,
+        processes,
+        native_routes,
+        &mut progress,
+    )
+}
+
+fn synthesize_routes_from_sources_with_progress(
+    repo: &Path,
+    nodes: &BTreeMap<String, SynthNode>,
+    processes: &[SynthProcess],
+    native_routes: &[NativeAppNode],
+    progress: &mut dyn FnMut(String, u64, u64),
+) -> Vec<SynthRoute> {
+    let mut route_progress = RouteSynthesisProgress::new(progress);
+    route_progress.emit_force("group-files", 0, 0);
     let by_file = route_nodes_by_file(nodes);
+    let total_source_files = by_file.len() as u64;
+    route_progress.emit_force("discover-project-files", 0, 0);
     let project_sources = ProjectSourceSet::discover(repo);
+    route_progress.emit_force("prefixes:python", 0, 0);
     let python_prefixes = python_router_prefixes_by_file(repo, by_file.keys().map(String::as_str));
+    route_progress.emit_force("interfaces:java", 0, 0);
     let java_interface_routes = java_interface_routes_by_method(repo, nodes);
+    route_progress.emit_force("urlconf:django", 0, 0);
     let django_routes_by_file = django_urlconf_routes_from_repo(repo, &project_sources, &by_file);
+    route_progress.emit_force("functional:spring", 0, 0);
     let spring_functional_routes_by_file =
         spring_functional_routes_from_repo(repo, &project_sources, nodes);
+    route_progress.emit_force("realtime", 0, 0);
     let realtime_routes_by_file = realtime_routes_by_file(repo, &by_file, &python_prefixes);
     let mut routes: BTreeMap<(String, String, Option<String>), SynthRoute> = BTreeMap::new();
+    route_progress.emit_force("native-routes", 0, native_routes.len() as u64);
     for native in native_routes {
         let route = route_from_path(&native.file_path)
             .unwrap_or_else(|| normalize_route_literal(trim_route_suffix(&native.name)));
@@ -3153,8 +3228,20 @@ fn synthesize_routes_from_sources(
             },
         );
     }
-    for (file_path, file_nodes) in &by_file {
+    route_progress.emit_force(
+        "native-routes",
+        native_routes.len() as u64,
+        native_routes.len() as u64,
+    );
+    route_progress.emit_force("source-files", 0, total_source_files);
+    for (idx, (file_path, file_nodes)) in by_file.iter().enumerate() {
         let Some(text) = read_repo_text(repo, file_path) else {
+            route_progress.emit_file(
+                "source-files",
+                (idx + 1) as u64,
+                total_source_files,
+                file_path,
+            );
             continue;
         };
         let handler = pick_handler_node(file_nodes);
@@ -3185,6 +3272,12 @@ fn synthesize_routes_from_sources(
         ));
         dedup_route_candidates(&mut route_candidates);
         if route_candidates.is_empty() {
+            route_progress.emit_file(
+                "source-files",
+                (idx + 1) as u64,
+                total_source_files,
+                file_path,
+            );
             continue;
         }
         let response_keys = extract_response_keys_for_file(repo, file_path, &text);
@@ -3201,9 +3294,17 @@ fn synthesize_routes_from_sources(
                 &error_keys,
             );
         }
+        route_progress.emit_file(
+            "source-files",
+            (idx + 1) as u64,
+            total_source_files,
+            file_path,
+        );
     }
 
-    for (file_path, route_candidates) in django_routes_by_file {
+    let django_total = django_routes_by_file.len() as u64;
+    route_progress.emit_force("merge:django", 0, django_total);
+    for (idx, (file_path, route_candidates)) in django_routes_by_file.into_iter().enumerate() {
         let text = read_repo_text(repo, &file_path).unwrap_or_default();
         let fallback_response_keys = extract_response_keys_for_file(repo, &file_path, &text);
         let fallback_error_keys = extract_error_keys(&fallback_response_keys, &text);
@@ -3226,9 +3327,14 @@ fn synthesize_routes_from_sources(
                 &error_keys,
             );
         }
+        route_progress.emit_file("merge:django", (idx + 1) as u64, django_total, &file_path);
     }
 
-    for (file_path, route_candidates) in spring_functional_routes_by_file {
+    let spring_total = spring_functional_routes_by_file.len() as u64;
+    route_progress.emit_force("merge:spring-functional", 0, spring_total);
+    for (idx, (file_path, route_candidates)) in
+        spring_functional_routes_by_file.into_iter().enumerate()
+    {
         let text = read_repo_text(repo, &file_path).unwrap_or_default();
         let response_keys = extract_response_keys_for_file(repo, &file_path, &text);
         let error_keys = extract_error_keys(&response_keys, &text);
@@ -3244,9 +3350,17 @@ fn synthesize_routes_from_sources(
                 &error_keys,
             );
         }
+        route_progress.emit_file(
+            "merge:spring-functional",
+            (idx + 1) as u64,
+            spring_total,
+            &file_path,
+        );
     }
 
-    for (file_path, route_candidates) in realtime_routes_by_file {
+    let realtime_total = realtime_routes_by_file.len() as u64;
+    route_progress.emit_force("merge:realtime", 0, realtime_total);
+    for (idx, (file_path, route_candidates)) in realtime_routes_by_file.into_iter().enumerate() {
         let text = read_repo_text(repo, &file_path).unwrap_or_default();
         let response_keys = extract_response_keys_for_file(repo, &file_path, &text);
         let error_keys = extract_error_keys(&response_keys, &text);
@@ -3262,17 +3376,73 @@ fn synthesize_routes_from_sources(
                 &error_keys,
             );
         }
+        route_progress.emit_file(
+            "merge:realtime",
+            (idx + 1) as u64,
+            realtime_total,
+            &file_path,
+        );
     }
 
-    attach_route_consumers(repo, nodes, &mut routes);
+    route_progress.emit_force("consumers:scan-files", 0, total_source_files);
+    {
+        let mut consumer_progress = |current, total| {
+            route_progress.emit("consumers:scan-files", current, total);
+        };
+        attach_route_consumers_with_progress(repo, nodes, &mut routes, &mut consumer_progress);
+    }
+    route_progress.emit_force("consumers:dedupe", routes.len() as u64, routes.len() as u64);
 
     let mut out: Vec<SynthRoute> = routes.into_values().collect();
+    route_progress.emit_force("sort", out.len() as u64, out.len() as u64);
     out.sort_by(|a, b| {
         a.route
             .cmp(&b.route)
             .then_with(|| a.file_path.cmp(&b.file_path))
     });
+    route_progress.emit_force("done", out.len() as u64, out.len() as u64);
     out
+}
+
+struct RouteSynthesisProgress<'a> {
+    progress: &'a mut dyn FnMut(String, u64, u64),
+    last_emit: Instant,
+}
+
+impl<'a> RouteSynthesisProgress<'a> {
+    fn new(progress: &'a mut dyn FnMut(String, u64, u64)) -> Self {
+        Self {
+            progress,
+            last_emit: Instant::now(),
+        }
+    }
+
+    fn emit(&mut self, suffix: &str, current: u64, total: u64) {
+        let enough_items = current == 0 || current == 1 || current.is_multiple_of(25);
+        let enough_time = self.last_emit.elapsed() >= Duration::from_secs(1);
+        let complete = total > 0 && current >= total;
+        if enough_items || enough_time || complete {
+            self.emit_force(suffix, current, total);
+        }
+    }
+
+    fn emit_file(&mut self, suffix: &str, current: u64, total: u64, file_path: &str) {
+        let enough_items = current == 0 || current == 1 || current.is_multiple_of(25);
+        let enough_time = self.last_emit.elapsed() >= Duration::from_secs(1);
+        let complete = total > 0 && current >= total;
+        if enough_items || enough_time || complete {
+            self.emit_force(&format!("{suffix} path={file_path}"), current, total);
+        }
+    }
+
+    fn emit_force(&mut self, suffix: &str, current: u64, total: u64) {
+        self.last_emit = Instant::now();
+        (self.progress)(
+            format!("aka-engine:export-artifacts:synthesize:routes:{suffix}"),
+            current,
+            total,
+        );
+    }
 }
 
 fn response_keys_for_route_candidate(

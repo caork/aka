@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod semantic_cache;
 mod semantic_commands;
@@ -183,6 +183,77 @@ fn write_engine_project_db(path: &Path, project: &str, root_path: &Path) {
 
 fn synthesize_graph_quiet(conn: &Connection, repo: &Path) -> Result<SynthGraph, EngineError> {
     synthesize_graph(conn, "demo", repo)
+}
+
+fn test_synth_node(
+    id: &str,
+    label: &str,
+    name: &str,
+    file_path: &str,
+    route_path: Option<&str>,
+) -> SynthNode {
+    SynthNode {
+        aka_id: id.to_string(),
+        qn: id.to_string(),
+        label: label.to_string(),
+        name: name.to_string(),
+        file_path: file_path.to_string(),
+        start_line: 1,
+        end_line: 3,
+        language: "java".to_string(),
+        route_path: route_path.map(str::to_string),
+        route_method: Some("GET".to_string()).filter(|_| route_path.is_some()),
+        decorators: Vec::new(),
+        parent_class: None,
+        is_exported: true,
+        ast_framework_multiplier: 1.0,
+        ast_framework_reason: None,
+    }
+}
+
+#[test]
+fn route_synthesis_emits_subphase_progress() {
+    let repo = temp_repo("route-progress");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("src/OrderController.java"),
+        "class OrderController { String list() { return \"ok\"; } }",
+    )
+    .unwrap();
+    let nodes = BTreeMap::from([(
+        "method:orders".to_string(),
+        test_synth_node(
+            "method:orders",
+            "Method",
+            "list",
+            "src/OrderController.java",
+            Some("/orders"),
+        ),
+    )]);
+    let mut events = Vec::new();
+
+    let routes = synthesize_routes_from_sources_with_progress(
+        &repo,
+        &nodes,
+        &[],
+        &[],
+        &mut |phase, current, total| {
+            events.push((phase, current, total));
+        },
+    );
+
+    assert_eq!(routes.len(), 1);
+    assert!(events.iter().any(|(phase, current, total)| {
+        phase.contains("synthesize:routes:source-files") && *current == 1 && *total == 1
+    }));
+    assert!(events.iter().any(|(phase, current, total)| {
+        phase.contains("synthesize:routes:consumers:scan-files") && *current == 1 && *total == 1
+    }));
+    assert!(events.iter().any(
+        |(phase, current, total)| phase.contains("synthesize:routes:done")
+            && *current == 1
+            && *total == 1
+    ));
 }
 
 #[test]

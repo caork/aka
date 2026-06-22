@@ -569,6 +569,12 @@ fn adapter_percent(phase: &str, current: u64, total: u64) -> f32 {
         84.0
     } else if phase.contains("synthesize:processes") {
         87.0
+    } else if phase.contains("synthesize:routes:done") {
+        88.0
+    } else if phase.contains("synthesize:routes:consumers") {
+        progress_between(current, total, 87.7, 88.0)
+    } else if phase.contains("synthesize:routes:source-files") {
+        progress_between(current, total, 87.5, 87.7)
     } else if phase.contains("synthesize:routes") {
         87.5
     } else if phase.contains("synthesize:topics") {
@@ -584,6 +590,14 @@ fn adapter_percent(phase: &str, current: u64, total: u64) -> f32 {
     } else {
         81.0
     }
+}
+
+fn progress_between(current: u64, total: u64, start: f32, end: f32) -> f32 {
+    if total == 0 {
+        return start;
+    }
+    let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
+    start + ratio * (end - start)
 }
 
 fn engine_percent(phase: &str, current: u64, total: u64) -> f32 {
