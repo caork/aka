@@ -420,6 +420,112 @@ html[data-theme="dark"] .app-logo {
   }
 }
 
+.index-phase {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: var(--subtle-fill);
+  color: var(--ink-3);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+}
+
+.index-phase span {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 9999px;
+  background: currentColor;
+  opacity: 0.45;
+}
+
+.index-phase strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.index-phase.done {
+  color: var(--success-ink);
+  background: var(--success-fill);
+}
+
+.index-phase.done span {
+  opacity: 0.95;
+}
+
+.index-phase.active {
+  color: var(--accent-ink);
+  background: var(--accent-fill);
+}
+
+.index-phase.active span {
+  opacity: 1;
+  animation: index-dot-pulse 1.4s ease-in-out infinite;
+}
+
+.index-phase.failed {
+  color: var(--danger-ink);
+  background: var(--danger-fill);
+}
+
+.index-activity {
+  position: relative;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: var(--subtle-fill);
+}
+
+.index-activity > div {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -38%;
+  width: 38%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 78%, white 22%),
+    transparent
+  );
+  animation: index-activity-slide 1.45s ease-in-out infinite;
+}
+
+.index-activity.failed > div {
+  background: linear-gradient(90deg, transparent, var(--danger), transparent);
+  animation: none;
+  left: 0;
+  width: 100%;
+}
+
+@keyframes index-dot-pulse {
+  0%,
+  100% {
+    transform: scale(0.92);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  50% {
+    transform: scale(1.08);
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+}
+
+@keyframes index-activity-slide {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(365%);
+  }
+}
+
 /* scrollbars: minimal, macOS-like */
 .scroll-area {
   overflow-y: auto;

@@ -71,6 +71,7 @@ const DEFINITION_LABELS: &[&str] = &[
 ];
 
 const JOB_LOG_LIMIT: usize = 240;
+const JOB_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(8);
 const AUTO_INDEX_SCAN_INTERVAL: Duration = Duration::from_secs(4);
 const AUTO_INDEX_DEBOUNCE: Duration = Duration::from_secs(3);
 const RENAME_REFERENCE_LIMIT: usize = 500;
@@ -401,6 +402,23 @@ impl JobInfo {
         self.progress.current = None;
         self.progress.total = None;
         self.push_log("done: Index ready");
+    }
+
+    fn maybe_heartbeat(&mut self) {
+        if self.status != "indexing" || self.last_event_at.elapsed() < JOB_HEARTBEAT_INTERVAL {
+            return;
+        }
+        let quiet_for = self.last_event_at.elapsed().as_secs();
+        let stage = self.progress.stage.clone();
+        let message = self.progress.message.clone();
+        let counts = match (self.progress.current, self.progress.total) {
+            (Some(current), Some(total)) if total > 0 => format!(" ({current}/{total})"),
+            (Some(current), _) if current > 0 => format!(" ({current})"),
+            _ => String::new(),
+        };
+        self.push_log(format!(
+            "still working after {quiet_for}s without new events: {stage}: {message}{counts}"
+        ));
     }
 
     fn apply_engine_event(&mut self, ev: &EngineEvent) {
@@ -2188,7 +2206,13 @@ impl Backend for AkaBackend {
     fn list_repos(&self) -> Result<Vec<RepoInfo>> {
         let _ = self.ensure_current_workspace_queued();
         let registry = Registry::load()?;
-        let jobs = self.jobs.lock().expect("jobs lock").clone();
+        let jobs = {
+            let mut guard = self.jobs.lock().expect("jobs lock");
+            for job in guard.values_mut() {
+                job.maybe_heartbeat();
+            }
+            guard.clone()
+        };
         let completed = self
             .completed_jobs
             .lock()
@@ -3661,6 +3685,26 @@ mod tests {
             .logs
             .iter()
             .any(|line| line.contains("[index] graph:edges: ingesting 8 artifact edges")));
+    }
+
+    #[test]
+    fn indexing_jobs_emit_heartbeat_when_events_go_quiet() {
+        let mut job = JobInfo::new("local", None, PathBuf::from("/tmp/repo"));
+        job.set_stage("engine", "Starting AST parser", 14.0);
+        job.last_event_at = Instant::now() - JOB_HEARTBEAT_INTERVAL - Duration::from_millis(1);
+
+        job.maybe_heartbeat();
+
+        assert!(job
+            .progress
+            .logs
+            .iter()
+            .any(|line| line.contains("still working after")));
+        assert!(job
+            .progress
+            .logs
+            .iter()
+            .any(|line| line.contains("engine: Starting AST parser")));
     }
 
     #[test]

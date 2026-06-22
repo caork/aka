@@ -1,6 +1,13 @@
 import { motion } from "framer-motion";
 import { useState } from "react";
-import { buildIndexLogText, indexLogLines } from "../index-log";
+import {
+  activeIndexPhase,
+  buildIndexLogText,
+  formatProgressCount,
+  indexLogLines,
+  indexPhaseLabel,
+  INDEX_PHASES,
+} from "../index-log";
 import type { Repo } from "../store";
 
 const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
@@ -8,10 +15,13 @@ const spring = { type: "spring", stiffness: 300, damping: 30 } as const;
 export default function IndexingPanel({ repo }: { repo: Repo }) {
   const [copied, setCopied] = useState(false);
   const progress = repo.progress;
-  const percent =
+  const activePhase = activeIndexPhase(repo);
+  const phaseLabel = indexPhaseLabel(progress?.stage ?? repo.status);
+  const progressCount = formatProgressCount(progress);
+  const primaryMessage =
     repo.status === "failed"
-      ? progress?.percent ?? 0
-      : Math.max(2, progress?.percent ?? 4);
+      ? "Indexing failed"
+      : progress?.message || "Indexing repository";
   const logs = indexLogLines(repo);
   const logText = buildIndexLogText(repo);
 
@@ -44,24 +54,38 @@ export default function IndexingPanel({ repo }: { repo: Repo }) {
             <h2 className="truncate text-[18px] font-semibold text-ink">{repo.name}</h2>
             <p className="mono mt-1 truncate text-[11.5px] text-ink-3">{repo.path}</p>
           </div>
-          <div className="tabular text-right text-[22px] font-semibold text-ink">
-            {Math.round(percent)}%
+          <div className="text-right">
+            <div className="text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+              {phaseLabel}
+            </div>
+            <div className="mono mt-1 text-[11px] text-ink-3">
+              {progressCount || "active"}
+            </div>
           </div>
         </div>
 
         <div className="mb-4">
-          <div className="h-2 overflow-hidden rounded-full bg-[var(--subtle-fill)]">
-            <motion.div
-              className={`h-full rounded-full ${
-                repo.status === "failed" ? "bg-[var(--danger)]" : "bg-[var(--accent)]"
-              }`}
-              initial={{ width: 0 }}
-              animate={{ width: `${Math.min(100, percent)}%` }}
-              transition={spring}
-            />
+          <div className="mb-3 grid grid-cols-5 gap-2">
+            {INDEX_PHASES.map((phase, idx) => {
+              const state =
+                repo.status === "failed" && idx >= activePhase
+                  ? "failed"
+                  : idx < activePhase
+                    ? "done"
+                    : idx === activePhase
+                      ? "active"
+                      : "pending";
+              return <PhaseStep key={phase.key} label={phase.label} state={state} />;
+            })}
+          </div>
+          <div
+            className={`index-activity ${repo.status === "failed" ? "failed" : ""}`}
+            aria-hidden
+          >
+            <div />
           </div>
           <div className="mt-2 flex items-center justify-between gap-3 text-[12px]">
-            <span className="font-medium text-ink-2">{progress?.message ?? repo.status}</span>
+            <span className="min-w-0 truncate font-medium text-ink-2">{primaryMessage}</span>
             <span className="mono text-ink-3">{formatStage(progress?.stage ?? repo.status)}</span>
           </div>
           {typeof progress?.current === "number" && typeof progress?.total === "number" && (
@@ -106,6 +130,19 @@ export default function IndexingPanel({ repo }: { repo: Repo }) {
           </div>
         </div>
       </motion.div>
+    </div>
+  );
+}
+
+function PhaseStep({ label, state }: { label: string; state: "done" | "active" | "pending" | "failed" }) {
+  return (
+    <div
+      className={`index-phase ${state}`}
+      title={label}
+      aria-label={`${label} ${state}`}
+    >
+      <span />
+      <strong>{label}</strong>
     </div>
   );
 }
