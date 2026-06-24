@@ -21,7 +21,11 @@ pub(super) fn attach_route_consumers_with_progress(
         return;
     }
     let by_file = route_nodes_by_file(nodes);
-    let mut route_names: Vec<String> = routes.values().map(|route| route.route.clone()).collect();
+    let mut route_names: Vec<String> = routes
+        .values()
+        .map(|route| route.route.clone())
+        .filter(|route| !route.is_empty())
+        .collect();
     route_names.sort();
     route_names.dedup();
     let total_files = by_file.len() as u64;

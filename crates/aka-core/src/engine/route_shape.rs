@@ -83,6 +83,13 @@ pub(super) fn route_occurrences(text: &str, route: &str) -> Vec<usize> {
 
 pub(super) fn literal_occurrences(text: &str, needle: &str) -> Vec<usize> {
     let mut out = Vec::new();
+    // An empty needle matches at every position with `needle.len() == 0`, so the
+    // offset never advances and the loop allocates forever. A degenerate (empty)
+    // route string reaching here is what blows the artifact stage up to tens of
+    // GB and aborts the process; guard against it.
+    if needle.is_empty() {
+        return out;
+    }
     let mut offset = 0usize;
     while let Some(pos) = text[offset..].find(needle) {
         let idx = offset + pos;
@@ -424,4 +431,23 @@ fn ident_words(text: &str) -> Vec<String> {
         out.push(text[start..i].to_string());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{literal_occurrences, route_occurrences};
+
+    #[test]
+    fn empty_needle_does_not_loop_forever() {
+        // Regression: an empty route string used to make literal_occurrences
+        // (and route_occurrences) loop forever, blowing the artifact stage up to
+        // tens of GB. Both must terminate and report no matches.
+        assert!(literal_occurrences("anything at all", "").is_empty());
+        assert!(route_occurrences("anything at all", "").is_empty());
+    }
+
+    #[test]
+    fn non_empty_needle_still_matches() {
+        assert_eq!(literal_occurrences("a/b/a/b", "a/b"), vec![0, 4]);
+    }
 }
