@@ -33,6 +33,18 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Build embedded engine library
+        run: |
+          ENGINE_REF="$(cat engine/ENGINE_SHA)"
+          git clone https://github.com/caork/aka-engine.git engine/aka-engine-src
+          git -C engine/aka-engine-src checkout "$ENGINE_REF"
+          make -C engine/aka-engine-src -f Makefile.cbm libaka-engine
+
+      - name: Run embedded engine tests
+        run: |
+          cargo test -p aka-core --features embedded-engine
+          cargo test -p aka-cli --features embedded-engine
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

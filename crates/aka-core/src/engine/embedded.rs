@@ -1,7 +1,8 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::thread;
 
 use aka_facts::{FactBatchBuilder, FactManifest, FactSink, FactSourceError, FactStats};
 use chrono::Utc;
@@ -28,40 +29,41 @@ struct AkaEngineIndexOptions {
     direct_facts_only: bool,
 }
 
+type ManifestCallback = extern "C" fn(*mut c_void, *const c_char, c_int, c_int, c_int) -> c_int;
+type NodeCallback = extern "C" fn(
+    *mut c_void,
+    i64,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+    c_int,
+    c_int,
+    *const c_char,
+) -> c_int;
+type EdgeCallback = extern "C" fn(
+    *mut c_void,
+    i64,
+    i64,
+    *const c_char,
+    i64,
+    *const c_char,
+    *const c_char,
+    c_double,
+    *const c_char,
+    c_int,
+    i64,
+    *const c_char,
+) -> c_int;
+type DoneCallback = extern "C" fn(*mut c_void, c_int, c_int, c_int) -> c_int;
+
 #[repr(C)]
 struct AkaEngineFactSink {
     userdata: *mut c_void,
-    manifest: Option<extern "C" fn(*mut c_void, *const c_char, c_int, c_int, c_int) -> c_int>,
-    node: Option<
-        extern "C" fn(
-            *mut c_void,
-            i64,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            c_int,
-            c_int,
-            *const c_char,
-        ) -> c_int,
-    >,
-    edge: Option<
-        extern "C" fn(
-            *mut c_void,
-            i64,
-            i64,
-            *const c_char,
-            i64,
-            *const c_char,
-            *const c_char,
-            c_double,
-            *const c_char,
-            c_int,
-            i64,
-            *const c_char,
-        ) -> c_int,
-    >,
-    done: Option<extern "C" fn(*mut c_void, c_int, c_int, c_int) -> c_int>,
+    manifest: Option<ManifestCallback>,
+    node: Option<NodeCallback>,
+    edge: Option<EdgeCallback>,
+    done: Option<DoneCallback>,
 }
 
 extern "C" {
@@ -90,9 +92,8 @@ impl EmbeddedEngineFactProducer {
             .canonicalize()
             .map(|path| crate::user_facing_path(&path))
             .unwrap_or(engine_repo);
-        let repo_c = cstring_path(&engine_repo)?;
-        let cache_c = cstring_path(&cache_root)?;
-        let mode = ffi_mode(&engine_mode());
+        let mode_name = engine_mode();
+        let mode = ffi_mode(&mode_name);
 
         on_event(&EngineEvent::Log {
             stream: "engine".into(),
@@ -100,48 +101,20 @@ impl EmbeddedEngineFactProducer {
                 "embedded repo_path={} cache_dir={} mode={}",
                 engine_repo.display(),
                 cache_root.display(),
-                engine_mode()
+                mode_name
             ),
         });
         emit_phase(on_event, "aka-engine:index:embedded", 0, 0);
 
-        let mut batch = FactBatchBuilder::new();
-        let mut bridge = SinkBridge {
-            sink: &mut batch,
-            error: None,
-        };
-        let ffi_sink = AkaEngineFactSink {
-            userdata: (&mut bridge as *mut SinkBridge<'_>).cast::<c_void>(),
-            manifest: Some(manifest_callback),
-            node: Some(node_callback),
-            edge: Some(edge_callback),
-            done: Some(done_callback),
-        };
-        let ffi_options = AkaEngineIndexOptions {
-            repo_path: repo_c.as_ptr(),
-            cache_dir: cache_c.as_ptr(),
-            mode,
-            direct_facts_only: true,
-        };
+        let mut batch = run_embedded_engine_on_large_stack(engine_repo.clone(), cache_root, mode)?;
 
-        let rc = unsafe { aka_engine_index_with_sink(&ffi_options, &ffi_sink) };
-        if let Some(error) = bridge.error {
-            return Err(error);
-        }
-        if rc != 0 {
-            return Err(EngineError::Failed {
-                code: Some(rc),
-                stderr_tail: "embedded engine returned nonzero status".into(),
-            });
-        }
-
-        let mut batch = batch.finish();
         normalize_engine_facts(&mut batch, &engine_repo, options.no_chunks, on_event);
         batch.replay_into(sink)?;
         Ok(super::ProducedEngineFacts::DirectFacts)
     }
 }
 
+#[cfg(test)]
 pub(super) fn run_embedded_engine_smoke(
     repo: &Path,
     cache_dir: &Path,
@@ -158,6 +131,66 @@ pub(super) fn run_embedded_engine_smoke(
         sink,
         on_event,
     )
+}
+
+fn run_embedded_engine_on_large_stack(
+    engine_repo: PathBuf,
+    cache_root: PathBuf,
+    mode: AkaEngineMode,
+) -> Result<aka_facts::FactBatch, EngineError> {
+    thread::Builder::new()
+        .name("aka-embedded-engine".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || run_embedded_engine_inner(&engine_repo, &cache_root, mode))
+        .map_err(|error| {
+            EngineError::Facts(FactSourceError::Message(format!(
+                "spawn embedded engine thread failed: {error}"
+            )))
+        })?
+        .join()
+        .map_err(|_| EngineError::Failed {
+            code: None,
+            stderr_tail: "panic in embedded engine thread".into(),
+        })?
+}
+
+fn run_embedded_engine_inner(
+    engine_repo: &Path,
+    cache_root: &Path,
+    mode: AkaEngineMode,
+) -> Result<aka_facts::FactBatch, EngineError> {
+    let repo_c = cstring_path(engine_repo)?;
+    let cache_c = cstring_path(cache_root)?;
+    let mut batch = FactBatchBuilder::new();
+    let mut bridge = SinkBridge {
+        sink: &mut batch,
+        error: None,
+    };
+    let ffi_sink = AkaEngineFactSink {
+        userdata: (&mut bridge as *mut SinkBridge<'_>).cast::<c_void>(),
+        manifest: Some(manifest_callback),
+        node: Some(node_callback),
+        edge: Some(edge_callback),
+        done: Some(done_callback),
+    };
+    let ffi_options = AkaEngineIndexOptions {
+        repo_path: repo_c.as_ptr(),
+        cache_dir: cache_c.as_ptr(),
+        mode,
+        direct_facts_only: true,
+    };
+
+    let rc = unsafe { aka_engine_index_with_sink(&ffi_options, &ffi_sink) };
+    if let Some(error) = bridge.error {
+        return Err(error);
+    }
+    if rc != 0 {
+        return Err(EngineError::Failed {
+            code: Some(rc),
+            stderr_tail: "embedded engine returned nonzero status".into(),
+        });
+    }
+    Ok(batch.finish())
 }
 
 struct SinkBridge<'a> {
@@ -461,32 +494,24 @@ mod tests {
     #[test]
     #[ignore = "links and runs the native embedded engine; use for local smoke"]
     fn embedded_engine_indexes_tiny_repo_without_sqlite_dump() {
-        std::thread::Builder::new()
-            .name("embedded-engine-smoke".into())
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let root = std::env::temp_dir().join(format!(
-                    "aka-core-embedded-engine-smoke-{}",
-                    std::process::id()
-                ));
-                let repo = root.join("repo");
-                let cache = root.join("cache");
-                let _ = std::fs::remove_dir_all(&root);
-                std::fs::create_dir_all(repo.join("src")).unwrap();
-                std::fs::create_dir_all(&cache).unwrap();
-                std::fs::write(repo.join("src/lib.rs"), "pub fn main() {}\n").unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "aka-core-embedded-engine-smoke-{}",
+            std::process::id()
+        ));
+        let repo = root.join("repo");
+        let cache = root.join("cache");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn main() {}\n").unwrap();
 
-                let mut sink = FactBatchBuilder::new();
-                run_embedded_engine_smoke(&repo, &cache, &mut sink, &mut |_| {}).unwrap();
-                let batch = sink.finish();
+        let mut sink = FactBatchBuilder::new();
+        run_embedded_engine_smoke(&repo, &cache, &mut sink, &mut |_| {}).unwrap();
+        let batch = sink.finish();
 
-                assert!(batch.stats.nodes > 0);
-                assert!(batch.nodes.iter().any(|node| node.label == "File"));
-                assert!(!contains_sqlite_db(&cache));
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        assert!(batch.stats.nodes > 0);
+        assert!(batch.nodes.iter().any(|node| node.label == "File"));
+        assert!(!contains_sqlite_db(&cache));
     }
 
     fn contains_sqlite_db(path: &Path) -> bool {

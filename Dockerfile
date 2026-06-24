@@ -2,17 +2,30 @@
 # aka — 感知所有代码的知识引擎。
 #
 # 多阶段：
-#   rust-builder   — cargo release 构建 aka 二进制（native arch）
-#   rust-cross     — （可选，--target rust-cross 单独构建）交叉编译 x86_64 linux 二进制
-#   engine-builder — 构建 AKA engine 原生二进制
-#   runtime        — git + aka + native engine；非 root，数据卷 /data
+#   engine-builder — 构建 AKA engine 原生二进制 + embedded 静态库
+#   rust-builder   — cargo release 构建内置 embedded-engine 的内部 runtime
+#   rust-cross     — （可选，--target rust-cross 单独构建）交叉编译 x86_64 linux runtime（binary fallback）
+#   runtime        — git + aka + native engine fallback；非 root，数据卷 /data
 #
 # 构建 / 运行：
 #   docker build -t aka:0.1.0 .
 #   docker run -d -p 127.0.0.1:4111:4111 -v aka-data:/data aka:0.1.0
 # 详见 docs/deploy.md。
 
-# ---------- Stage 1: Rust builder ----------
+# ---------- Stage 1: native AKA engine ----------
+FROM debian:bookworm AS engine-builder
+ARG AKA_ENGINE_REPO=https://github.com/caork/aka-engine.git
+ARG AKA_ENGINE_REF=f77d34f853ca1252cde573ff4e49443f95d7efed
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates git build-essential pkg-config zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git clone "${AKA_ENGINE_REPO}" aka-engine && \
+    cd aka-engine && \
+    git checkout "${AKA_ENGINE_REF}" && \
+    make -f Makefile.cbm cbm libaka-engine
+
+# ---------- Stage 2: Rust builder ----------
 FROM rust:1.93-bookworm AS rust-builder
 ENV CARGO_NET_RETRY=10 \
     CARGO_TERM_COLOR=never \
@@ -21,10 +34,11 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY apps/cli ./apps/cli
-RUN cargo build --release -p aka-cli && \
+COPY --from=engine-builder /src/aka-engine engine/aka-engine-src
+RUN cargo build --release -p aka-cli --features embedded-engine && \
     strip target/release/aka
 
-# ---------- Stage 1b: x86_64 交叉编译（不在默认链路上；docker build --target rust-cross 时才执行） ----------
+# ---------- Stage 2b: x86_64 交叉编译（不在默认链路上；docker build --target rust-cross 时才执行） ----------
 FROM rust-builder AS rust-cross
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu g++-x86-64-linux-gnu && \
@@ -36,19 +50,6 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
     AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
 RUN cargo build --release -p aka-cli --target x86_64-unknown-linux-gnu && \
     x86_64-linux-gnu-strip target/x86_64-unknown-linux-gnu/release/aka
-
-# ---------- Stage 2: native AKA engine ----------
-FROM debian:bookworm AS engine-builder
-ARG AKA_ENGINE_REPO=https://github.com/caork/aka-engine.git
-ARG AKA_ENGINE_REF=f77d34f853ca1252cde573ff4e49443f95d7efed
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates git build-essential pkg-config zlib1g-dev && \
-    rm -rf /var/lib/apt/lists/*
-WORKDIR /src
-RUN git clone "${AKA_ENGINE_REPO}" aka-engine && \
-    cd aka-engine && \
-    git checkout "${AKA_ENGINE_REF}" && \
-    make -f Makefile.cbm cbm
 
 # ---------- Stage 3: runtime ----------
 FROM debian:bookworm-slim AS runtime

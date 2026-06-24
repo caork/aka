@@ -10,6 +10,10 @@ publish = false
 name = "aka_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+embedded-engine = ["aka-cli/embedded-engine"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

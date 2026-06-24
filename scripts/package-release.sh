@@ -131,6 +131,16 @@ first_existing_file() {
   return 1
 }
 
+first_existing_dir() {
+  local candidate
+  for candidate in "$@"; do
+    [[ -n "${candidate}" && -d "${candidate}" ]] || continue
+    printf '%s\n' "${candidate}"
+    return 0
+  done
+  return 1
+}
+
 create_zip_archive() {
   local archive exclude_patterns=()
   archive="$1"
@@ -221,6 +231,13 @@ find_engine_binary() {
     "$(command -v "${exe}" 2>/dev/null || true)"
 }
 
+find_engine_source_dir() {
+  first_existing_dir \
+    "${AKA_ENGINE_SRC:-}" \
+    "${REPO_ROOT}/engine/aka-engine-src" \
+    "/tmp/aka-engine-src"
+}
+
 copy_engine_resource() {
   local platform exe bin dst host_platform
   platform="$1"
@@ -250,6 +267,25 @@ copy_engine_resource() {
   fi
   echo "==> 内置 AKA engine: ${bin} -> ${dst}/${exe}"
   assert_engine_resource_dir "${platform}" "${dst}"
+}
+
+prepare_embedded_engine_lib() {
+  local src lib
+  src="$(find_engine_source_dir || true)"
+  if [[ -z "${src}" ]]; then
+    echo "==> 本地未找到 AKA engine 源码，运行 scripts/sync-engine.sh 构建 embedded lib"
+    "${REPO_ROOT}/scripts/sync-engine.sh"
+    src="$(find_engine_source_dir || true)"
+  fi
+  [[ -n "${src}" ]] || { echo "error: 找不到 AKA engine 源码目录，无法构建 embedded lib" >&2; return 1; }
+  lib="${src}/build/c/libaka_engine.a"
+  if [[ ! -f "${lib}" ]]; then
+    echo "==> 构建 AKA engine embedded lib: ${lib}"
+    make -C "${src}" -f Makefile.cbm libaka-engine
+  fi
+  [[ -f "${lib}" ]] || { echo "error: AKA engine embedded lib 缺失: ${lib}" >&2; return 1; }
+  echo "==> 校验 AKA engine embedded lib: ${lib}"
+  export AKA_ENGINE_LIB_DIR="${src}/build/c"
 }
 
 assert_engine_file_nonempty() {
@@ -366,6 +402,9 @@ prepare_desktop_resources() {
   platform="$(platform_from_triple "${triple}")"
   echo "==> 准备桌面内置资源 (${platform})"
   copy_engine_resource "${platform}"
+  if [[ "${platform}" != "win-x64" ]]; then
+    prepare_embedded_engine_lib
+  fi
 }
 
 macos_notarization_credentials_present() {
@@ -635,7 +674,7 @@ package_desktop() {
         tauri_macos_bundle_dir="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/macos"
         clear_tauri_updater_archives "${tauri_macos_bundle_dir}"
         if [[ "${signed_release}" -eq 1 ]]; then
-          local tauri_args=(build --bundles app,dmg --ci)
+          local tauri_args=(build --bundles app,dmg --features embedded-engine --ci)
           local updater_config_args
           local native_updater_env=()
           updater_config_args="$(tauri_updater_config_args)" || return 1
@@ -652,7 +691,7 @@ package_desktop() {
             (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
           fi
         else
-          local tauri_args=(build --bundles app --ci --no-sign)
+          local tauri_args=(build --bundles app --features embedded-engine --ci --no-sign)
           local updater_config_args
           local native_updater_env=()
           updater_config_args="$(tauri_updater_config_args)" || return 1

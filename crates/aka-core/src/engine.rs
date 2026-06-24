@@ -628,12 +628,26 @@ enum EmbeddedEngineRequest {
 
 fn embedded_engine_request() -> EmbeddedEngineRequest {
     match std::env::var("AKA_ENGINE_EMBEDDED") {
+        Ok(value) if matches!(value.as_str(), "0" | "off" | "false" | "no") => {
+            EmbeddedEngineRequest::Disabled
+        }
         Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => {
             EmbeddedEngineRequest::Enabled
         }
         Ok(value) if value.eq_ignore_ascii_case("require") => EmbeddedEngineRequest::Required,
-        _ => EmbeddedEngineRequest::Disabled,
+        Ok(_) => EmbeddedEngineRequest::Disabled,
+        Err(_) => default_embedded_engine_request(),
     }
+}
+
+#[cfg(all(feature = "embedded-engine", not(windows)))]
+fn default_embedded_engine_request() -> EmbeddedEngineRequest {
+    EmbeddedEngineRequest::Enabled
+}
+
+#[cfg(any(not(feature = "embedded-engine"), windows))]
+fn default_embedded_engine_request() -> EmbeddedEngineRequest {
+    EmbeddedEngineRequest::Disabled
 }
 
 fn engine_cache_root(

@@ -92,7 +92,7 @@ fn insert_node_props_at(
 #[test]
 fn embedded_engine_request_env_is_explicit_opt_in() {
     std::env::remove_var("AKA_ENGINE_EMBEDDED");
-    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Disabled);
+    assert_eq!(embedded_engine_request(), default_embedded_engine_request());
 
     std::env::set_var("AKA_ENGINE_EMBEDDED", "1");
     assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Enabled);
@@ -104,6 +104,8 @@ fn embedded_engine_request_env_is_explicit_opt_in() {
     assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Required);
 
     std::env::set_var("AKA_ENGINE_EMBEDDED", "0");
+    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Disabled);
+    std::env::set_var("AKA_ENGINE_EMBEDDED", "off");
     assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Disabled);
     std::env::remove_var("AKA_ENGINE_EMBEDDED");
 }

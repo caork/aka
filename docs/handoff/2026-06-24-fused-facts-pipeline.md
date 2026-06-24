@@ -8,14 +8,17 @@ Goal: remove the `artifact/` / sidecar / engine SQLite path from the hot indexin
 
 ## Current State
 
-The work is partially complete and intentionally not marked done. The native engine now has a real embedded facts API and can emit facts through callbacks without writing its SQLite DB, but Rust has not yet switched runtime indexing to the embedded path.
+The fused facts runtime path is now implemented and verified for macOS/Linux product builds. The native AKA engine emits facts through callbacks, Rust can link the embedded engine static library, and the internal runtime used by the desktop shell/plugin host can index through `aka_engine_index_with_sink` without writing engine SQLite or NDJSON artifacts.
 
-Main repo latest relevant commits:
+Windows intentionally remains on the bundled `aka-engine.exe` fallback path until an MSVC-compatible embedded static library is solved. Legacy sidecar/binary fallback also remains available on all platforms via `AKA_ENGINE_EMBEDDED=0|off|false|no` and for non-embedded builds.
 
+Latest relevant main repo commits:
+
+- `486cff8 feat: add embedded engine fact producer`
+- `fe35a62 docs: hand off fused facts pipeline work`
 - `26e3b67 infra: pin embedded facts engine`
 - `9019e84 feat: add semantic fact producer seam`
 - `b326c41 infra: pin fact sink engine`
-- Previous groundwork on this branch: `514ef95`, `e473de7`, `e162e9f`, `84dad4d`, `a44fce3`, `fe40ec2`, `ce1f8b4`, `4967063`, `b4f86f2`, `3b33227`
 
 Nested engine repo `engine/aka-engine-src` latest relevant commits:
 
@@ -27,14 +30,15 @@ Pinned engine ref:
 
 - `engine/ENGINE_SHA`: `f77d34f853ca1252cde573ff4e49443f95d7efed`
 - `Dockerfile` and `.github/workflows/release.yml` are pinned to the same SHA.
+- The nested engine commits have been pushed to `caork/aka-engine main`.
 
 ## What Is Done
 
 ### Engine callback sink
 
-Engine C now has `cbm_fact_sink_t` in `src/pipeline/pipeline.h`.
+Engine C has `cbm_fact_sink_t` in `src/pipeline/pipeline.h`.
 
-The pipeline emits facts after predump passes and before SQLite persistence. JSONL sidecar output is now implemented as a built-in sink, so sidecar is a transport/debug sink rather than the fact-emission architecture.
+The pipeline emits facts after predump passes and before SQLite persistence. JSONL sidecar output is implemented as a built-in sink, so sidecar is a transport/debug sink rather than the fact-emission architecture.
 
 Important files:
 
@@ -43,7 +47,7 @@ Important files:
 
 ### Engine embedded API
 
-Engine now has a public embedded API in:
+Engine has a public embedded API in:
 
 - `engine/aka-engine-src/src/api/aka_engine.h`
 - `engine/aka-engine-src/src/api/aka_engine.c`
@@ -54,22 +58,55 @@ The public API exposes:
 - `aka_engine_fact_sink_t`
 - `aka_engine_index_with_sink(...)`
 
-`direct_facts_only = true` sets `cbm_pipeline_set_skip_dump`, which skips engine SQLite discovery/reuse and final SQLite dump/persistence. This is the key proof that the native engine can emit facts without the artifact/SQLite hot path.
+`direct_facts_only = true` sets `cbm_pipeline_set_skip_dump`, which skips engine SQLite discovery/reuse and final SQLite dump/persistence.
 
-`Makefile.cbm` now has:
+`Makefile.cbm` has:
 
 - `make -f Makefile.cbm cbm`
 - `make -f Makefile.cbm libaka-engine`
 
-The static library target builds `build/c/libaka_engine.a`. It intentionally uses a non-override mimalloc object (`MI_OVERRIDE=0`) so linking it into Rust/Tauri is less risky than linking the production binary allocator override.
+The static library target builds `build/c/libaka_engine.a` with non-override mimalloc (`MI_OVERRIDE=0`) so linking it into Rust/Tauri is less risky than linking the production binary allocator override.
+
+### Rust embedded producer
+
+`aka-core` now has:
+
+- `embedded-engine` feature in `crates/aka-core/Cargo.toml`
+- native link build script in `crates/aka-core/build.rs`
+- handwritten FFI wrapper in `crates/aka-core/src/engine/embedded.rs`
+- refactored `EngineFactProducer::produce(...)` seam in `crates/aka-core/src/engine/fact_producer.rs`
+
+The wrapper:
+
+- defines `#[repr(C)]` ABI structs matching `aka_engine.h`
+- copies all borrowed C strings before returning from callbacks
+- parses `properties_json` and `evidence_json` with `serde_json`
+- stores callback errors and returns nonzero to native code
+- catches callback panics so Rust never unwinds across C
+- runs the native C pipeline on a 64 MB Rust thread stack to avoid default test/runtime stack overflow
+- normalizes facts and synthesizes chunks through the existing helper before replaying into the caller sink
+
+Runtime selection:
+
+- macOS/Linux builds compiled with `embedded-engine` default to embedded facts when `AKA_ENGINE_EMBEDDED` is unset.
+- `AKA_ENGINE_EMBEDDED=0|off|false|no` forces binary/sidecar fallback.
+- `AKA_ENGINE_EMBEDDED=1|true` opts in explicitly.
+- `AKA_ENGINE_EMBEDDED=require` fails if embedded is unavailable.
+- Windows defaults to bundled binary fallback and does not compile the embedded module.
+
+### Product build wiring
+
+- `apps/cli` exposes `embedded-engine = ["aka-core/embedded-engine"]`.
+- `apps/desktop/src-tauri` exposes `embedded-engine = ["aka-cli/embedded-engine"]`.
+- macOS desktop packaging passes `--features embedded-engine`.
+- `scripts/package-release.sh` now ensures `libaka_engine.a` exists and exports `AKA_ENGINE_LIB_DIR` before macOS Tauri builds.
+- Windows desktop packaging does not pass `embedded-engine` and keeps the single-file `AKA.exe` + embedded `aka-engine.exe` resource behavior.
+- Docker builds the engine binary and static library before the Rust runtime, then builds the Linux runtime with `--features embedded-engine`; `/opt/aka/engine/aka-engine` remains in the image as explicit fallback.
+- CI keeps the default no-feature workspace test/clippy gates and adds an embedded Linux gate that clones the pinned engine ref, builds `libaka_engine.a`, then runs `cargo test -p aka-core --features embedded-engine` and `cargo test -p aka-cli --features embedded-engine`.
 
 ### Semantic producer seam
 
-`aka-facts` now has a public semantic producer seam:
-
-- `crates/aka-facts/src/producer.rs`
-
-It defines:
+`aka-facts` has a public semantic producer seam:
 
 - `ProducerContext`
 - `ProducerCapability`
@@ -82,153 +119,78 @@ It defines:
 
 `crates/aka-core/src/lib.rs` re-exports the semantic records and producer traits so future SCIP / stack-graphs / LSP adapters can write facts without depending on private engine internals.
 
-This does not change graph/search writer behavior. The writer still consumes `FactSource`.
+Graph/search writers consume `FactSource`; they no longer require artifact files. They are still replay-based rather than a one-pass streaming writer because the current writer reads nodes more than once.
 
-## Verification Already Run
+## Verification Run
 
-Engine build:
+Engine and facts:
 
 ```bash
 make -C engine/aka-engine-src -f Makefile.cbm cbm
 make -C engine/aka-engine-src -f Makefile.cbm libaka-engine
+cargo test -p aka-facts
 ```
 
-Engine JSONL sidecar smoke:
-
-- Built tiny `/tmp` Rust repo.
-- Ran `aka-engine cli --json index_repository` with `facts_output_path`.
-- Parsed `facts.jsonl`.
-- Verified `manifest`, node records, edge records, and `done`.
-
-Embedded C API smoke:
-
-- Compiled a temporary C program linking `engine/aka-engine-src/build/c/libaka_engine.a`.
-- Called `aka_engine_index_with_sink` with `direct_facts_only = true`.
-- Verified callback counts: one manifest, nodes > 0, edges > 0, one done.
-- Verified no `*.db` file was produced in the engine cache directory.
-
-Rust facts tests:
+Rust default and embedded gates:
 
 ```bash
-cargo test -p aka-facts
 cargo fmt --check
+cargo test -p aka-core
+cargo test -p aka-core --features embedded-engine
+cargo test -p aka-cli --features embedded-engine
+cargo clippy -p aka-core --features embedded-engine --all-targets -- -D warnings
+cargo clippy -p aka-cli --features embedded-engine --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-## What Is Not Done Yet
+Embedded native smoke:
 
-Rust runtime still defaults to `SidecarEngineFactProducer`.
-
-Current hot path in Rust:
-
-- `EngineRunner::analyze_facts`
-- `crates/aka-core/src/engine/fact_producer.rs`
-- sidecar JSONL direct facts, then DB fallback if sidecar missing
-
-The branch is therefore not complete against the original goal. The engine can now do direct embedded facts, but Rust has not yet linked or selected that path.
-
-## Recommended Next Steps
-
-### 1. Add Rust embedded-engine feature and link step
-
-Add to `crates/aka-core/Cargo.toml`:
-
-- feature `embedded-engine`
-- probably no default enablement at first
-
-Add `crates/aka-core/build.rs`:
-
-- Only run when `embedded-engine` is enabled.
-- Link `engine/aka-engine-src/build/c/libaka_engine.a` or copied `engine/lib/...` output.
-- Add native search paths and link libs: `stdc++`, `pthread`, `z`, `m` as needed on Unix.
-- Keep Windows on binary fallback for now unless MSVC-compatible engine library is solved.
-
-Do not use bindgen initially. The C ABI is small and stable enough for handwritten `extern "C"` bindings.
-
-### 2. Add Rust FFI wrapper
-
-Suggested file:
-
-- `crates/aka-core/src/engine/embedded.rs`
-
-Implement handwritten `#[repr(C)]` equivalents of:
-
-- `aka_engine_mode_t`
-- `aka_engine_index_options_t`
-- `aka_engine_fact_sink_t`
-- `aka_engine_index_with_sink`
-
-Callback rules:
-
-- Never unwind across C. Use `catch_unwind` or store errors in userdata and return nonzero.
-- Build node IDs as `cbm:{cbm_id}:{qualified_name}`.
-- Build edge IDs as `cbm-edge:{edge_id}`.
-- Parse `properties_json` / `evidence_json` with `serde_json`.
-- Write into `dyn FactSink<Error = FactSourceError>`.
-- Reuse existing normalization/chunk synthesis helpers where possible.
-
-### 3. Reshape engine producer interface
-
-Current `EngineFactProducer` is still `prepare -> run_engine_index -> finish`, which fits sidecar but not embedded.
-
-Recommended shape:
-
-```rust
-trait EngineFactProducer {
-    fn produce(
-        &self,
-        runner: &EngineRunner,
-        repo: &Path,
-        options: AnalyzeFactsOptions<'_>,
-        sink: &mut dyn FactSink<Error = FactSourceError>,
-        on_event: &mut dyn FnMut(&EngineEvent),
-    ) -> Result<ProducedEngineFacts, EngineError>;
-}
+```bash
+cargo test -p aka-core --features embedded-engine \
+  embedded_engine_indexes_tiny_repo_without_sqlite_dump -- --ignored
 ```
 
-Then:
+This verified native embedded indexing on a tiny repo and no engine `*.db` dump in the cache tree.
 
-- `SidecarEngineFactProducer::produce` keeps current behavior.
-- `EmbeddedEngineFactProducer::produce` calls `aka_engine_index_with_sink`.
-- `EngineRunner::analyze_facts` chooses embedded only when explicitly enabled.
+Internal runtime end-to-end smoke:
 
-Suggested selection:
+```bash
+TMP_AKA_HOME=$(mktemp -d /tmp/aka-fused-smoke.XXXXXX)
+AKA_HOME="$TMP_AKA_HOME" cargo run -p aka-cli --features embedded-engine -- analyze fixtures/demo-ts
+AKA_HOME="$TMP_AKA_HOME" cargo run -p aka-cli --features embedded-engine -- repos
+AKA_HOME="$TMP_AKA_HOME" cargo run -p aka-cli --features embedded-engine -- search user --repo demo-ts --limit 5
+```
 
-- `embedded-engine` cargo feature required.
-- `AKA_ENGINE_EMBEDDED=1` opts in.
-- `AKA_ENGINE_EMBEDDED=require` fails instead of falling back.
-- Otherwise sidecar/binary path remains default during stabilization.
+Observed evidence:
 
-### 4. Add embedded-vs-sidecar tests
+- analyze log included `embedded repo_path=...`, `aka-engine:index:embedded`, and native `pipeline.route path=direct_facts`
+- graph/search indexes were built under the temp `AKA_HOME`
+- `aka repos` listed `demo-ts`
+- `aka search user --repo demo-ts --limit 5` returned real hits
 
-Good first tests:
+Desktop web build:
 
-- Tiny repo fixture.
-- Run embedded producer into `FactBatchBuilder`.
-- Run sidecar producer.
-- Compare stats and key node/edge IDs.
-- Assert embedded direct mode does not create engine `*.db`.
+```bash
+npm --prefix apps/desktop run build
+```
 
-Keep this focused in `aka-core`; do not change graph/search writer.
+Docker:
 
-### 5. SCIP / stack-graphs / LSP adapters
+```bash
+docker build -t aka:embedded-smoke .
+```
 
-Use `crates/aka-facts/src/producer.rs` as the common seam.
+This could not be run locally because the Docker daemon was not running (`Cannot connect to the Docker daemon at unix:///var/run/docker.sock`). The Dockerfile has been statically inspected and CI/release will exercise it when Docker is available.
 
-Recommended modules:
+## Remaining Follow-Ups
 
-- `crates/aka-core/src/semantic/scip.rs`
-- `crates/aka-core/src/semantic/stack_graphs.rs`
-- `crates/aka-core/src/semantic/lsp.rs`
+These are not blockers for the fused hot path but remain useful next work:
 
-Start with fixture/no-op adapters if dependency scope is too large. The important invariant is: adapters produce semantic facts, then lower to existing `FactSource`. Do not teach the graph/search writer about individual ecosystems.
-
-## Risks And Notes
-
-- Do not claim full fusion until Rust actually uses the embedded path in process.
-- Do not remove sidecar/binary fallback yet. It is still the default and still useful for Windows/release stabilization.
-- The embedded C API currently uses an environment variable to pass `AKA_ENGINE_CACHE_DIR`; this is acceptable for a first API but not ideal for concurrent multi-engine calls. A future engine API can take cache dir directly through pipeline state.
-- The engine has a global pipeline lock. Parallel per-file Rust scheduling is still future work; current engine pipeline has internal parallel extraction but Rust does not yet own task scheduling.
-- The product framing remains desktop app + plugin packages. If mentioning `aka-cli`/`apps/cli`, call it the internal runtime/host crate only.
+- Implement an MSVC-compatible Windows embedded static library if we want Windows to use in-process engine callbacks instead of the current bundled binary fallback.
+- Replace replayable `FactBatch` with a true one-pass graph/search writer after the writer no longer needs to reread nodes.
+- Add real SCIP / stack-graphs / LSP adapters on top of `aka-facts::SemanticFactProducer`; the seam and fake producer tests already exist.
+- Improve the C embedded API to take cache dir through pipeline state instead of process-global `AKA_ENGINE_CACHE_DIR`.
+- Run Docker image smoke on a machine with Docker daemon available.
 
 ## Useful Commands
 
@@ -236,15 +198,13 @@ Start with fixture/no-op adapters if dependency scope is too large. The importan
 git status --short --branch
 git -C engine/aka-engine-src status --short --branch
 
-make -C engine/aka-engine-src -f Makefile.cbm cbm
 make -C engine/aka-engine-src -f Makefile.cbm libaka-engine
 
 cargo fmt --check
 cargo test -p aka-facts
 cargo test -p aka-core
-cargo test --workspace
+cargo test -p aka-core --features embedded-engine
+cargo test -p aka-cli --features embedded-engine
 cargo clippy --workspace --all-targets -- -D warnings
 npm --prefix apps/desktop run build
 ```
-
-If `cargo test --workspace` hits sandbox socket permission errors in `aka-mcp --test http`, rerun with elevated permissions; this happened earlier and passed when rerun outside the sandbox.
