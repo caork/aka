@@ -691,7 +691,7 @@ impl FactBatchBuilder {
 }
 
 impl FactSink for FactBatchBuilder {
-    type Error = std::convert::Infallible;
+    type Error = FactSourceError;
 
     fn push_record(&mut self, record: FactRecord) -> Result<(), Self::Error> {
         FactBatchBuilder::push_record(self, record);
@@ -712,6 +712,19 @@ impl FactBatch {
             edges,
             chunks,
         }
+    }
+
+    pub fn replay_into<S: FactSink + ?Sized>(&self, sink: &mut S) -> Result<(), S::Error> {
+        for node in &self.nodes {
+            sink.push_node(node.clone())?;
+        }
+        for edge in &self.edges {
+            sink.push_edge(edge.clone())?;
+        }
+        for chunk in &self.chunks {
+            sink.push_chunk(chunk.clone())?;
+        }
+        sink.push_done(self.stats.clone())
     }
 }
 
@@ -907,10 +920,54 @@ mod tests {
     }
 
     #[test]
+    fn fact_batch_replays_into_streaming_sink() {
+        let batch = FactBatch::new(
+            FactStats {
+                files: 1,
+                nodes: 1,
+                edges: 1,
+                chunks: 1,
+            },
+            vec![NodeFact {
+                id: "file:src/lib.rs".into(),
+                label: "File".into(),
+                properties: serde_json::Map::new(),
+            }],
+            vec![EdgeFact {
+                id: "edge:1".into(),
+                source_id: "file:src/lib.rs".into(),
+                target_id: "file:src/lib.rs".into(),
+                edge_type: "SELF".into(),
+                confidence: 1.0,
+                reason: "test".into(),
+                step: None,
+                evidence: None,
+            }],
+            vec![ChunkFact {
+                node_id: "file:src/lib.rs".into(),
+                kind: "char".into(),
+                file_path: "src/lib.rs".into(),
+                start_line: 0,
+                end_line: 0,
+                text: "fn main() {}".into(),
+            }],
+        );
+        let mut builder = FactBatchBuilder::new();
+
+        batch.replay_into(&mut builder).unwrap();
+        let replayed = builder.finish();
+
+        assert_eq!(replayed.stats, batch.stats);
+        assert_eq!(replayed.nodes.len(), 1);
+        assert_eq!(replayed.edges.len(), 1);
+        assert_eq!(replayed.chunks.len(), 1);
+    }
+
+    #[test]
     fn fact_batch_builder_accepts_streaming_sink_events() {
         let mut builder = FactBatchBuilder::new();
         {
-            let sink: &mut dyn FactSink<Error = std::convert::Infallible> = &mut builder;
+            let sink: &mut dyn FactSink<Error = FactSourceError> = &mut builder;
             sink.push_node(NodeFact {
                 id: "file:src/lib.rs".into(),
                 label: "File".into(),

@@ -25,7 +25,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, Row};
 use serde_json::{json, Map, Value};
 
-use aka_facts::FactBatch;
+use aka_facts::{FactBatch, FactBatchBuilder};
 
 use crate::artifact::ArtifactDir;
 use crate::types::{
@@ -554,10 +554,16 @@ impl EngineRunner {
             request.facts_output_path.as_deref(),
             &mut on_event,
         )?;
-        let produced =
-            producer.finish(&cache_root, &engine_repo, options.no_chunks, &mut on_event)?;
+        let mut sink = FactBatchBuilder::new();
+        let produced = producer.finish(
+            &cache_root,
+            &engine_repo,
+            options.no_chunks,
+            &mut sink,
+            &mut on_event,
+        )?;
         let batch = match produced {
-            ProducedEngineFacts::DirectBatch(batch) => batch,
+            ProducedEngineFacts::DirectFacts => sink.finish(),
             ProducedEngineFacts::EngineDbFallback { project, db_path } => collect_engine_facts(
                 &engine_repo,
                 &db_path,

@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use aka_facts::{read_complete_fact_records_ndjson, FactBatch};
+use aka_facts::{read_complete_fact_records_ndjson, FactBatch, FactSink, FactSourceError};
 use serde_json::Value;
 
 use crate::types::{ChunkRec, EdgeRec, EngineEvent, NodeRec};
@@ -22,7 +22,7 @@ pub(super) struct EngineFactRequest {
 }
 
 pub(super) enum ProducedEngineFacts {
-    DirectBatch(FactBatch),
+    DirectFacts,
     EngineDbFallback { project: String, db_path: PathBuf },
 }
 
@@ -34,6 +34,7 @@ pub(super) trait EngineFactProducer {
         cache_root: &Path,
         engine_repo: &Path,
         no_chunks: bool,
+        sink: &mut dyn FactSink<Error = FactSourceError>,
         on_event: &mut dyn FnMut(&EngineEvent),
     ) -> Result<ProducedEngineFacts, EngineError>;
 }
@@ -63,6 +64,7 @@ impl EngineFactProducer for SidecarEngineFactProducer {
         cache_root: &Path,
         engine_repo: &Path,
         no_chunks: bool,
+        sink: &mut dyn FactSink<Error = FactSourceError>,
         on_event: &mut dyn FnMut(&EngineEvent),
     ) -> Result<ProducedEngineFacts, EngineError> {
         let sidecar_path = Self::sidecar_path(cache_root);
@@ -73,7 +75,8 @@ impl EngineFactProducer for SidecarEngineFactProducer {
             });
             emit_phase(on_event, "aka-engine:facts:read-sidecar", 0, 0);
             let batch = read_engine_facts_sidecar(&sidecar_path, engine_repo, no_chunks, on_event)?;
-            return Ok(ProducedEngineFacts::DirectBatch(batch));
+            batch.replay_into(sink)?;
+            return Ok(ProducedEngineFacts::DirectFacts);
         }
 
         let (project, db_path) = find_single_project_db(cache_root, engine_repo)?;
@@ -327,18 +330,20 @@ mod tests {
         )
         .unwrap();
         let mut events = Vec::new();
+        let mut sink = aka_facts::FactBatchBuilder::new();
 
         let produced = SidecarEngineFactProducer
-            .finish(&cache, &repo, false, &mut |event| match event {
+            .finish(&cache, &repo, false, &mut sink, &mut |event| match event {
                 EngineEvent::Phase { phase, .. } => events.push(phase.clone()),
                 EngineEvent::Log { line, .. } => events.push(line.clone()),
                 _ => {}
             })
             .unwrap();
 
-        let ProducedEngineFacts::DirectBatch(batch) = produced else {
-            panic!("sidecar producer should return a direct batch");
+        let ProducedEngineFacts::DirectFacts = produced else {
+            panic!("sidecar producer should write direct facts");
         };
+        let batch = sink.finish();
         assert_eq!(batch.stats.files, 1);
         assert_eq!(batch.stats.nodes, 2);
         assert_eq!(batch.stats.chunks, 1);
