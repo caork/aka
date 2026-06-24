@@ -39,6 +39,7 @@ dependencies = [
 name = "aka-core"
 version = "0.1.23"
 dependencies = [
+ "aka-facts",
  "chrono",
  "rusqlite",
  "serde",
@@ -62,6 +63,15 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tokio",
+]
+
+[[package]]
+name = "aka-facts"
+version = "0.1.23"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
