@@ -25,7 +25,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, Row};
 use serde_json::{json, Map, Value};
 
-use aka_facts::FactBatch;
+use aka_facts::{read_complete_fact_records_ndjson, FactBatch};
 
 use crate::artifact::ArtifactDir;
 use crate::types::{
@@ -155,6 +155,8 @@ pub enum EngineError {
     Sqlite(#[from] rusqlite::Error),
     #[error("engine json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("engine facts error: {0}")]
+    Facts(#[from] aka_facts::FactSourceError),
     #[error("engine produced no project row in {0}")]
     MissingProject(PathBuf),
 }
@@ -163,6 +165,13 @@ pub enum EngineError {
 pub struct EngineRunner {
     engine_dir: PathBuf,
     engine_bin: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyzeFactsOptions<'a> {
+    pub cache_dir: Option<&'a Path>,
+    pub debug_artifact_dir: Option<&'a Path>,
+    pub no_chunks: bool,
 }
 
 /// Replayable facts emitted by the engine.
@@ -184,7 +193,7 @@ impl EngineFacts {
 
     pub fn transport_name(&self) -> &'static str {
         match self {
-            Self::DirectBatch(_) => "engine-sqlite-direct",
+            Self::DirectBatch(_) => "engine-direct-facts",
             Self::LegacyArtifact(_) => "legacy-artifact",
         }
     }
@@ -316,7 +325,7 @@ impl EngineRunner {
     ) -> Result<ArtifactStats, EngineError> {
         std::fs::create_dir_all(out_dir)?;
         let (cache_root, engine_repo) =
-            self.run_engine_index(repo, Some(out_dir), cache_dir, &mut on_event)?;
+            self.run_engine_index(repo, Some(out_dir), cache_dir, None, &mut on_event)?;
 
         emit_phase(&mut on_event, "aka-engine:export-artifacts", 0, 0);
         let (project, db_path) = find_single_project_db(&cache_root, &engine_repo)?;
@@ -347,13 +356,10 @@ impl EngineRunner {
         repo: &Path,
         fallback_out_dir: Option<&Path>,
         cache_dir: Option<&Path>,
+        facts_output_path: Option<&Path>,
         on_event: &mut impl FnMut(&EngineEvent),
     ) -> Result<(PathBuf, PathBuf), EngineError> {
-        let cache_root = cache_dir.map(|p| p.join("aka-engine")).unwrap_or_else(|| {
-            fallback_out_dir
-                .map(|p| p.join(".aka-engine-cache"))
-                .unwrap_or_else(|| repo.join(".aka-engine-cache"))
-        });
+        let cache_root = engine_cache_root(repo, fallback_out_dir, cache_dir);
         std::fs::create_dir_all(&cache_root)?;
 
         emit_phase(on_event, "aka-engine:index", 0, 0);
@@ -363,12 +369,15 @@ impl EngineRunner {
             .canonicalize()
             .map(|path| user_facing_path(&path))
             .unwrap_or(engine_repo);
-        let args = json!({
+        let mut args = json!({
             "repo_path": engine_repo.display().to_string(),
             "mode": mode,
             "persistence": false,
-        })
-        .to_string();
+        });
+        if let Some(path) = facts_output_path {
+            args["facts_output_path"] = Value::String(path.display().to_string());
+        }
+        let args = args.to_string();
 
         let mut cmd = Command::new(&self.engine_bin);
         cmd.arg("cli")
@@ -529,14 +538,38 @@ impl EngineRunner {
     pub fn analyze_facts(
         &self,
         repo: &Path,
-        legacy_out_dir: &Path,
-        cache_dir: Option<&Path>,
-        no_chunks: bool,
+        options: AnalyzeFactsOptions<'_>,
         mut on_event: impl FnMut(&EngineEvent),
     ) -> Result<EngineFacts, EngineError> {
-        std::fs::create_dir_all(legacy_out_dir)?;
-        let (cache_root, engine_repo) =
-            self.run_engine_index(repo, Some(legacy_out_dir), cache_dir, &mut on_event)?;
+        let cache_root = engine_cache_root(repo, options.debug_artifact_dir, options.cache_dir);
+        std::fs::create_dir_all(&cache_root)?;
+        let sidecar_path = cache_root.join("facts.jsonl");
+        let _ = std::fs::remove_file(&sidecar_path);
+        let (cache_root, engine_repo) = self.run_engine_index(
+            repo,
+            options.debug_artifact_dir,
+            options.cache_dir,
+            Some(&sidecar_path),
+            &mut on_event,
+        )?;
+        if sidecar_path.is_file() {
+            on_event(&EngineEvent::Log {
+                stream: "facts".into(),
+                line: format!("using engine direct facts {}", sidecar_path.display()),
+            });
+            emit_phase(&mut on_event, "aka-engine:facts:read-sidecar", 0, 0);
+            let batch = read_engine_facts_sidecar(
+                &sidecar_path,
+                &engine_repo,
+                options.no_chunks,
+                &mut on_event,
+            )?;
+            let done = EngineEvent::Done {
+                stats: batch.stats.clone(),
+            };
+            on_event(&done);
+            return Ok(EngineFacts::DirectBatch(batch));
+        }
         let (project, db_path) = find_single_project_db(&cache_root, &engine_repo)?;
         on_event(&EngineEvent::Log {
             stream: "facts".into(),
@@ -545,14 +578,31 @@ impl EngineRunner {
                 db_path.display()
             ),
         });
-        let batch =
-            collect_engine_facts(&engine_repo, &db_path, &project, no_chunks, &mut on_event)?;
+        let batch = collect_engine_facts(
+            &engine_repo,
+            &db_path,
+            &project,
+            options.no_chunks,
+            &mut on_event,
+        )?;
         let done = EngineEvent::Done {
             stats: batch.stats.clone(),
         };
         on_event(&done);
         Ok(EngineFacts::DirectBatch(batch))
     }
+}
+
+fn engine_cache_root(
+    repo: &Path,
+    fallback_out_dir: Option<&Path>,
+    cache_dir: Option<&Path>,
+) -> PathBuf {
+    cache_dir.map(|p| p.join("aka-engine")).unwrap_or_else(|| {
+        fallback_out_dir
+            .map(|p| p.join(".aka-engine-cache"))
+            .unwrap_or_else(|| repo.join(".aka-engine-cache"))
+    })
 }
 
 fn engine_exe_names() -> &'static [&'static str] {
@@ -703,7 +753,7 @@ where
 /// Run a single source-synthesis stage on a worker thread with a hard timeout.
 /// On timeout (or worker panic) the stage is skipped, a `skipped=true` line is
 /// logged to the adapter stream, and `default` is returned so indexing keeps
-/// going instead of hanging in the artifact stage. This is the no-progress
+/// going instead of hanging in the enrichment stage. This is the no-progress
 /// sibling of [`synthesize_with_timeout_and_progress`].
 fn run_synth_stage<T, F>(
     on_event: &mut impl FnMut(&EngineEvent),
@@ -973,7 +1023,7 @@ fn export_artifacts(
     emit_phase(
         on_event,
         format!(
-            "aka-engine:export-artifacts:synthesize-graph ({} nodes / {} edges)",
+            "aka-core:enrichment-graph ({} nodes / {} edges)",
             db_counts.nodes, db_counts.edges
         ),
         0,
@@ -1047,6 +1097,148 @@ fn export_artifacts(
     let file = File::create(manifest_path)?;
     serde_json::to_writer_pretty(BufWriter::new(file), &manifest)?;
     Ok(stats)
+}
+
+fn read_engine_facts_sidecar(
+    path: &Path,
+    repo: &Path,
+    no_chunks: bool,
+    on_event: &mut impl FnMut(&EngineEvent),
+) -> Result<FactBatch, EngineError> {
+    let file = File::open(path)?;
+    let mut batch = read_complete_fact_records_ndjson(BufReader::new(file))?;
+    normalize_engine_sidecar_facts(&mut batch, repo, no_chunks, on_event);
+    Ok(batch)
+}
+
+fn normalize_engine_sidecar_facts(
+    batch: &mut FactBatch,
+    repo: &Path,
+    no_chunks: bool,
+    on_event: &mut impl FnMut(&EngineEvent),
+) {
+    for node in &mut batch.nodes {
+        normalize_engine_node_fact(node);
+    }
+    for edge in &mut batch.edges {
+        normalize_engine_edge_fact(edge);
+    }
+    if no_chunks {
+        batch.chunks.clear();
+    } else if batch.chunks.is_empty() {
+        batch.chunks = synthesize_chunks_from_node_facts(repo, &batch.nodes, on_event);
+    }
+    batch.stats.files = batch
+        .nodes
+        .iter()
+        .filter(|node| node.label == "File")
+        .count() as u64;
+    batch.stats.nodes = batch.nodes.len() as u64;
+    batch.stats.edges = batch.edges.len() as u64;
+    batch.stats.chunks = batch.chunks.len() as u64;
+}
+
+fn synthesize_chunks_from_node_facts(
+    repo: &Path,
+    nodes: &[NodeRec],
+    on_event: &mut impl FnMut(&EngineEvent),
+) -> Vec<ChunkRec> {
+    let candidates: Vec<_> = nodes
+        .iter()
+        .filter(|node| {
+            node.file_path().is_some()
+                && !matches!(
+                    node.label.as_str(),
+                    "File" | "Folder" | "Project" | "Package" | "Module"
+                )
+        })
+        .collect();
+    let total = candidates.len() as u64;
+    emit_phase(on_event, "aka-core:enrichment:chunks-from-facts", 0, total);
+    let mut sources = SourceCache::new(repo);
+    let mut chunks = Vec::with_capacity(candidates.len());
+    let mut count = 0u64;
+    for node in candidates {
+        let Some(file_path) = node.file_path() else {
+            continue;
+        };
+        let start_line = node.start_line().map(|line| line as i64 + 1).unwrap_or(1);
+        let end_line = node
+            .end_line()
+            .map(|line| line as i64 + 1)
+            .unwrap_or(start_line);
+        let text = sources
+            .read_line_span(file_path, start_line, end_line)
+            .unwrap_or_default();
+        chunks.push(ChunkRec {
+            node_id: node.id.clone(),
+            kind: format!("ast-{}", node.label.to_ascii_lowercase()),
+            file_path: file_path.to_string(),
+            start_line: to_artifact_line(start_line),
+            end_line: to_artifact_line(end_line),
+            text,
+        });
+        count += 1;
+        if count == total || count % 1000 == 0 {
+            emit_phase(
+                on_event,
+                "aka-core:enrichment:chunks-from-facts",
+                count,
+                total,
+            );
+        }
+    }
+    chunks
+}
+
+fn normalize_engine_edge_fact(edge: &mut EdgeRec) {
+    let Some(Value::Object(evidence)) = edge.evidence.as_ref() else {
+        return;
+    };
+    if edge.reason.is_empty() {
+        if let Some(reason) = evidence.get("reason").and_then(Value::as_str) {
+            edge.reason = reason.to_string();
+        }
+    }
+    if let Some(confidence) = evidence.get("confidence").and_then(Value::as_f64) {
+        edge.confidence = confidence;
+    }
+    if edge.step.is_none() {
+        edge.step = evidence
+            .get("step")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32);
+    }
+}
+
+fn normalize_engine_node_fact(node: &mut NodeRec) {
+    let mut cbm_id = None;
+    let mut qualified_name = None;
+    if let Some(rest) = node.id.strip_prefix("cbm:") {
+        if let Some((id, qn)) = rest.split_once(':') {
+            cbm_id = id.parse::<i64>().ok();
+            qualified_name = Some(qn.to_string());
+        }
+    }
+    if let Some(id) = cbm_id {
+        insert_if_missing(&mut node.properties, "cbmId", Value::from(id));
+    }
+    if let Some(qn) = qualified_name {
+        insert_if_missing(
+            &mut node.properties,
+            "qualifiedName",
+            Value::String(qn.clone()),
+        );
+        insert_if_missing(&mut node.properties, "name", Value::String(short_name(&qn)));
+    }
+}
+
+fn short_name(qualified_name: &str) -> String {
+    qualified_name
+        .rsplit([':', '.', '/', '#'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(qualified_name)
+        .to_string()
 }
 
 fn collect_engine_facts(
@@ -2179,22 +2371,12 @@ fn synthesize_graph_with_progress(
     repo: &Path,
     on_event: &mut impl FnMut(&EngineEvent),
 ) -> Result<SynthGraph, EngineError> {
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:native-labels",
-        0,
-        0,
-    );
+    emit_phase(on_event, "aka-core:enrichment:native-labels", 0, 0);
     let native_communities = has_native_label(conn, project, "Community")?;
     let native_processes = has_native_label(conn, project, "Process")?;
     let native_routes = load_native_app_nodes(conn, project, "Route")?;
     let native_tools = load_native_app_nodes(conn, project, "Tool")?;
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:nodes",
-        0,
-        0,
-    );
+    emit_phase(on_event, "aka-core:enrichment:nodes", 0, 0);
     let mut nodes = load_synth_nodes(conn, project)?;
     let source_symbols = synthesize_source_symbols_from_sources(repo, &nodes);
     for symbol in &source_symbols {
@@ -2246,25 +2428,15 @@ fn synthesize_graph_with_progress(
     emit_phase(
         on_event,
         format!(
-            "aka-engine:export-artifacts:synthesize:calls ({} process-step nodes)",
+            "aka-core:enrichment:calls ({} process-step nodes)",
             nodes.len()
         ),
         0,
         0,
     );
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:existing-call-pairs",
-        0,
-        0,
-    );
+    emit_phase(on_event, "aka-core:enrichment:existing-call-pairs", 0, 0);
     let existing_call_pairs = load_existing_call_pairs(conn, project)?;
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:dependency-edges",
-        0,
-        0,
-    );
+    emit_phase(on_event, "aka-core:enrichment:dependency-edges", 0, 0);
     let synthetic_edges =
         synthesize_dependency_edges_from_sources(repo, &nodes, &existing_call_pairs, |progress| {
             let (phase, current, total) = dependency_progress_phase(progress);
@@ -2273,7 +2445,7 @@ fn synthesize_graph_with_progress(
     emit_phase(
         on_event,
         format!(
-            "aka-engine:export-artifacts:synthesize:call-graph ({} synthetic edges)",
+            "aka-core:enrichment:call-graph ({} synthetic edges)",
             synthetic_edges.len()
         ),
         0,
@@ -2281,18 +2453,13 @@ fn synthesize_graph_with_progress(
     );
     let calls = load_call_graph(conn, project, &nodes, &synthetic_edges)?;
     let project_sources = ProjectSourceSet::discover(repo);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:project-subgraph",
-        0,
-        0,
-    );
+    emit_phase(on_event, "aka-core:enrichment:project-subgraph", 0, 0);
     let process_nodes = project_process_nodes(repo, &nodes, &project_sources);
     let process_calls = calls.project_subgraph(&process_nodes);
     emit_phase(
         on_event,
         format!(
-            "aka-engine:export-artifacts:synthesize:process-hints ({} process nodes / {} call edges)",
+            "aka-core:enrichment:process-hints ({} process nodes / {} call edges)",
             process_nodes.len(),
             process_calls.edges.len()
         ),
@@ -2306,34 +2473,19 @@ fn synthesize_graph_with_progress(
             .or_insert(CommandEntryHint { strategy });
     }
 
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:communities",
-        0,
-        0,
-    );
+    emit_phase(on_event, "aka-core:enrichment:communities", 0, 0);
     let communities = if native_communities {
         Vec::new()
     } else {
         synthesize_communities(&process_nodes, &process_calls.edges)
     };
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:community-memberships",
-        0,
-        0,
-    );
+    emit_phase(on_event, "aka-core:enrichment:community-memberships", 0, 0);
     let community_memberships = if native_communities {
         load_native_community_memberships(conn, project, &nodes)?
     } else {
         community_memberships_from_synth(&communities)
     };
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:processes",
-        0,
-        0,
-    );
+    emit_phase(on_event, "aka-core:enrichment:processes", 0, 0);
     let processes = if native_processes {
         Vec::new()
     } else {
@@ -2349,7 +2501,7 @@ fn synthesize_graph_with_progress(
     };
     // Share the (read-only) inputs across stage worker threads cheaply, and run
     // every source-scanning stage under a hard timeout so a single pathological
-    // file or repo can't wedge the artifact stage. On timeout a stage is skipped
+    // file or repo can't wedge the enrichment stage. On timeout a stage is skipped
     // (logged with `skipped=true`) and indexing continues with partial results.
     let repo_arc = Arc::new(repo.to_path_buf());
     let nodes = Arc::new(nodes);
@@ -2363,7 +2515,7 @@ fn synthesize_graph_with_progress(
         let native_routes = native_routes.clone();
         synthesize_with_timeout_and_progress(
             on_event,
-            "aka-engine:export-artifacts:synthesize:routes",
+            "aka-core:enrichment:routes",
             stage_timeout,
             Vec::new(),
             move |progress| {
@@ -2383,7 +2535,7 @@ fn synthesize_graph_with_progress(
         let processes = Arc::clone(&processes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:tools",
+            "aka-core:enrichment:tools",
             stage_timeout,
             Vec::new(),
             move || {
@@ -2402,7 +2554,7 @@ fn synthesize_graph_with_progress(
         let processes = Arc::clone(&processes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:commands",
+            "aka-core:enrichment:commands",
             stage_timeout,
             Vec::new(),
             move || {
@@ -2419,7 +2571,7 @@ fn synthesize_graph_with_progress(
         let nodes = Arc::clone(&nodes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:configs",
+            "aka-core:enrichment:configs",
             stage_timeout,
             Vec::new(),
             move || synthesize_configs_from_sources(repo.as_path(), nodes.as_ref()),
@@ -2431,7 +2583,7 @@ fn synthesize_graph_with_progress(
         let processes = Arc::clone(&processes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:jobs",
+            "aka-core:enrichment:jobs",
             stage_timeout,
             Vec::new(),
             move || {
@@ -2444,7 +2596,7 @@ fn synthesize_graph_with_progress(
         let nodes = Arc::clone(&nodes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:topics",
+            "aka-core:enrichment:topics",
             stage_timeout,
             Vec::new(),
             move || synthesize_topics_from_sources(repo.as_path(), nodes.as_ref()),
@@ -2459,7 +2611,7 @@ fn synthesize_graph_with_progress(
         let nodes = Arc::clone(&nodes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:caches",
+            "aka-core:enrichment:caches",
             stage_timeout,
             Vec::new(),
             move || synthesize_caches_from_sources(repo.as_path(), nodes.as_ref()),
@@ -2470,7 +2622,7 @@ fn synthesize_graph_with_progress(
         let nodes = Arc::clone(&nodes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:events",
+            "aka-core:enrichment:events",
             stage_timeout,
             Vec::new(),
             move || synthesize_events_from_sources(repo.as_path(), nodes.as_ref()),
@@ -2481,7 +2633,7 @@ fn synthesize_graph_with_progress(
         let nodes = Arc::clone(&nodes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:policies",
+            "aka-core:enrichment:policies",
             stage_timeout,
             Vec::new(),
             move || synthesize_policies_from_sources(repo.as_path(), nodes.as_ref()),
@@ -2492,7 +2644,7 @@ fn synthesize_graph_with_progress(
         let nodes = Arc::clone(&nodes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:resources",
+            "aka-core:enrichment:resources",
             stage_timeout,
             Vec::new(),
             move || synthesize_resources_from_sources(repo.as_path(), nodes.as_ref()),
@@ -2504,7 +2656,7 @@ fn synthesize_graph_with_progress(
         let processes = Arc::clone(&processes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:graphql",
+            "aka-core:enrichment:graphql",
             stage_timeout,
             Vec::new(),
             move || {
@@ -2521,7 +2673,7 @@ fn synthesize_graph_with_progress(
         let nodes = Arc::clone(&nodes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:persistence",
+            "aka-core:enrichment:persistence",
             stage_timeout,
             SynthPersistenceGraph::default(),
             move || synthesize_persistence_from_sources(repo.as_path(), nodes.as_ref()),
@@ -2532,7 +2684,7 @@ fn synthesize_graph_with_progress(
         let nodes = Arc::clone(&nodes);
         run_synth_stage(
             on_event,
-            "aka-engine:export-artifacts:synthesize:transactions",
+            "aka-core:enrichment:transactions",
             stage_timeout,
             Vec::new(),
             move || synthesize_transactions_from_sources(repo.as_path(), nodes.as_ref()),
@@ -2564,7 +2716,7 @@ fn synthesize_graph_with_progress(
 }
 
 fn dependency_progress_phase(progress: DependencyProgress) -> (String, u64, u64) {
-    let base = "aka-engine:export-artifacts:synthesize:dependency-edges";
+    let base = "aka-core:enrichment:dependency-edges";
     let phase = match progress.phase {
         DependencyProgressPhase::Start => base.to_string(),
         DependencyProgressPhase::FileStart {
@@ -3739,7 +3891,7 @@ impl<'a> RouteSynthesisProgress<'a> {
     fn emit_force(&mut self, suffix: &str, current: u64, total: u64) {
         self.last_emit = Instant::now();
         (self.progress)(
-            format!("aka-engine:export-artifacts:synthesize:routes:{suffix}"),
+            format!("aka-core:enrichment:routes:{suffix}"),
             current,
             total,
         );

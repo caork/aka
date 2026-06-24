@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use aka_core::{
     build_parse_cache_manifest_from_facts, load_index_state, load_parse_cache_manifest,
-    registry::now_unix, save_index_state, save_parse_cache_manifest, user_facing_path, ArtifactDir,
-    EngineEvent, EngineRunner, FactSource, FactStats, IndexDelta, IndexState, Registry, RepoEntry,
-    RepoPaths,
+    registry::now_unix, save_index_state, save_parse_cache_manifest, user_facing_path,
+    AnalyzeFactsOptions, ArtifactDir, EngineEvent, EngineRunner, FactSource, FactStats, IndexDelta,
+    IndexState, Registry, RepoEntry, RepoPaths,
 };
 use anyhow::{Context, Result};
 
@@ -86,7 +86,6 @@ pub fn run_analyze_with_progress(
         std::fs::remove_dir_all(&artifact_dir)
             .with_context(|| format!("clear stale artifact dir {}", artifact_dir.display()))?;
     }
-    std::fs::create_dir_all(&artifact_dir)?;
     let engine_cache_dir = paths.engine_cache_dir();
     std::fs::create_dir_all(&engine_cache_dir)
         .with_context(|| format!("create engine cache dir {}", engine_cache_dir.display()))?;
@@ -100,9 +99,11 @@ pub fn run_analyze_with_progress(
     let mut last_phase = String::new();
     let facts = runner.analyze_facts(
         &repo,
-        &artifact_dir,
-        Some(&engine_cache_dir),
-        no_chunks,
+        AnalyzeFactsOptions {
+            cache_dir: Some(&engine_cache_dir),
+            debug_artifact_dir: None,
+            no_chunks,
+        },
         |ev| match ev {
             EngineEvent::Phase { phase, .. } => {
                 if *phase != last_phase {

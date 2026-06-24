@@ -66,6 +66,7 @@ export function indexPhaseLabel(stage: string | null | undefined): string {
   }
   if (
     normalized.includes("facts") ||
+    normalized.includes("enrichment") ||
     normalized.includes("adapter") ||
     normalized.includes("artifact")
   ) {

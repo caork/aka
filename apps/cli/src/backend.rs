@@ -462,7 +462,10 @@ impl JobInfo {
                     }
                     return;
                 }
-                if phase_lc.contains("facts") || phase_lc.contains("export-artifacts") {
+                if phase_lc.contains("facts")
+                    || phase_lc.contains("enrichment")
+                    || phase_lc.contains("export-artifacts")
+                {
                     self.progress.stage = if phase_lc.contains("export-artifacts") {
                         "legacy-adapter".into()
                     } else {
@@ -559,29 +562,29 @@ fn adapter_percent(phase: &str, current: u64, total: u64) -> f32 {
     }
     if phase.contains("inspect-db") {
         77.0
-    } else if phase.contains("synthesize:native-labels") {
+    } else if phase.contains("enrichment:native-labels") {
         78.0
-    } else if phase.contains("synthesize:nodes") {
+    } else if phase.contains("enrichment:nodes") {
         79.0
-    } else if phase.contains("synthesize:dependency-edges") {
+    } else if phase.contains("enrichment:dependency-edges") {
         80.0
-    } else if phase.contains("synthesize:call-graph") {
+    } else if phase.contains("enrichment:call-graph") {
         82.0
-    } else if phase.contains("synthesize:project-subgraph") {
+    } else if phase.contains("enrichment:project-subgraph") {
         83.0
-    } else if phase.contains("synthesize:communities") {
+    } else if phase.contains("enrichment:communities") {
         84.0
-    } else if phase.contains("synthesize:processes") {
+    } else if phase.contains("enrichment:processes") {
         87.0
-    } else if phase.contains("synthesize:routes:done") {
+    } else if phase.contains("enrichment:routes:done") {
         88.0
-    } else if phase.contains("synthesize:routes:consumers") {
+    } else if phase.contains("enrichment:routes:consumers") {
         progress_between(current, total, 87.7, 88.0)
-    } else if phase.contains("synthesize:routes:source-files") {
+    } else if phase.contains("enrichment:routes:source-files") {
         progress_between(current, total, 87.5, 87.7)
-    } else if phase.contains("synthesize:routes") {
+    } else if phase.contains("enrichment:routes") {
         87.5
-    } else if phase.contains("synthesize:topics") {
+    } else if phase.contains("enrichment:topics") {
         88.0
     } else if phase.contains("nodes") {
         89.0
@@ -3640,18 +3643,10 @@ mod tests {
 
     #[test]
     fn facts_progress_tracks_synthesis_before_legacy_writes() {
-        let synth_nodes = adapter_percent("aka-engine:export-artifacts:synthesize:nodes", 0, 0);
-        let deps_start = adapter_percent(
-            "aka-engine:export-artifacts:synthesize:dependency-edges",
-            0,
-            570,
-        );
-        let deps_mid = adapter_percent(
-            "aka-engine:export-artifacts:synthesize:dependency-edges",
-            285,
-            570,
-        );
-        let processes = adapter_percent("aka-engine:export-artifacts:synthesize:processes", 0, 0);
+        let synth_nodes = adapter_percent("aka-core:enrichment:nodes", 0, 0);
+        let deps_start = adapter_percent("aka-core:enrichment:dependency-edges", 0, 570);
+        let deps_mid = adapter_percent("aka-core:enrichment:dependency-edges", 285, 570);
+        let processes = adapter_percent("aka-core:enrichment:processes", 0, 0);
         let write_nodes = adapter_percent("aka-engine:export-artifacts:nodes", 0, 12_687);
 
         assert!(deps_start > synth_nodes);

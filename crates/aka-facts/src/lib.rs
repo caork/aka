@@ -4,6 +4,8 @@
 //! adapt into these records, but graph/search indexing should depend on facts
 //! rather than on a disk artifact transport.
 
+use std::io::BufRead;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -124,8 +126,7 @@ impl ChunkFact {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[derive(Debug, Clone)]
 pub enum FactRecord {
     Manifest(FactManifest),
     Node(NodeFact),
@@ -134,8 +135,108 @@ pub enum FactRecord {
     Done { stats: FactStats },
 }
 
+impl Serialize for FactRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let value = match self {
+            Self::Manifest(manifest) => {
+                let mut value =
+                    serde_json::to_value(manifest).map_err(serde::ser::Error::custom)?;
+                insert_record_kind(&mut value, "manifest");
+                value
+            }
+            Self::Node(node) => {
+                let mut value = serde_json::to_value(node).map_err(serde::ser::Error::custom)?;
+                insert_record_kind(&mut value, "node");
+                value
+            }
+            Self::Edge(edge) => {
+                let mut value = serde_json::to_value(edge).map_err(serde::ser::Error::custom)?;
+                insert_record_kind(&mut value, "edge");
+                value
+            }
+            Self::Chunk(chunk) => {
+                let mut value = serde_json::to_value(chunk).map_err(serde::ser::Error::custom)?;
+                if let Value::Object(obj) = &mut value {
+                    if let Some(kind) = obj.remove("kind") {
+                        obj.insert("chunkKind".into(), kind);
+                    }
+                }
+                insert_record_kind(&mut value, "chunk");
+                value
+            }
+            Self::Done { stats } => serde_json::json!({
+                "kind": "done",
+                "stats": stats,
+            }),
+        };
+        value.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FactRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut obj = Map::<String, Value>::deserialize(deserializer)?;
+        let kind = obj
+            .remove("kind")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or_else(|| serde::de::Error::missing_field("kind"))?;
+        match kind.as_str() {
+            "manifest" => serde_json::from_value(Value::Object(obj))
+                .map(Self::Manifest)
+                .map_err(serde::de::Error::custom),
+            "node" => serde_json::from_value(Value::Object(obj))
+                .map(Self::Node)
+                .map_err(serde::de::Error::custom),
+            "edge" => serde_json::from_value(Value::Object(obj))
+                .map(Self::Edge)
+                .map_err(serde::de::Error::custom),
+            "chunk" => {
+                if let Some(chunk_kind) = obj.remove("chunkKind") {
+                    obj.insert("kind".into(), chunk_kind);
+                }
+                serde_json::from_value(Value::Object(obj))
+                    .map(Self::Chunk)
+                    .map_err(serde::de::Error::custom)
+            }
+            "done" => {
+                #[derive(Deserialize)]
+                struct DoneRecord {
+                    stats: FactStats,
+                }
+                serde_json::from_value::<DoneRecord>(Value::Object(obj))
+                    .map(|done| Self::Done { stats: done.stats })
+                    .map_err(serde::de::Error::custom)
+            }
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["manifest", "node", "edge", "chunk", "done"],
+            )),
+        }
+    }
+}
+
+fn insert_record_kind(value: &mut Value, kind: &'static str) {
+    if let Value::Object(obj) = value {
+        obj.insert("kind".into(), Value::String(kind.into()));
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FactSourceError {
+    #[error("fact io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("fact json error at line {line}: {source}")]
+    Json {
+        line: usize,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("{0}")]
     Message(String),
 }
@@ -504,6 +605,59 @@ pub struct FactBatch {
     pub chunks: Vec<ChunkFact>,
 }
 
+#[derive(Debug, Default)]
+pub struct FactBatchBuilder {
+    manifest: Option<FactManifest>,
+    done_stats: Option<FactStats>,
+    nodes: Vec<NodeFact>,
+    edges: Vec<EdgeFact>,
+    chunks: Vec<ChunkFact>,
+    saw_done: bool,
+}
+
+impl FactBatchBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push_record(&mut self, record: FactRecord) {
+        match record {
+            FactRecord::Manifest(manifest) => {
+                self.manifest = Some(manifest);
+            }
+            FactRecord::Node(node) => self.nodes.push(node),
+            FactRecord::Edge(edge) => self.edges.push(edge),
+            FactRecord::Chunk(chunk) => self.chunks.push(chunk),
+            FactRecord::Done { stats } => {
+                self.done_stats = Some(stats);
+                self.saw_done = true;
+            }
+        }
+    }
+
+    pub fn saw_done(&self) -> bool {
+        self.saw_done
+    }
+
+    pub fn finish(self) -> FactBatch {
+        let computed = FactStats {
+            files: self
+                .nodes
+                .iter()
+                .filter(|node| node.label == SymbolKind::File.label())
+                .count() as u64,
+            nodes: self.nodes.len() as u64,
+            edges: self.edges.len() as u64,
+            chunks: self.chunks.len() as u64,
+        };
+        let stats = self
+            .done_stats
+            .or_else(|| self.manifest.map(|manifest| manifest.stats))
+            .unwrap_or(computed);
+        FactBatch::new(stats, self.nodes, self.edges, self.chunks)
+    }
+}
+
 impl FactBatch {
     pub fn new(
         stats: FactStats,
@@ -518,6 +672,51 @@ impl FactBatch {
             chunks,
         }
     }
+}
+
+pub fn read_fact_records_ndjson(reader: impl BufRead) -> Result<FactBatch, FactSourceError> {
+    let mut builder = FactBatchBuilder::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let record: FactRecord =
+            serde_json::from_str(trimmed).map_err(|source| FactSourceError::Json {
+                line: line_no,
+                source,
+            })?;
+        builder.push_record(record);
+    }
+    Ok(builder.finish())
+}
+
+pub fn read_complete_fact_records_ndjson(
+    reader: impl BufRead,
+) -> Result<FactBatch, FactSourceError> {
+    let mut builder = FactBatchBuilder::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let record: FactRecord =
+            serde_json::from_str(trimmed).map_err(|source| FactSourceError::Json {
+                line: line_no,
+                source,
+            })?;
+        builder.push_record(record);
+    }
+    if !builder.saw_done() {
+        return Err(FactSourceError::Message(
+            "fact stream missing terminal done record".into(),
+        ));
+    }
+    Ok(builder.finish())
 }
 
 impl FactSource for FactBatch {
@@ -664,5 +863,61 @@ mod tests {
         assert_eq!(batch.nodes().unwrap().count(), 1);
         assert_eq!(batch.nodes().unwrap().count(), 1);
         assert_eq!(batch.stats().nodes, 1);
+    }
+
+    #[test]
+    fn reads_fact_records_ndjson_into_replayable_batch() {
+        let input = r#"
+{"kind":"manifest","contractVersion":1,"engineVersion":"test","repoPath":"/repo","generatedAt":"now","stats":{"files":9,"nodes":9,"edges":9,"chunks":9}}
+{"kind":"node","id":"file:src/lib.rs","label":"File","properties":{"filePath":"src/lib.rs"}}
+{"kind":"node","id":"sym:main","label":"Function","properties":{"name":"main","filePath":"src/lib.rs","startLine":0,"endLine":2}}
+{"kind":"edge","id":"edge:1","sourceId":"sym:main","targetId":"file:src/lib.rs","type":"DEFINES","confidence":1.0,"reason":"test"}
+{"kind":"chunk","nodeId":"sym:main","chunkKind":"ast-function","filePath":"src/lib.rs","startLine":0,"endLine":2,"text":"fn main() {}"}
+{"kind":"done","stats":{"files":1,"nodes":2,"edges":1,"chunks":1}}
+"#;
+
+        let batch = read_fact_records_ndjson(std::io::Cursor::new(input)).unwrap();
+
+        assert_eq!(batch.stats.files, 1);
+        assert_eq!(batch.stats.nodes, 2);
+        assert_eq!(batch.stats.edges, 1);
+        assert_eq!(batch.stats.chunks, 1);
+        assert_eq!(batch.nodes().unwrap().count(), 2);
+        assert_eq!(batch.edges().unwrap().count(), 1);
+        assert_eq!(batch.chunks().unwrap().unwrap().count(), 1);
+    }
+
+    #[test]
+    fn reads_fact_records_ndjson_uses_computed_stats_without_done_or_manifest() {
+        let input = r#"
+{"kind":"node","id":"file:src/lib.rs","label":"File","properties":{"filePath":"src/lib.rs"}}
+{"kind":"node","id":"sym:main","label":"Function","properties":{"name":"main","filePath":"src/lib.rs"}}
+"#;
+
+        let batch = read_fact_records_ndjson(std::io::Cursor::new(input)).unwrap();
+
+        assert_eq!(batch.stats.files, 1);
+        assert_eq!(batch.stats.nodes, 2);
+        assert_eq!(batch.stats.edges, 0);
+        assert_eq!(batch.stats.chunks, 0);
+    }
+
+    #[test]
+    fn reads_fact_records_ndjson_reports_json_line_number() {
+        let input =
+            "\n{\"kind\":\"node\",\"id\":\"n1\",\"label\":\"File\",\"properties\":{}}\nnot-json\n";
+
+        let err = read_fact_records_ndjson(std::io::Cursor::new(input)).unwrap_err();
+
+        assert!(err.to_string().contains("line 3"));
+    }
+
+    #[test]
+    fn complete_fact_records_ndjson_requires_done_record() {
+        let input = "{\"kind\":\"node\",\"id\":\"n1\",\"label\":\"File\",\"properties\":{}}\n";
+
+        let err = read_complete_fact_records_ndjson(std::io::Cursor::new(input)).unwrap_err();
+
+        assert!(err.to_string().contains("missing terminal done"));
     }
 }

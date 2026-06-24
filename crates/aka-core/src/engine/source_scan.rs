@@ -399,7 +399,7 @@ pub(super) fn is_business_language(language: &str) -> bool {
 /// Files larger than this are skipped by source synthesis. A single oversized
 /// file (lockfiles, minified/generated bundles, SQL/data dumps) is otherwise
 /// fully read into memory and re-scanned by *every* synthesis stage, which is
-/// the dominant cause of the artifact stage appearing to hang. Override with
+/// the dominant cause of the enrichment stage appearing to hang. Override with
 /// `AKA_SOURCE_MAX_BYTES` (set to `0` to disable the cap).
 const DEFAULT_SOURCE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 

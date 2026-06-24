@@ -244,13 +244,13 @@ fn route_synthesis_emits_subphase_progress() {
 
     assert_eq!(routes.len(), 1);
     assert!(events.iter().any(|(phase, current, total)| {
-        phase.contains("synthesize:routes:source-files") && *current == 1 && *total == 1
+        phase.contains("enrichment:routes:source-files") && *current == 1 && *total == 1
     }));
     assert!(events.iter().any(|(phase, current, total)| {
-        phase.contains("synthesize:routes:consumers:scan-files") && *current == 1 && *total == 1
+        phase.contains("enrichment:routes:consumers:scan-files") && *current == 1 && *total == 1
     }));
     assert!(events.iter().any(
-        |(phase, current, total)| phase.contains("synthesize:routes:done")
+        |(phase, current, total)| phase.contains("enrichment:routes:done")
             && *current == 1
             && *total == 1
     ));
@@ -283,6 +283,62 @@ fn prefers_project_db_matching_repo_root() {
 
     assert_eq!(project, "wanted");
     assert_eq!(found_path, wanted_db);
+}
+
+#[test]
+fn reads_engine_sidecar_as_direct_facts() {
+    let dir = temp_repo("facts-sidecar");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "fn main() {}\n").unwrap();
+    let sidecar = dir.join("facts.jsonl");
+    std::fs::write(
+        &sidecar,
+        r#"
+{"kind":"manifest","contractVersion":1,"engineVersion":"test","repoPath":"/repo","generatedAt":"now","stats":{"files":99,"nodes":99,"edges":99,"chunks":99}}
+{"kind":"node","id":"file:src/lib.rs","label":"File","properties":{"filePath":"src/lib.rs"}}
+{"kind":"node","id":"cbm:2:pkg.main","label":"Function","properties":{"filePath":"src/lib.rs","startLine":0,"endLine":1}}
+{"kind":"edge","id":"edge:1","sourceId":"cbm:2:pkg.main","targetId":"file:src/lib.rs","type":"STEP_IN_PROCESS","confidence":1.0,"reason":"","evidence":{"confidence":0.7,"reason":"flow","step":3}}
+{"kind":"done","stats":{"files":99,"nodes":99,"edges":99,"chunks":99}}
+"#,
+    )
+    .unwrap();
+
+    let batch = read_engine_facts_sidecar(&sidecar, &dir, false, &mut |_| {}).unwrap();
+
+    assert_eq!(batch.stats.files, 1);
+    assert_eq!(batch.stats.nodes, 2);
+    assert_eq!(batch.stats.edges, 1);
+    assert_eq!(batch.stats.chunks, 1);
+    assert_eq!(batch.nodes[1].properties["cbmId"], 2);
+    assert_eq!(batch.nodes[1].properties["qualifiedName"], "pkg.main");
+    assert_eq!(batch.nodes[1].properties["name"], "main");
+    assert_eq!(batch.edges[0].confidence, 0.7);
+    assert_eq!(batch.edges[0].reason, "flow");
+    assert_eq!(batch.edges[0].step, Some(3));
+    assert_eq!(batch.chunks[0].text, "fn main() {}");
+}
+
+#[test]
+fn reads_engine_sidecar_honors_no_chunks() {
+    let dir = temp_repo("facts-sidecar-no-chunks");
+    let sidecar = dir.join("facts.jsonl");
+    std::fs::write(
+        &sidecar,
+        r#"
+{"kind":"node","id":"file:src/lib.rs","label":"File","properties":{"filePath":"src/lib.rs"}}
+{"kind":"chunk","nodeId":"file:src/lib.rs","chunkKind":"char","filePath":"src/lib.rs","startLine":0,"endLine":0,"text":"fn main() {}"}
+{"kind":"done","stats":{"files":1,"nodes":1,"edges":0,"chunks":1}}
+"#,
+    )
+    .unwrap();
+
+    let batch = read_engine_facts_sidecar(&sidecar, &dir, true, &mut |_| {}).unwrap();
+
+    assert_eq!(batch.stats.files, 1);
+    assert_eq!(batch.stats.nodes, 1);
+    assert_eq!(batch.stats.edges, 0);
+    assert_eq!(batch.stats.chunks, 0);
+    assert!(batch.chunks.is_empty());
 }
 
 #[test]

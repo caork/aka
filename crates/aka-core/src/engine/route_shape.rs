@@ -85,7 +85,7 @@ pub(super) fn literal_occurrences(text: &str, needle: &str) -> Vec<usize> {
     let mut out = Vec::new();
     // An empty needle matches at every position with `needle.len() == 0`, so the
     // offset never advances and the loop allocates forever. A degenerate (empty)
-    // route string reaching here is what blows the artifact stage up to tens of
+    // route string reaching here is what blows the enrichment stage up to tens of
     // GB and aborts the process; guard against it.
     if needle.is_empty() {
         return out;
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn empty_needle_does_not_loop_forever() {
         // Regression: an empty route string used to make literal_occurrences
-        // (and route_occurrences) loop forever, blowing the artifact stage up to
+        // (and route_occurrences) loop forever, blowing the enrichment stage up to
         // tens of GB. Both must terminate and report no matches.
         assert!(literal_occurrences("anything at all", "").is_empty());
         assert!(route_occurrences("anything at all", "").is_empty());
