@@ -1179,7 +1179,7 @@ fn synthesize_chunks_from_node_facts(
             text,
         });
         count += 1;
-        if count == total || count % 1000 == 0 {
+        if count == total || count.is_multiple_of(1000) {
             emit_phase(
                 on_event,
                 "aka-core:enrichment:chunks-from-facts",
