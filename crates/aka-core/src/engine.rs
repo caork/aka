@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(windows)]
@@ -561,6 +562,70 @@ where
                     message: format!(
                         "{phase} worker disconnected; continuing without this synthesis"
                     ),
+                });
+                return default;
+            }
+        }
+    }
+}
+
+/// Run a single source-synthesis stage on a worker thread with a hard timeout.
+/// On timeout (or worker panic) the stage is skipped, a `skipped=true` line is
+/// logged to the adapter stream, and `default` is returned so indexing keeps
+/// going instead of hanging in the artifact stage. This is the no-progress
+/// sibling of [`synthesize_with_timeout_and_progress`].
+fn run_synth_stage<T, F>(
+    on_event: &mut impl FnMut(&EngineEvent),
+    phase: &str,
+    timeout: Duration,
+    default: T,
+    f: F,
+) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    emit_phase(on_event, phase, 0, 0);
+    let started = Instant::now();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+
+    loop {
+        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+            on_event(&EngineEvent::Log {
+                stream: "adapter".into(),
+                line: format!(
+                    "{phase}:timeout elapsed_ms={} skipped=true",
+                    started.elapsed().as_millis()
+                ),
+            });
+            return default;
+        };
+        match rx.recv_timeout(remaining.min(Duration::from_secs(1))) {
+            Ok(result) => {
+                on_event(&EngineEvent::Log {
+                    stream: "adapter".into(),
+                    line: format!("{phase}:done elapsed_ms={}", started.elapsed().as_millis()),
+                });
+                return result;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if started.elapsed() >= timeout {
+                    on_event(&EngineEvent::Log {
+                        stream: "adapter".into(),
+                        line: format!(
+                            "{phase}:timeout elapsed_ms={} skipped=true",
+                            started.elapsed().as_millis()
+                        ),
+                    });
+                    return default;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                on_event(&EngineEvent::Warning {
+                    message: format!("{phase} worker panicked; continuing without this synthesis"),
                 });
                 return default;
             }
@@ -2130,115 +2195,191 @@ fn synthesize_graph_with_progress(
             symbol_count,
         )
     };
+    // Share the (read-only) inputs across stage worker threads cheaply, and run
+    // every source-scanning stage under a hard timeout so a single pathological
+    // file or repo can't wedge the artifact stage. On timeout a stage is skipped
+    // (logged with `skipped=true`) and indexing continues with partial results.
+    let repo_arc = Arc::new(repo.to_path_buf());
+    let nodes = Arc::new(nodes);
+    let processes = Arc::new(processes);
+    let stage_timeout = synth_stage_timeout();
+
     let routes = {
-        let repo = repo.to_path_buf();
-        let nodes = nodes.clone();
-        let processes = processes.clone();
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        let processes = Arc::clone(&processes);
         let native_routes = native_routes.clone();
         synthesize_with_timeout_and_progress(
             on_event,
             "aka-engine:export-artifacts:synthesize:routes",
-            synth_stage_timeout(),
+            stage_timeout,
             Vec::new(),
             move |progress| {
                 synthesize_routes_from_sources_with_progress(
-                    &repo,
-                    &nodes,
-                    &processes,
+                    repo.as_path(),
+                    nodes.as_ref(),
+                    processes.as_slice(),
                     &native_routes,
                     progress,
                 )
             },
         )
     };
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:tools",
-        0,
-        0,
-    );
-    let tools = synthesize_tools_from_sources(repo, &nodes, &processes, &native_tools);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:commands",
-        0,
-        0,
-    );
-    let commands = synthesize_commands_from_sources(repo, &nodes, &processes);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:configs",
-        0,
-        0,
-    );
-    let configs = synthesize_configs_from_sources(repo, &nodes);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:jobs",
-        0,
-        0,
-    );
-    let jobs = synthesize_jobs_from_sources(repo, &nodes, &processes);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:topics",
-        0,
-        0,
-    );
-    let mut topics = synthesize_topics_from_sources(repo, &nodes);
+    let tools = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        let processes = Arc::clone(&processes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:tools",
+            stage_timeout,
+            Vec::new(),
+            move || {
+                synthesize_tools_from_sources(
+                    repo.as_path(),
+                    nodes.as_ref(),
+                    processes.as_slice(),
+                    &native_tools,
+                )
+            },
+        )
+    };
+    let commands = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        let processes = Arc::clone(&processes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:commands",
+            stage_timeout,
+            Vec::new(),
+            move || {
+                synthesize_commands_from_sources(repo.as_path(), nodes.as_ref(), processes.as_slice())
+            },
+        )
+    };
+    let configs = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:configs",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_configs_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let jobs = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        let processes = Arc::clone(&processes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:jobs",
+            stage_timeout,
+            Vec::new(),
+            move || {
+                synthesize_jobs_from_sources(repo.as_path(), nodes.as_ref(), processes.as_slice())
+            },
+        )
+    };
+    let mut topics = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:topics",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_topics_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
     merge_native_channel_topics(
         &mut topics,
         load_native_channel_topic_detections(conn, project, repo)?,
     );
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:caches",
-        0,
-        0,
-    );
-    let caches = synthesize_caches_from_sources(repo, &nodes);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:events",
-        0,
-        0,
-    );
-    let events = synthesize_events_from_sources(repo, &nodes);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:policies",
-        0,
-        0,
-    );
-    let policies = synthesize_policies_from_sources(repo, &nodes);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:resources",
-        0,
-        0,
-    );
-    let resources = synthesize_resources_from_sources(repo, &nodes);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:graphql",
-        0,
-        0,
-    );
-    let graphql = synthesize_graphql_from_sources(repo, &nodes, &processes);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:persistence",
-        0,
-        0,
-    );
-    let persistence = synthesize_persistence_from_sources(repo, &nodes);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:synthesize:transactions",
-        0,
-        0,
-    );
-    let transactions = synthesize_transactions_from_sources(repo, &nodes);
+    let caches = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:caches",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_caches_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let events = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:events",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_events_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let policies = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:policies",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_policies_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let resources = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:resources",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_resources_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let graphql = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        let processes = Arc::clone(&processes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:graphql",
+            stage_timeout,
+            Vec::new(),
+            move || {
+                synthesize_graphql_from_sources(repo.as_path(), nodes.as_ref(), processes.as_slice())
+            },
+        )
+    };
+    let persistence = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:persistence",
+            stage_timeout,
+            SynthPersistenceGraph::default(),
+            move || synthesize_persistence_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let transactions = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-engine:export-artifacts:synthesize:transactions",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_transactions_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+
+    let processes = Arc::try_unwrap(processes).unwrap_or_else(|shared| (*shared).clone());
 
     Ok(SynthGraph {
         communities,

@@ -396,8 +396,35 @@ pub(super) fn is_business_language(language: &str) -> bool {
     )
 }
 
+/// Files larger than this are skipped by source synthesis. A single oversized
+/// file (lockfiles, minified/generated bundles, SQL/data dumps) is otherwise
+/// fully read into memory and re-scanned by *every* synthesis stage, which is
+/// the dominant cause of the artifact stage appearing to hang. Override with
+/// `AKA_SOURCE_MAX_BYTES` (set to `0` to disable the cap).
+const DEFAULT_SOURCE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+fn source_max_bytes() -> u64 {
+    use std::sync::OnceLock;
+    static MAX: OnceLock<u64> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("AKA_SOURCE_MAX_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SOURCE_MAX_BYTES)
+    })
+}
+
 pub(super) fn read_repo_text(repo: &Path, file_path: &str) -> Option<String> {
-    std::fs::read_to_string(repo.join(file_path)).ok()
+    let path = repo.join(file_path);
+    let limit = source_max_bytes();
+    if limit > 0 {
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > limit {
+                return None;
+            }
+        }
+    }
+    std::fs::read_to_string(path).ok()
 }
 
 pub(super) fn source_annotations_before_node(text: &str, node: &SynthNode) -> Vec<String> {
