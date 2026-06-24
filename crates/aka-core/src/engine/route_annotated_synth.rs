@@ -159,7 +159,7 @@ pub(super) fn java_interface_routes_by_method(
                 .is_some_and(|label| label == "Interface")
     }) {
         let text = cached_repo_text(repo, &node.file_path, &mut text_by_file);
-        let decorators = decorators_for_node(&text, node);
+        let decorators = decorators_for_node(text, node);
         let Some(method_path) = node
             .route_path
             .clone()
@@ -205,7 +205,7 @@ pub(super) fn java_interface_routes_by_method(
         .filter(|node| matches!(node.label.as_str(), "Class"))
     {
         let text = cached_repo_text(repo, &class_node.file_path, &mut text_by_file);
-        let implemented = java_implemented_interfaces(&text, &class_node.name);
+        let implemented = java_implemented_interfaces(text, &class_node.name);
         if implemented.is_empty() {
             continue;
         }
@@ -222,7 +222,7 @@ pub(super) fn java_interface_routes_by_method(
                 continue;
             }
             let method_text = cached_repo_text(repo, &method.file_path, &mut text_by_file);
-            if spring_mapping_path(&decorators_for_node(&method_text, method)).is_some() {
+            if spring_mapping_path(&decorators_for_node(method_text, method)).is_some() {
                 continue;
             }
             for iface in &implemented {

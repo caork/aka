@@ -219,7 +219,7 @@ pub fn index_artifact_with_progress(
         );
         search.commit()?;
         emit_index_progress(
-            progress.as_deref_mut(),
+            progress,
             "search:commit",
             "search index commit complete".into(),
             None,
@@ -384,7 +384,7 @@ pub fn index_artifact_incremental_with_progress(
     );
     search.commit()?;
     emit_index_progress(
-        progress.as_deref_mut(),
+        progress,
         "incremental:done",
         format!(
             "incremental replacement complete; dangling_edges={}",

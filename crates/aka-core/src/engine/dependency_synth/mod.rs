@@ -115,14 +115,13 @@ pub(super) fn synthesize_dependency_edges_from_sources(
     let lookup = NodeLookup::new(by_file.values().flatten().copied());
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    let mut processed = 0u64;
     on_progress(DependencyProgress {
         current: 0,
         total,
         phase: DependencyProgressPhase::Start,
     });
-    for (file_path, file_nodes) in by_file {
-        processed += 1;
+    for (file_index, (file_path, file_nodes)) in by_file.into_iter().enumerate() {
+        let processed = file_index as u64 + 1;
         let file_start = Instant::now();
         on_progress(DependencyProgress {
             current: processed,
