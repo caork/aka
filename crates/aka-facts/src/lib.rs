@@ -9,6 +9,13 @@ use std::io::BufRead;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub mod producer;
+
+pub use producer::{
+    produce_semantic_batch, produce_semantic_into, replay_semantic_bundle_into, ProducerCapability,
+    ProducerContext, SemanticFactBundleBuilder, SemanticFactProducer, SemanticFactSink,
+};
+
 pub const FACTS_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

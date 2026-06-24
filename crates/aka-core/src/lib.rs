@@ -8,8 +8,12 @@ pub mod registry;
 pub mod types;
 
 pub use aka_facts::{
-    ChunkFact, EdgeFact, FactBatch, FactItem, FactManifest, FactRecord, FactSource,
-    FactSourceError, FactStats, NodeFact, FACTS_VERSION,
+    produce_semantic_batch, produce_semantic_into, replay_semantic_bundle_into, ChunkFact,
+    EdgeFact, FactBatch, FactItem, FactManifest, FactRecord, FactSink, FactSource, FactSourceError,
+    FactStats, FileFact, JsonMap, NodeFact, OccurrenceFact, OccurrenceRole, ProducerCapability,
+    ProducerContext, RelationFact, RelationKind, SemanticFactBundle, SemanticFactBundleBuilder,
+    SemanticFactProducer, SemanticFactSink, SymbolFact, SymbolId, SymbolKind, TextRange,
+    FACTS_VERSION,
 };
 pub use artifact::{ArtifactDir, ArtifactError, NdjsonIter};
 pub use engine::{AnalyzeFactsOptions, EngineError, EngineRunner};
