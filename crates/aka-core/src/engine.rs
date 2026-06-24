@@ -25,7 +25,10 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, Row};
 use serde_json::{json, Map, Value};
 
-use crate::types::{ArtifactStats, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION};
+use crate::artifact::ArtifactDir;
+use crate::types::{
+    ArtifactStats, ChunkRec, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION,
+};
 use crate::user_facing_path;
 
 mod build_config_scan;
@@ -152,12 +155,76 @@ pub enum EngineError {
     Json(#[from] serde_json::Error),
     #[error("engine produced no project row in {0}")]
     MissingProject(PathBuf),
+    #[error("engine facts incomplete at {path}: {reason}")]
+    IncompleteFacts { path: PathBuf, reason: String },
 }
 
 /// Native AKA engine runner.
 pub struct EngineRunner {
     engine_dir: PathBuf,
     engine_bin: PathBuf,
+}
+
+/// Replayable facts emitted by the engine.
+///
+/// The current fallback variant adapts the legacy engine SQLite -> artifact
+/// export into `FactSource`. The direct native engine integration should add
+/// another variant here without changing callers in the runtime/indexer.
+pub enum EngineFacts {
+    LegacyArtifact(ArtifactDir),
+}
+
+impl EngineFacts {
+    pub fn stats(&self) -> &ArtifactStats {
+        match self {
+            Self::LegacyArtifact(artifact) => &artifact.manifest.stats,
+        }
+    }
+
+    pub fn transport_name(&self) -> &'static str {
+        match self {
+            Self::LegacyArtifact(_) => "legacy-artifact",
+        }
+    }
+}
+
+impl aka_facts::FactSource for EngineFacts {
+    fn stats(&self) -> &aka_facts::FactStats {
+        self.stats()
+    }
+
+    fn nodes(
+        &self,
+    ) -> Result<
+        Box<dyn Iterator<Item = aka_facts::FactItem<NodeRec>> + '_>,
+        aka_facts::FactSourceError,
+    > {
+        match self {
+            Self::LegacyArtifact(artifact) => aka_facts::FactSource::nodes(artifact),
+        }
+    }
+
+    fn edges(
+        &self,
+    ) -> Result<
+        Box<dyn Iterator<Item = aka_facts::FactItem<EdgeRec>> + '_>,
+        aka_facts::FactSourceError,
+    > {
+        match self {
+            Self::LegacyArtifact(artifact) => aka_facts::FactSource::edges(artifact),
+        }
+    }
+
+    fn chunks(
+        &self,
+    ) -> Result<
+        Option<Box<dyn Iterator<Item = aka_facts::FactItem<ChunkRec>> + '_>>,
+        aka_facts::FactSourceError,
+    > {
+        match self {
+            Self::LegacyArtifact(artifact) => aka_facts::FactSource::chunks(artifact),
+        }
+    }
 }
 
 enum EngineLine {
@@ -426,6 +493,68 @@ impl EngineRunner {
         on_event(&done);
         Ok(stats)
     }
+
+    /// Run the engine and return replayable facts for graph/search indexing.
+    ///
+    /// This is the runtime-facing API for the fused pipeline. Today it wraps
+    /// the legacy artifact adapter; direct FFI/streaming producers can replace
+    /// this implementation without pushing artifact knowledge back into
+    /// callers.
+    pub fn analyze_facts(
+        &self,
+        repo: &Path,
+        legacy_out_dir: &Path,
+        cache_dir: Option<&Path>,
+        no_chunks: bool,
+        mut on_event: impl FnMut(&EngineEvent),
+    ) -> Result<EngineFacts, EngineError> {
+        let stats = self.analyze(repo, legacy_out_dir, cache_dir, no_chunks, |event| {
+            on_event(event);
+        })?;
+        let artifact = open_legacy_artifact_after_emit(legacy_out_dir, &stats)?;
+        Ok(EngineFacts::LegacyArtifact(artifact))
+    }
+}
+
+fn open_legacy_artifact_after_emit(
+    artifact_dir: &Path,
+    expected_stats: &ArtifactStats,
+) -> Result<ArtifactDir, EngineError> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let reason = loop {
+        let err = match ArtifactDir::open(artifact_dir) {
+            Ok(artifact) => {
+                let stats = &artifact.manifest.stats;
+                if stats.files == expected_stats.files
+                    && stats.nodes == expected_stats.nodes
+                    && stats.edges == expected_stats.edges
+                    && stats.chunks == expected_stats.chunks
+                {
+                    return Ok(artifact);
+                }
+                format!(
+                    "manifest stats do not match engine done event (manifest: files={} nodes={} edges={} chunks={}, done: files={} nodes={} edges={} chunks={})",
+                    stats.files,
+                    stats.nodes,
+                    stats.edges,
+                    stats.chunks,
+                    expected_stats.files,
+                    expected_stats.nodes,
+                    expected_stats.edges,
+                    expected_stats.chunks,
+                )
+            }
+            Err(err) => err.to_string(),
+        };
+        if Instant::now() >= deadline {
+            break err;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    Err(EngineError::IncompleteFacts {
+        path: artifact_dir.to_path_buf(),
+        reason,
+    })
 }
 
 fn engine_exe_names() -> &'static [&'static str] {

@@ -6,64 +6,18 @@ pub mod indexer;
 mod rename;
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use aka_core::{
-    build_parse_cache_manifest, load_index_state, registry::now_unix, save_index_state,
-    save_parse_cache_manifest, user_facing_path, ArtifactDir, EngineEvent, EngineRunner,
-    IndexDelta, IndexState, Registry, RepoEntry, RepoPaths,
+    build_parse_cache_manifest_from_facts, load_index_state, load_parse_cache_manifest,
+    registry::now_unix, save_index_state, save_parse_cache_manifest, user_facing_path, ArtifactDir,
+    EngineEvent, EngineRunner, FactSource, FactStats, IndexDelta, IndexState, Registry, RepoEntry,
+    RepoPaths,
 };
 use anyhow::{Context, Result};
 
 pub use backend::AkaBackend;
 
 pub type AnalyzeProgress<'a> = dyn FnMut(&EngineEvent) + 'a;
-
-fn open_artifact_after_emit(
-    artifact_dir: &Path,
-    expected_stats: &aka_core::ArtifactStats,
-) -> Result<ArtifactDir> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut last_err = anyhow::anyhow!("artifact open failed");
-    loop {
-        match ArtifactDir::open(artifact_dir) {
-            Ok(artifact) => {
-                let stats = &artifact.manifest.stats;
-                if stats.files == expected_stats.files
-                    && stats.nodes == expected_stats.nodes
-                    && stats.edges == expected_stats.edges
-                    && stats.chunks == expected_stats.chunks
-                {
-                    return Ok(artifact);
-                }
-                last_err = anyhow::anyhow!(
-                    "manifest stats do not match engine done event (manifest: files={} nodes={} edges={} chunks={}, done: files={} nodes={} edges={} chunks={})",
-                    stats.files,
-                    stats.nodes,
-                    stats.edges,
-                    stats.chunks,
-                    expected_stats.files,
-                    expected_stats.nodes,
-                    expected_stats.edges,
-                    expected_stats.chunks,
-                );
-            }
-            Err(err) => {
-                last_err = err.into();
-            }
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err(last_err).with_context(|| {
-        format!(
-            "artifact not complete after engine emit: {}",
-            artifact_dir.display()
-        )
-    })
-}
 
 /// Full analysis pipeline: engine parse -> graph/search index -> registry.
 pub fn run_analyze(path: PathBuf, engine_dir: Option<PathBuf>, no_chunks: bool) -> Result<String> {
@@ -99,7 +53,9 @@ pub fn run_analyze_with_progress(
     let previous_state = load_index_state(&paths.index_state_path())
         .with_context(|| format!("load index state {}", paths.index_state_path().display()))?;
     let delta = current_state.delta_from(previous_state.as_ref());
-    if can_reuse_existing_index(&paths, previous_state.as_ref(), &current_state)? {
+    if let Some(stats) =
+        reusable_existing_index_stats(&repo, &paths, previous_state.as_ref(), &current_state)?
+    {
         if let Some(cb) = progress.as_mut() {
             cb(&EngineEvent::Phase {
                 phase: "Reusing unchanged index".into(),
@@ -107,17 +63,15 @@ pub fn run_analyze_with_progress(
                 total: 1,
             });
         }
-        let artifact = ArtifactDir::open(&artifact_dir)?;
-        save_parse_cache_snapshot(&paths, &artifact, &current_state, delta.clone())?;
-        register(&repo, &paths, &artifact, engine_sha)?;
+        register(&repo, &paths, &stats, engine_sha)?;
         return Ok(format!(
             "aka ▸ {} 未变化：复用现有索引（{} 节点 / {} 边 / {} 切块；delta {}）",
             repo.file_name()
                 .map(|n| n.to_string_lossy())
                 .unwrap_or_default(),
-            artifact.manifest.stats.nodes,
-            artifact.manifest.stats.edges,
-            artifact.manifest.stats.chunks,
+            stats.nodes,
+            stats.edges,
+            stats.chunks,
             delta.summary(),
         ));
     }
@@ -144,7 +98,7 @@ pub fn run_analyze_with_progress(
     );
 
     let mut last_phase = String::new();
-    let stats = runner.analyze(
+    let facts = runner.analyze_facts(
         &repo,
         &artifact_dir,
         Some(&engine_cache_dir),
@@ -198,13 +152,9 @@ pub fn run_analyze_with_progress(
     if let Some(cb) = progress.as_mut() {
         cb(&EngineEvent::Log {
             stream: "runtime".into(),
-            line: format!(
-                "open legacy fact export manifest {}",
-                artifact_dir.display()
-            ),
+            line: format!("facts transport {}", facts.transport_name()),
         });
     }
-    let artifact = open_artifact_after_emit(&artifact_dir, &stats)?;
     eprintln!("aka ▸ 构建索引 …");
     let mut index_progress = |ev: indexer::IndexProgressEvent| {
         eprintln!("  · index {}: {}", ev.stage, ev.message);
@@ -222,8 +172,8 @@ pub fn run_analyze_with_progress(
     };
     let idx = match previous_state.as_ref() {
         Some(previous) if !delta.is_empty() => {
-            match indexer::index_artifact_incremental_with_progress(
-                &artifact,
+            match indexer::index_facts_incremental_with_progress(
+                &facts,
                 &paths,
                 &delta,
                 previous,
@@ -236,15 +186,11 @@ pub fn run_analyze_with_progress(
                 }
                 indexer::IncrementalIndexOutcome::FullRebuildRequired(reason) => {
                     eprintln!("  · 增量不可用，回退全量：{reason}");
-                    indexer::index_artifact_with_progress(
-                        &artifact,
-                        &paths,
-                        Some(&mut index_progress),
-                    )?
+                    indexer::index_facts_with_progress(&facts, &paths, Some(&mut index_progress))?
                 }
             }
         }
-        _ => indexer::index_artifact_with_progress(&artifact, &paths, Some(&mut index_progress))?,
+        _ => indexer::index_facts_with_progress(&facts, &paths, Some(&mut index_progress))?,
     };
     if let Some(cb) = progress.as_mut() {
         cb(&EngineEvent::Log {
@@ -255,7 +201,7 @@ pub fn run_analyze_with_progress(
             ),
         });
     }
-    save_parse_cache_snapshot(&paths, &artifact, &current_state, delta.clone())?;
+    save_parse_cache_snapshot(&paths, &facts, &current_state, delta.clone())?;
 
     if let Some(cb) = progress.as_mut() {
         cb(&EngineEvent::Phase {
@@ -264,7 +210,7 @@ pub fn run_analyze_with_progress(
             total: 0,
         });
     }
-    register(&repo, &paths, &artifact, engine_sha)?;
+    register(&repo, &paths, facts.stats(), engine_sha)?;
     if let Some(cb) = progress.as_mut() {
         cb(&EngineEvent::Log {
             stream: "runtime".into(),
@@ -298,30 +244,55 @@ pub fn run_analyze_with_progress(
     Ok(summary)
 }
 
-fn can_reuse_existing_index(
+fn reusable_existing_index_stats(
+    repo: &Path,
     paths: &RepoPaths,
     previous: Option<&IndexState>,
     current_state: &IndexState,
-) -> Result<bool> {
+) -> Result<Option<FactStats>> {
     let Some(previous) = previous else {
-        return Ok(false);
+        return Ok(None);
     };
     if !previous.is_reusable_for(current_state) {
-        return Ok(false);
+        return Ok(None);
     }
     if !paths.graph_db().is_file() || !paths.search_dir().is_dir() {
-        return Ok(false);
+        return Ok(None);
     }
-    Ok(ArtifactDir::open(paths.artifact_dir()).is_ok())
+    if let Some(manifest) = load_parse_cache_manifest(&paths.parse_cache_manifest_path())
+        .with_context(|| {
+            format!(
+                "load parse-cache manifest {}",
+                paths.parse_cache_manifest_path().display()
+            )
+        })?
+    {
+        if manifest.contract_version == current_state.contract_version
+            && manifest.engine_sha == current_state.engine_sha
+            && manifest.no_chunks == current_state.no_chunks
+        {
+            return Ok(Some(manifest.totals));
+        }
+    }
+    if let Some(entry) = Registry::load()?
+        .find(repo)
+        .filter(|entry| entry.indexed_at.is_some())
+    {
+        return Ok(Some(entry.stats.clone()));
+    }
+    if let Ok(artifact) = ArtifactDir::open(paths.artifact_dir()) {
+        return Ok(Some(artifact.manifest.stats));
+    }
+    Ok(None)
 }
 
 fn save_parse_cache_snapshot(
     paths: &RepoPaths,
-    artifact: &ArtifactDir,
+    source: &impl FactSource,
     current_state: &IndexState,
     delta: IndexDelta,
 ) -> Result<()> {
-    let manifest = build_parse_cache_manifest(artifact, current_state, delta)?;
+    let manifest = build_parse_cache_manifest_from_facts(source, current_state, delta)?;
     save_parse_cache_manifest(&paths.parse_cache_manifest_path(), &manifest).with_context(
         || {
             format!(
@@ -336,7 +307,7 @@ fn save_parse_cache_snapshot(
 fn register(
     repo: &std::path::Path,
     paths: &RepoPaths,
-    artifact: &ArtifactDir,
+    stats: &FactStats,
     engine_sha: Option<String>,
 ) -> Result<()> {
     let mut registry = Registry::load()?;
@@ -352,7 +323,7 @@ fn register(
         data_dir: paths.root.clone(),
         indexed_at: Some(now_unix()),
         engine_sha: engine_sha.or_else(|| prev.as_ref().and_then(|e| e.engine_sha.clone())),
-        stats: artifact.manifest.stats.clone(),
+        stats: stats.clone(),
         embeddings_enabled: prev.as_ref().is_some_and(|e| e.embeddings_enabled),
         source_kind: prev
             .as_ref()
@@ -370,10 +341,58 @@ pub fn run_index(path: PathBuf) -> Result<()> {
     let paths = RepoPaths::for_repo(&repo);
     let artifact = ArtifactDir::open(paths.artifact_dir()).context("工件不存在——先 aka analyze")?;
     let idx = indexer::index_artifact(&artifact, &paths)?;
-    register(&repo, &paths, &artifact, None)?;
+    register(&repo, &paths, &artifact.manifest.stats, None)?;
     eprintln!(
         "aka ▸ 重建索引完成：{} 节点 / {} 边 / {} 切块",
         idx.nodes, idx.edges, idx.chunks
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aka_core::{save_index_state, ParseCacheManifest};
+
+    #[test]
+    fn reusable_index_reads_parse_cache_stats_without_artifact_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "fn main() {}\n").unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data"),
+        };
+        std::fs::create_dir_all(paths.search_dir()).unwrap();
+        std::fs::write(paths.graph_db(), "").unwrap();
+
+        let current = IndexState::compute(&repo, Some("engine-sha".into()), false).unwrap();
+        save_index_state(&paths.index_state_path(), &current).unwrap();
+        let previous = load_index_state(&paths.index_state_path()).unwrap();
+        let expected = FactStats {
+            files: 1,
+            nodes: 3,
+            edges: 2,
+            chunks: 1,
+        };
+        save_parse_cache_manifest(
+            &paths.parse_cache_manifest_path(),
+            &ParseCacheManifest {
+                version: 1,
+                contract_version: current.contract_version,
+                engine_sha: current.engine_sha.clone(),
+                no_chunks: current.no_chunks,
+                totals: expected.clone(),
+                last_delta: current.delta_from(None),
+                files: Default::default(),
+            },
+        )
+        .unwrap();
+
+        let stats =
+            reusable_existing_index_stats(&repo, &paths, previous.as_ref(), &current).unwrap();
+
+        assert_eq!(stats, Some(expected));
+        assert!(!paths.artifact_dir().exists());
+    }
 }
