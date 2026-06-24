@@ -462,8 +462,12 @@ impl JobInfo {
                     }
                     return;
                 }
-                if phase_lc.contains("export-artifacts") {
-                    self.progress.stage = "adapter".into();
+                if phase_lc.contains("facts") || phase_lc.contains("export-artifacts") {
+                    self.progress.stage = if phase_lc.contains("export-artifacts") {
+                        "legacy-adapter".into()
+                    } else {
+                        "facts".into()
+                    };
                     self.progress.message = phase.clone();
                     self.progress.current = (*total > 0 || *current > 0).then_some(*current);
                     self.progress.total = (*total > 0).then_some(*total);
@@ -471,9 +475,9 @@ impl JobInfo {
                         .max(self.progress.percent)
                         .min(92.0);
                     if *total > 0 {
-                        self.push_log(format!("adapter: {phase} ({current}/{total})"));
+                        self.push_log(format!("facts: {phase} ({current}/{total})"));
                     } else {
-                        self.push_log(format!("adapter: {phase}"));
+                        self.push_log(format!("facts: {phase}"));
                     }
                     return;
                 }
@@ -698,7 +702,7 @@ fn run_analyze_job(
     crate::run_analyze_with_progress(repo, engine_dir, false, Some(&mut on_progress))
         .map_err(|e| anyhow!("{e:#}"))?;
     update_job(jobs, name, |job| {
-        job.set_stage("index", "Index artifacts ready", 96.0);
+        job.set_stage("index", "Facts indexed", 96.0);
         job.push_log("runtime: analyze pipeline returned successfully");
     });
     Ok(())
@@ -3635,7 +3639,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_progress_tracks_synthesis_before_artifact_writes() {
+    fn facts_progress_tracks_synthesis_before_legacy_writes() {
         let synth_nodes = adapter_percent("aka-engine:export-artifacts:synthesize:nodes", 0, 0);
         let deps_start = adapter_percent(
             "aka-engine:export-artifacts:synthesize:dependency-edges",
@@ -3659,7 +3663,7 @@ mod tests {
     #[test]
     fn completed_jobs_report_ready_at_one_hundred_percent() {
         let mut job = JobInfo::new("local", None, PathBuf::from("/tmp/repo"));
-        job.set_stage("adapter", "Writing artifacts", 91.0);
+        job.set_stage("facts", "Writing facts", 91.0);
 
         job.mark_done();
 
@@ -3682,7 +3686,7 @@ mod tests {
         });
         job.apply_engine_event(&EngineEvent::Log {
             stream: "index".into(),
-            line: "graph:edges: ingesting 8 artifact edges".into(),
+            line: "graph:edges: ingesting 8 fact edges".into(),
         });
 
         assert_eq!(job.progress.stage, "graph:edges");
@@ -3698,7 +3702,7 @@ mod tests {
             .progress
             .logs
             .iter()
-            .any(|line| line.contains("[index] graph:edges: ingesting 8 artifact edges")));
+            .any(|line| line.contains("[index] graph:edges: ingesting 8 fact edges")));
     }
 
     #[test]

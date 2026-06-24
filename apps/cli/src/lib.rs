@@ -198,7 +198,10 @@ pub fn run_analyze_with_progress(
     if let Some(cb) = progress.as_mut() {
         cb(&EngineEvent::Log {
             stream: "runtime".into(),
-            line: format!("open emitted artifact manifest {}", artifact_dir.display()),
+            line: format!(
+                "open legacy fact export manifest {}",
+                artifact_dir.display()
+            ),
         });
     }
     let artifact = open_artifact_after_emit(&artifact_dir, &stats)?;

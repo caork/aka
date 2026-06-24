@@ -3,7 +3,7 @@ import type { Repo } from "./store";
 export const INDEX_PHASES = [
   { key: "queued", label: "Queued" },
   { key: "engine", label: "Parse" },
-  { key: "adapter", label: "Artifacts" },
+  { key: "facts", label: "Facts" },
   { key: "index", label: "Index" },
   { key: "register", label: "Register" },
 ] as const;
@@ -64,7 +64,13 @@ export function indexPhaseLabel(stage: string | null | undefined): string {
   ) {
     return "Index";
   }
-  if (normalized.includes("adapter") || normalized.includes("artifact")) return "Artifacts";
+  if (
+    normalized.includes("facts") ||
+    normalized.includes("adapter") ||
+    normalized.includes("artifact")
+  ) {
+    return "Facts";
+  }
   if (normalized.includes("queued")) return "Queued";
   return "Parse";
 }
