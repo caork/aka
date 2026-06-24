@@ -15,28 +15,38 @@ use serde_json::Value;
 
 use crate::types::{ChunkRec, EdgeRec, EngineEvent, NodeRec};
 
-use super::{emit_phase, find_single_project_db, EngineError};
+use super::{emit_phase, find_single_project_db, EngineError, EngineRunner};
 
+#[cfg(test)]
 pub(super) struct EngineFactRequest {
     pub(super) facts_output_path: Option<PathBuf>,
 }
 
 pub(super) enum ProducedEngineFacts {
     DirectFacts,
-    EngineDbFallback { project: String, db_path: PathBuf },
+    EngineDbFallback {
+        engine_repo: PathBuf,
+        project: String,
+        db_path: PathBuf,
+    },
 }
 
 pub(super) trait EngineFactProducer {
-    fn prepare(&self, cache_root: &Path) -> Result<EngineFactRequest, EngineError>;
-
-    fn finish(
+    fn produce(
         &self,
-        cache_root: &Path,
-        engine_repo: &Path,
-        no_chunks: bool,
+        runner: &EngineRunner,
+        repo: &Path,
+        options: EngineFactOptions<'_>,
         sink: &mut dyn FactSink<Error = FactSourceError>,
         on_event: &mut dyn FnMut(&EngineEvent),
     ) -> Result<ProducedEngineFacts, EngineError>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EngineFactOptions<'a> {
+    pub(super) cache_dir: Option<&'a Path>,
+    pub(super) debug_artifact_dir: Option<&'a Path>,
+    pub(super) no_chunks: bool,
 }
 
 #[derive(Debug, Default)]
@@ -48,10 +58,9 @@ impl SidecarEngineFactProducer {
     fn sidecar_path(cache_root: &Path) -> PathBuf {
         cache_root.join(Self::SIDECAR_FILE)
     }
-}
 
-impl EngineFactProducer for SidecarEngineFactProducer {
-    fn prepare(&self, cache_root: &Path) -> Result<EngineFactRequest, EngineError> {
+    #[cfg(test)]
+    fn prepare_sidecar_request(&self, cache_root: &Path) -> Result<EngineFactRequest, EngineError> {
         let sidecar_path = Self::sidecar_path(cache_root);
         let _ = std::fs::remove_file(&sidecar_path);
         Ok(EngineFactRequest {
@@ -59,7 +68,19 @@ impl EngineFactProducer for SidecarEngineFactProducer {
         })
     }
 
-    fn finish(
+    #[cfg(test)]
+    fn finish_after_engine(
+        &self,
+        cache_root: &Path,
+        engine_repo: &Path,
+        no_chunks: bool,
+        sink: &mut dyn FactSink<Error = FactSourceError>,
+        on_event: &mut dyn FnMut(&EngineEvent),
+    ) -> Result<ProducedEngineFacts, EngineError> {
+        self.finish_after_engine_inner(cache_root, engine_repo, no_chunks, sink, on_event)
+    }
+
+    fn finish_after_engine_inner(
         &self,
         cache_root: &Path,
         engine_repo: &Path,
@@ -87,7 +108,36 @@ impl EngineFactProducer for SidecarEngineFactProducer {
                 db_path.display()
             ),
         });
-        Ok(ProducedEngineFacts::EngineDbFallback { project, db_path })
+        Ok(ProducedEngineFacts::EngineDbFallback {
+            engine_repo: engine_repo.to_path_buf(),
+            project,
+            db_path,
+        })
+    }
+}
+
+impl EngineFactProducer for SidecarEngineFactProducer {
+    fn produce(
+        &self,
+        runner: &EngineRunner,
+        repo: &Path,
+        options: EngineFactOptions<'_>,
+        sink: &mut dyn FactSink<Error = FactSourceError>,
+        on_event: &mut dyn FnMut(&EngineEvent),
+    ) -> Result<ProducedEngineFacts, EngineError> {
+        let cache_root =
+            super::engine_cache_root(repo, options.debug_artifact_dir, options.cache_dir);
+        std::fs::create_dir_all(&cache_root)?;
+        let sidecar_path = Self::sidecar_path(&cache_root);
+        let _ = std::fs::remove_file(&sidecar_path);
+        let (cache_root, engine_repo) = runner.run_engine_index(
+            repo,
+            options.debug_artifact_dir,
+            options.cache_dir,
+            Some(&sidecar_path),
+            on_event,
+        )?;
+        self.finish_after_engine_inner(&cache_root, &engine_repo, options.no_chunks, sink, on_event)
     }
 }
 
@@ -99,11 +149,11 @@ fn read_engine_facts_sidecar(
 ) -> Result<FactBatch, EngineError> {
     let file = File::open(path)?;
     let mut batch = read_complete_fact_records_ndjson(BufReader::new(file))?;
-    normalize_engine_sidecar_facts(&mut batch, repo, no_chunks, on_event);
+    normalize_engine_facts(&mut batch, repo, no_chunks, on_event);
     Ok(batch)
 }
 
-fn normalize_engine_sidecar_facts(
+pub(super) fn normalize_engine_facts(
     batch: &mut FactBatch,
     repo: &Path,
     no_chunks: bool,
@@ -333,7 +383,7 @@ mod tests {
         let mut sink = aka_facts::FactBatchBuilder::new();
 
         let produced = SidecarEngineFactProducer
-            .finish(&cache, &repo, false, &mut sink, &mut |event| match event {
+            .finish_after_engine(&cache, &repo, false, &mut sink, &mut |event| match event {
                 EngineEvent::Phase { phase, .. } => events.push(phase.clone()),
                 EngineEvent::Log { line, .. } => events.push(line.clone()),
                 _ => {}
@@ -416,7 +466,9 @@ mod tests {
         let stale = SidecarEngineFactProducer::sidecar_path(&cache);
         std::fs::write(&stale, "stale").unwrap();
 
-        let request = SidecarEngineFactProducer.prepare(&cache).unwrap();
+        let request = SidecarEngineFactProducer
+            .prepare_sidecar_request(&cache)
+            .unwrap();
 
         assert_eq!(request.facts_output_path, Some(stale.clone()));
         assert!(!stale.exists());

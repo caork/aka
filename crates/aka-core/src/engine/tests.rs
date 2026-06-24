@@ -89,6 +89,25 @@ fn insert_node_props_at(
         .unwrap();
 }
 
+#[test]
+fn embedded_engine_request_env_is_explicit_opt_in() {
+    std::env::remove_var("AKA_ENGINE_EMBEDDED");
+    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Disabled);
+
+    std::env::set_var("AKA_ENGINE_EMBEDDED", "1");
+    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Enabled);
+
+    std::env::set_var("AKA_ENGINE_EMBEDDED", "true");
+    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Enabled);
+
+    std::env::set_var("AKA_ENGINE_EMBEDDED", "require");
+    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Required);
+
+    std::env::set_var("AKA_ENGINE_EMBEDDED", "0");
+    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Disabled);
+    std::env::remove_var("AKA_ENGINE_EMBEDDED");
+}
+
 fn insert_function_node_props_at(
     conn: &Connection,
     id: i64,

@@ -38,6 +38,8 @@ mod cache_synth;
 mod command_synth;
 mod config_synth;
 mod dependency_synth;
+#[cfg(all(feature = "embedded-engine", not(windows)))]
+mod embedded;
 mod event_synth;
 mod fact_producer;
 mod graphql_synth;
@@ -78,8 +80,12 @@ use config_synth::{synthesize_configs_from_sources, SynthConfig};
 use dependency_synth::{
     synthesize_dependency_edges_from_sources, DependencyProgress, DependencyProgressPhase,
 };
+#[cfg(all(feature = "embedded-engine", not(windows)))]
+use embedded::EmbeddedEngineFactProducer;
 use event_synth::{synthesize_events_from_sources, SynthEvent};
-use fact_producer::{EngineFactProducer, ProducedEngineFacts, SidecarEngineFactProducer};
+use fact_producer::{
+    EngineFactOptions, EngineFactProducer, ProducedEngineFacts, SidecarEngineFactProducer,
+};
 use graphql_synth::{synthesize_graphql_from_sources, SynthGraphqlOperation};
 use job_synth::{job_entry_hints_from_sources, synthesize_jobs_from_sources, SynthJob};
 use persistence_synth::{synthesize_persistence_from_sources, SynthPersistenceGraph};
@@ -359,7 +365,7 @@ impl EngineRunner {
         fallback_out_dir: Option<&Path>,
         cache_dir: Option<&Path>,
         facts_output_path: Option<&Path>,
-        on_event: &mut impl FnMut(&EngineEvent),
+        on_event: &mut (impl FnMut(&EngineEvent) + ?Sized),
     ) -> Result<(PathBuf, PathBuf), EngineError> {
         let cache_root = engine_cache_root(repo, fallback_out_dir, cache_dir);
         std::fs::create_dir_all(&cache_root)?;
@@ -543,28 +549,20 @@ impl EngineRunner {
         options: AnalyzeFactsOptions<'_>,
         mut on_event: impl FnMut(&EngineEvent),
     ) -> Result<EngineFacts, EngineError> {
-        let cache_root = engine_cache_root(repo, options.debug_artifact_dir, options.cache_dir);
-        std::fs::create_dir_all(&cache_root)?;
-        let producer = SidecarEngineFactProducer;
-        let request = producer.prepare(&cache_root)?;
-        let (cache_root, engine_repo) = self.run_engine_index(
-            repo,
-            options.debug_artifact_dir,
-            options.cache_dir,
-            request.facts_output_path.as_deref(),
-            &mut on_event,
-        )?;
         let mut sink = FactBatchBuilder::new();
-        let produced = producer.finish(
-            &cache_root,
-            &engine_repo,
-            options.no_chunks,
-            &mut sink,
-            &mut on_event,
-        )?;
+        let fact_options = EngineFactOptions {
+            cache_dir: options.cache_dir,
+            debug_artifact_dir: options.debug_artifact_dir,
+            no_chunks: options.no_chunks,
+        };
+        let produced = self.produce_engine_facts(repo, fact_options, &mut sink, &mut on_event)?;
         let batch = match produced {
             ProducedEngineFacts::DirectFacts => sink.finish(),
-            ProducedEngineFacts::EngineDbFallback { project, db_path } => collect_engine_facts(
+            ProducedEngineFacts::EngineDbFallback {
+                engine_repo,
+                project,
+                db_path,
+            } => collect_engine_facts(
                 &engine_repo,
                 &db_path,
                 &project,
@@ -577,6 +575,64 @@ impl EngineRunner {
         };
         on_event(&done);
         Ok(EngineFacts::DirectBatch(batch))
+    }
+
+    fn produce_engine_facts(
+        &self,
+        repo: &Path,
+        options: EngineFactOptions<'_>,
+        sink: &mut FactBatchBuilder,
+        on_event: &mut dyn FnMut(&EngineEvent),
+    ) -> Result<ProducedEngineFacts, EngineError> {
+        match embedded_engine_request() {
+            EmbeddedEngineRequest::Disabled => {
+                SidecarEngineFactProducer.produce(self, repo, options, sink, on_event)
+            }
+            EmbeddedEngineRequest::Enabled => {
+                #[cfg(all(feature = "embedded-engine", not(windows)))]
+                {
+                    EmbeddedEngineFactProducer.produce(repo, options, sink, on_event)
+                }
+                #[cfg(any(not(feature = "embedded-engine"), windows))]
+                {
+                    on_event(&EngineEvent::Log {
+                        stream: "engine".into(),
+                        line: "AKA_ENGINE_EMBEDDED requested but aka-core was built without embedded-engine; falling back to binary engine".into(),
+                    });
+                    SidecarEngineFactProducer.produce(self, repo, options, sink, on_event)
+                }
+            }
+            EmbeddedEngineRequest::Required => {
+                #[cfg(all(feature = "embedded-engine", not(windows)))]
+                {
+                    EmbeddedEngineFactProducer.produce(repo, options, sink, on_event)
+                }
+                #[cfg(any(not(feature = "embedded-engine"), windows))]
+                {
+                    Err(EngineError::Facts(aka_facts::FactSourceError::Message(
+                        "AKA_ENGINE_EMBEDDED=require but embedded engine is unavailable for this build"
+                            .into(),
+                    )))
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbeddedEngineRequest {
+    Disabled,
+    Enabled,
+    Required,
+}
+
+fn embedded_engine_request() -> EmbeddedEngineRequest {
+    match std::env::var("AKA_ENGINE_EMBEDDED") {
+        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => {
+            EmbeddedEngineRequest::Enabled
+        }
+        Ok(value) if value.eq_ignore_ascii_case("require") => EmbeddedEngineRequest::Required,
+        _ => EmbeddedEngineRequest::Disabled,
     }
 }
 
@@ -662,7 +718,7 @@ enum SynthWorkerMessage<T> {
 }
 
 fn synthesize_with_timeout_and_progress<T, F>(
-    on_event: &mut impl FnMut(&EngineEvent),
+    on_event: &mut (impl FnMut(&EngineEvent) + ?Sized),
     phase: &str,
     timeout: Duration,
     default: T,
