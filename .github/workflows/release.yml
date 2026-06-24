@@ -23,7 +23,7 @@ permissions:
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/aka
   AKA_ENGINE_REPO: https://github.com/caork/aka-engine.git
-  AKA_ENGINE_REF: 5574a875c07741b66fdd18ae4a3048ad778baeb6
+  AKA_ENGINE_REF: f96acdd9d96687965071cfaa1bd1c977cf950488
 
 jobs:
   macos-desktop:

@@ -40,7 +40,7 @@ RUN cargo build --release -p aka-cli --target x86_64-unknown-linux-gnu && \
 # ---------- Stage 2: native AKA engine ----------
 FROM debian:bookworm AS engine-builder
 ARG AKA_ENGINE_REPO=https://github.com/caork/aka-engine.git
-ARG AKA_ENGINE_REF=5574a875c07741b66fdd18ae4a3048ad778baeb6
+ARG AKA_ENGINE_REF=f96acdd9d96687965071cfaa1bd1c977cf950488
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates git build-essential pkg-config zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
