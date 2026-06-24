@@ -25,6 +25,8 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, Row};
 use serde_json::{json, Map, Value};
 
+use aka_facts::FactBatch;
+
 use crate::artifact::ArtifactDir;
 use crate::types::{
     ArtifactStats, ChunkRec, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION,
@@ -155,8 +157,6 @@ pub enum EngineError {
     Json(#[from] serde_json::Error),
     #[error("engine produced no project row in {0}")]
     MissingProject(PathBuf),
-    #[error("engine facts incomplete at {path}: {reason}")]
-    IncompleteFacts { path: PathBuf, reason: String },
 }
 
 /// Native AKA engine runner.
@@ -167,22 +167,24 @@ pub struct EngineRunner {
 
 /// Replayable facts emitted by the engine.
 ///
-/// The current fallback variant adapts the legacy engine SQLite -> artifact
-/// export into `FactSource`. The direct native engine integration should add
-/// another variant here without changing callers in the runtime/indexer.
+/// The indexing hot path consumes direct engine facts. The legacy artifact
+/// variant is kept for compatibility/debug callers that still need files on disk.
 pub enum EngineFacts {
+    DirectBatch(FactBatch),
     LegacyArtifact(ArtifactDir),
 }
 
 impl EngineFacts {
     pub fn stats(&self) -> &ArtifactStats {
         match self {
+            Self::DirectBatch(batch) => &batch.stats,
             Self::LegacyArtifact(artifact) => &artifact.manifest.stats,
         }
     }
 
     pub fn transport_name(&self) -> &'static str {
         match self {
+            Self::DirectBatch(_) => "engine-sqlite-direct",
             Self::LegacyArtifact(_) => "legacy-artifact",
         }
     }
@@ -200,6 +202,7 @@ impl aka_facts::FactSource for EngineFacts {
         aka_facts::FactSourceError,
     > {
         match self {
+            Self::DirectBatch(batch) => aka_facts::FactSource::nodes(batch),
             Self::LegacyArtifact(artifact) => aka_facts::FactSource::nodes(artifact),
         }
     }
@@ -211,6 +214,7 @@ impl aka_facts::FactSource for EngineFacts {
         aka_facts::FactSourceError,
     > {
         match self {
+            Self::DirectBatch(batch) => aka_facts::FactSource::edges(batch),
             Self::LegacyArtifact(artifact) => aka_facts::FactSource::edges(artifact),
         }
     }
@@ -222,6 +226,7 @@ impl aka_facts::FactSource for EngineFacts {
         aka_facts::FactSourceError,
     > {
         match self {
+            Self::DirectBatch(batch) => aka_facts::FactSource::chunks(batch),
             Self::LegacyArtifact(artifact) => aka_facts::FactSource::chunks(artifact),
         }
     }
@@ -310,12 +315,48 @@ impl EngineRunner {
         mut on_event: impl FnMut(&EngineEvent),
     ) -> Result<ArtifactStats, EngineError> {
         std::fs::create_dir_all(out_dir)?;
-        let cache_root = cache_dir
-            .map(|p| p.join("aka-engine"))
-            .unwrap_or_else(|| out_dir.join(".aka-engine-cache"));
+        let (cache_root, engine_repo) =
+            self.run_engine_index(repo, Some(out_dir), cache_dir, &mut on_event)?;
+
+        emit_phase(&mut on_event, "aka-engine:export-artifacts", 0, 0);
+        let (project, db_path) = find_single_project_db(&cache_root, &engine_repo)?;
+        on_event(&EngineEvent::Log {
+            stream: "adapter".into(),
+            line: format!(
+                "using engine db project={project} path={}",
+                db_path.display()
+            ),
+        });
+        let stats = export_artifacts(
+            &engine_repo,
+            out_dir,
+            &db_path,
+            &project,
+            no_chunks,
+            &mut on_event,
+        )?;
+        let done = EngineEvent::Done {
+            stats: stats.clone(),
+        };
+        on_event(&done);
+        Ok(stats)
+    }
+
+    fn run_engine_index(
+        &self,
+        repo: &Path,
+        fallback_out_dir: Option<&Path>,
+        cache_dir: Option<&Path>,
+        on_event: &mut impl FnMut(&EngineEvent),
+    ) -> Result<(PathBuf, PathBuf), EngineError> {
+        let cache_root = cache_dir.map(|p| p.join("aka-engine")).unwrap_or_else(|| {
+            fallback_out_dir
+                .map(|p| p.join(".aka-engine-cache"))
+                .unwrap_or_else(|| repo.join(".aka-engine-cache"))
+        });
         std::fs::create_dir_all(&cache_root)?;
 
-        emit_phase(&mut on_event, "aka-engine:index", 0, 0);
+        emit_phase(on_event, "aka-engine:index", 0, 0);
         let mode = engine_mode();
         let engine_repo = user_facing_path(repo);
         let engine_repo = engine_repo
@@ -406,7 +447,7 @@ impl EngineRunner {
                     }
                     last_line_at = Instant::now();
                     if let Some(phase) = parse_engine_progress_phase(&line) {
-                        emit_phase(&mut on_event, phase, 0, 0);
+                        emit_phase(on_event, phase, 0, 0);
                     }
                     push_tail(&mut stderr_tail, line.clone(), 120);
                     on_event(&EngineEvent::Log {
@@ -450,7 +491,7 @@ impl EngineRunner {
                 }
                 EngineLine::Stderr(line) if !line.trim().is_empty() => {
                     if let Some(phase) = parse_engine_progress_phase(&line) {
-                        emit_phase(&mut on_event, phase, 0, 0);
+                        emit_phase(on_event, phase, 0, 0);
                     }
                     push_tail(&mut stderr_tail, line.clone(), 120);
                     on_event(&EngineEvent::Log {
@@ -477,28 +518,13 @@ impl EngineRunner {
             });
         }
 
-        emit_phase(&mut on_event, "aka-engine:export-artifacts", 0, 0);
-        let (project, db_path) = find_single_project_db(&cache_root, repo)?;
-        on_event(&EngineEvent::Log {
-            stream: "adapter".into(),
-            line: format!(
-                "using engine db project={project} path={}",
-                db_path.display()
-            ),
-        });
-        let stats = export_artifacts(repo, out_dir, &db_path, &project, no_chunks, &mut on_event)?;
-        let done = EngineEvent::Done {
-            stats: stats.clone(),
-        };
-        on_event(&done);
-        Ok(stats)
+        Ok((cache_root, engine_repo))
     }
 
     /// Run the engine and return replayable facts for graph/search indexing.
     ///
-    /// This is the runtime-facing API for the fused pipeline. Today it wraps
-    /// the legacy artifact adapter; direct FFI/streaming producers can replace
-    /// this implementation without pushing artifact knowledge back into
+    /// This is the runtime-facing API for the fused pipeline. It bypasses
+    /// NDJSON artifact export and returns a replayable fact source directly to
     /// callers.
     pub fn analyze_facts(
         &self,
@@ -508,53 +534,25 @@ impl EngineRunner {
         no_chunks: bool,
         mut on_event: impl FnMut(&EngineEvent),
     ) -> Result<EngineFacts, EngineError> {
-        let stats = self.analyze(repo, legacy_out_dir, cache_dir, no_chunks, |event| {
-            on_event(event);
-        })?;
-        let artifact = open_legacy_artifact_after_emit(legacy_out_dir, &stats)?;
-        Ok(EngineFacts::LegacyArtifact(artifact))
-    }
-}
-
-fn open_legacy_artifact_after_emit(
-    artifact_dir: &Path,
-    expected_stats: &ArtifactStats,
-) -> Result<ArtifactDir, EngineError> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let reason = loop {
-        let err = match ArtifactDir::open(artifact_dir) {
-            Ok(artifact) => {
-                let stats = &artifact.manifest.stats;
-                if stats.files == expected_stats.files
-                    && stats.nodes == expected_stats.nodes
-                    && stats.edges == expected_stats.edges
-                    && stats.chunks == expected_stats.chunks
-                {
-                    return Ok(artifact);
-                }
-                format!(
-                    "manifest stats do not match engine done event (manifest: files={} nodes={} edges={} chunks={}, done: files={} nodes={} edges={} chunks={})",
-                    stats.files,
-                    stats.nodes,
-                    stats.edges,
-                    stats.chunks,
-                    expected_stats.files,
-                    expected_stats.nodes,
-                    expected_stats.edges,
-                    expected_stats.chunks,
-                )
-            }
-            Err(err) => err.to_string(),
+        std::fs::create_dir_all(legacy_out_dir)?;
+        let (cache_root, engine_repo) =
+            self.run_engine_index(repo, Some(legacy_out_dir), cache_dir, &mut on_event)?;
+        let (project, db_path) = find_single_project_db(&cache_root, &engine_repo)?;
+        on_event(&EngineEvent::Log {
+            stream: "facts".into(),
+            line: format!(
+                "using engine db project={project} path={}",
+                db_path.display()
+            ),
+        });
+        let batch =
+            collect_engine_facts(&engine_repo, &db_path, &project, no_chunks, &mut on_event)?;
+        let done = EngineEvent::Done {
+            stats: batch.stats.clone(),
         };
-        if Instant::now() >= deadline {
-            break err;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    Err(EngineError::IncompleteFacts {
-        path: artifact_dir.to_path_buf(),
-        reason,
-    })
+        on_event(&done);
+        Ok(EngineFacts::DirectBatch(batch))
+    }
 }
 
 fn engine_exe_names() -> &'static [&'static str] {
@@ -1051,6 +1049,54 @@ fn export_artifacts(
     Ok(stats)
 }
 
+fn collect_engine_facts(
+    repo: &Path,
+    db_path: &Path,
+    project: &str,
+    no_chunks: bool,
+    on_event: &mut impl FnMut(&EngineEvent),
+) -> Result<FactBatch, EngineError> {
+    let conn = open_engine_db(db_path)?;
+    emit_phase(on_event, "aka-engine:facts:inspect-db", 0, 0);
+    let db_counts = ArtifactStats {
+        files: count_files(&conn, project)?,
+        nodes: count_nodes(&conn, project)?,
+        edges: count_edges(&conn, project)?,
+        chunks: count_chunkable_nodes(&conn, project)?,
+    };
+    if let Err(err) = warn_missing_source_extensions(repo, &conn, project, on_event) {
+        on_event(&EngineEvent::Warning {
+            message: format!("source language coverage check failed: {err}"),
+        });
+    }
+
+    emit_phase(
+        on_event,
+        format!(
+            "aka-engine:facts:synthesize-graph ({} nodes / {} edges)",
+            db_counts.nodes, db_counts.edges
+        ),
+        0,
+        0,
+    );
+    let synth = synthesize_graph_with_progress(&conn, project, repo, on_event)?;
+
+    let nodes = collect_nodes(&conn, project, &synth, db_counts.nodes, on_event)?;
+    let edges = collect_edges(&conn, project, &synth, db_counts.edges, on_event)?;
+    let chunks = if no_chunks {
+        Vec::new()
+    } else {
+        collect_chunks(&conn, project, repo, db_counts.chunks, on_event)?
+    };
+    let stats = ArtifactStats {
+        files: db_counts.files,
+        nodes: nodes.len() as u64,
+        edges: edges.len() as u64,
+        chunks: chunks.len() as u64,
+    };
+    Ok(FactBatch::new(stats, nodes, edges, chunks))
+}
+
 fn count_nodes(conn: &Connection, project: &str) -> Result<u64, rusqlite::Error> {
     conn.query_row(
         "SELECT COUNT(*) FROM nodes WHERE project = ?1",
@@ -1275,18 +1321,29 @@ fn export_nodes(
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:nodes:query",
-        0,
-        total,
-    );
+    let nodes = collect_nodes(conn, project, synth, total, on_event)?;
+    for node in &nodes {
+        serde_json::to_writer(&mut out, node)?;
+        out.write_all(b"\n")?;
+    }
+    Ok(nodes.len() as u64)
+}
+
+fn collect_nodes(
+    conn: &Connection,
+    project: &str,
+    synth: &SynthGraph,
+    total: u64,
+    on_event: &mut impl FnMut(&EngineEvent),
+) -> Result<Vec<NodeRec>, EngineError> {
+    emit_phase(on_event, "aka-engine:facts:nodes:query", 0, total);
     let mut stmt = conn.prepare(
         "SELECT id, label, name, qualified_name, file_path, start_line, end_line, properties \
          FROM nodes WHERE project = ?1 ORDER BY id",
     )?;
     let mut rows = stmt.query([project])?;
     let mut count = 0;
+    let mut nodes = Vec::new();
     let mut progress = ExportProgress::new("nodes", total);
     while let Some(row) = rows.next()? {
         let cbm_id: i64 = row.get(0)?;
@@ -1327,45 +1384,29 @@ fn export_nodes(
             label,
             properties,
         };
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(node);
         count += 1;
         progress.emit(on_event, count);
     }
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:nodes:synthetic",
-        count,
-        total,
-    );
+    emit_phase(on_event, "aka-engine:facts:nodes:synthetic", count, total);
     for community in &synth.communities {
-        let node = community.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(community.node_rec());
         count += 1;
     }
     for process in &synth.processes {
-        let node = process.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(process.node_rec());
         count += 1;
     }
     for property in &synth.properties {
-        let node = property.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(property.node_rec());
         count += 1;
     }
     for route in synth.routes.iter().filter(|r| r.emit_node) {
-        let node = route.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(route.node_rec());
         count += 1;
     }
     for tool in synth.tools.iter().filter(|t| t.emit_node) {
-        let node = tool.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(tool.node_rec());
         count += 1;
     }
     for node in synth
@@ -1373,83 +1414,59 @@ fn export_nodes(
         .iter()
         .filter_map(SynthCommand::handler_node_rec)
     {
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(node);
         count += 1;
     }
     for command in &synth.commands {
-        let node = command.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(command.node_rec());
         count += 1;
     }
     for config in &synth.configs {
-        let node = config.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(config.node_rec());
         count += 1;
     }
     for job in &synth.jobs {
-        let node = job.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(job.node_rec());
         count += 1;
     }
     for topic in &synth.topics {
-        let node = topic.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(topic.node_rec());
         count += 1;
     }
     for cache in &synth.caches {
-        let node = cache.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(cache.node_rec());
         count += 1;
     }
     for event in &synth.events {
-        let node = event.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(event.node_rec());
         count += 1;
     }
     for policy in &synth.policies {
-        let node = policy.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(policy.node_rec());
         count += 1;
     }
     for resource in &synth.resources {
-        let node = resource.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(resource.node_rec());
         count += 1;
     }
     for operation in &synth.graphql {
-        let node = operation.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(operation.node_rec());
         count += 1;
     }
     for symbol in &synth.source_symbols {
-        let node = symbol.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(symbol.node_rec());
         count += 1;
     }
     for node in synth.persistence.node_recs() {
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(node);
         count += 1;
     }
     for transaction in &synth.transactions {
-        let node = transaction.node_rec();
-        serde_json::to_writer(&mut out, &node)?;
-        out.write_all(b"\n")?;
+        nodes.push(transaction.node_rec());
         count += 1;
     }
     progress.emit_force(on_event, count);
-    Ok(count)
+    Ok(nodes)
 }
 
 fn export_edges(
@@ -1462,12 +1479,22 @@ fn export_edges(
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:edges:query",
-        0,
-        total,
-    );
+    let edges = collect_edges(conn, project, synth, total, on_event)?;
+    for edge in &edges {
+        serde_json::to_writer(&mut out, edge)?;
+        out.write_all(b"\n")?;
+    }
+    Ok(edges.len() as u64)
+}
+
+fn collect_edges(
+    conn: &Connection,
+    project: &str,
+    synth: &SynthGraph,
+    total: u64,
+    on_event: &mut impl FnMut(&EngineEvent),
+) -> Result<Vec<EdgeRec>, EngineError> {
+    emit_phase(on_event, "aka-engine:facts:edges:query", 0, total);
     let mut stmt = conn.prepare(
         "SELECT e.id, e.source_id, e.target_id, e.type, e.properties, \
                 s.qualified_name, t.qualified_name, s.label, t.label \
@@ -1478,6 +1505,7 @@ fn export_edges(
     )?;
     let mut rows = stmt.query([project])?;
     let mut count = 0;
+    let mut edges = Vec::new();
     let mut semantic = SemanticEdgeSynthesizer::load(conn, project)?;
     let mut progress = ExportProgress::new("edges", total);
     while let Some(row) = rows.next()? {
@@ -1513,25 +1541,17 @@ fn export_edges(
             step: props.get("step").and_then(Value::as_u64).map(|v| v as u32),
             evidence: if props.is_null() { None } else { Some(props) },
         };
-        serde_json::to_writer(&mut out, &edge)?;
-        out.write_all(b"\n")?;
+        edges.push(edge);
         count += 1;
         progress.emit(on_event, count);
     }
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:edges:synthetic",
-        count,
-        total,
-    );
+    emit_phase(on_event, "aka-engine:facts:edges:synthetic", count, total);
     for edge in semantic.edge_recs() {
-        serde_json::to_writer(&mut out, &edge)?;
-        out.write_all(b"\n")?;
+        edges.push(edge);
         count += 1;
     }
     for edge in synth.properties.iter().map(SynthProperty::edge_rec) {
-        serde_json::to_writer(&mut out, &edge)?;
-        out.write_all(b"\n")?;
+        edges.push(edge);
         count += 1;
     }
     for edge in synth
@@ -1564,12 +1584,11 @@ fn export_edges(
         )
         .chain(synth.edges.iter().cloned())
     {
-        serde_json::to_writer(&mut out, &edge)?;
-        out.write_all(b"\n")?;
+        edges.push(edge);
         count += 1;
     }
     progress.emit_force(on_event, count);
-    Ok(count)
+    Ok(edges)
 }
 
 struct ExportProgress {
@@ -4845,12 +4864,22 @@ fn export_chunks(
 ) -> Result<u64, EngineError> {
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:chunks:query",
-        0,
-        total,
-    );
+    let chunks = collect_chunks(conn, project, repo, total, on_event)?;
+    for chunk in &chunks {
+        serde_json::to_writer(&mut out, chunk)?;
+        out.write_all(b"\n")?;
+    }
+    Ok(chunks.len() as u64)
+}
+
+fn collect_chunks(
+    conn: &Connection,
+    project: &str,
+    repo: &Path,
+    total: u64,
+    on_event: &mut impl FnMut(&EngineEvent),
+) -> Result<Vec<ChunkRec>, EngineError> {
+    emit_phase(on_event, "aka-engine:facts:chunks:query", 0, total);
     let mut stmt = conn.prepare(
         "SELECT id, qualified_name, label, file_path, start_line, end_line \
          FROM nodes \
@@ -4859,6 +4888,7 @@ fn export_chunks(
     )?;
     let mut rows = stmt.query([project])?;
     let mut count = 0;
+    let mut chunks = Vec::new();
     let mut sources = SourceCache::new(repo);
     let mut progress = ExportProgress::new("chunks", total);
     while let Some(row) = rows.next()? {
@@ -4871,21 +4901,19 @@ fn export_chunks(
         let text = sources
             .read_line_span(&file_path, start_line, end_line)
             .unwrap_or_default();
-        let chunk = json!({
-            "nodeId": aka_node_id(cbm_id, &qn),
-            "kind": format!("ast-{}", label.to_ascii_lowercase()),
-            "filePath": file_path,
-            "startLine": to_artifact_line(start_line),
-            "endLine": to_artifact_line(end_line),
-            "text": text,
+        chunks.push(ChunkRec {
+            node_id: aka_node_id(cbm_id, &qn),
+            kind: format!("ast-{}", label.to_ascii_lowercase()),
+            file_path,
+            start_line: to_artifact_line(start_line),
+            end_line: to_artifact_line(end_line),
+            text,
         });
-        serde_json::to_writer(&mut out, &chunk)?;
-        out.write_all(b"\n")?;
         count += 1;
         progress.emit(on_event, count);
     }
     progress.emit_force(on_event, count);
-    Ok(count)
+    Ok(chunks)
 }
 
 struct SourceCache<'a> {
