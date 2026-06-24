@@ -21,7 +21,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Analyze a repository: engine parse -> artifacts -> graph/search indexes.
+    /// Analyze a repository: engine/facts parse -> graph/search indexes.
     Analyze {
         path: PathBuf,
         /// Engine directory. Defaults to $AKA_ENGINE_DIR or bundled/workspace engine.
@@ -31,7 +31,7 @@ enum Cmd {
         #[arg(long)]
         no_chunks: bool,
     },
-    /// Rebuild indexes from existing artifacts without rerunning the engine.
+    /// Rebuild indexes from legacy artifacts without rerunning the engine.
     Index { path: PathBuf },
     /// List registered repositories.
     Repos,

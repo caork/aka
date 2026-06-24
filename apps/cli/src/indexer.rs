@@ -1,11 +1,13 @@
-//! 索引管线：NDJSON 工件 → 图存储（SQLite + 布局） + 搜索索引（tantivy）。
+//! 索引管线：replayable facts → 图存储（SQLite + 布局） + 搜索索引（tantivy）。
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use aka_core::{ArtifactDir, ChunkRec, EdgeRec, IndexDelta, IndexState, NodeRec, RepoPaths};
+use aka_core::{
+    ArtifactDir, ChunkRec, EdgeRec, FactSource, IndexDelta, IndexState, NodeRec, RepoPaths,
+};
 use aka_graph::{compute_layout, Adjacency, GraphStore};
 use aka_search::SearchIndexWriter;
 
@@ -50,17 +52,35 @@ struct NodeInfo {
     file_path: Option<String>,
 }
 
-/// 从工件目录全量重建图与搜索索引（幂等：先清旧再建新）。
+/// 从 legacy 工件目录全量重建图与搜索索引（幂等：先清旧再建新）。
 pub fn index_artifact(artifact: &ArtifactDir, paths: &RepoPaths) -> Result<IndexSummary> {
-    index_artifact_with_progress(artifact, paths, None)
+    index_facts(artifact, paths)
 }
 
 pub fn index_artifact_with_progress(
     artifact: &ArtifactDir,
     paths: &RepoPaths,
+    progress: Option<&mut IndexProgress<'_>>,
+) -> Result<IndexSummary> {
+    index_facts_with_progress(artifact, paths, progress)
+}
+
+/// Index a replayable fact source into graph and search storage.
+///
+/// This is the primary seam for the fused pipeline: direct engine producers,
+/// SCIP/stack-graph importers, and the legacy artifact adapter all feed this
+/// same graph/search writer without requiring NDJSON artifacts on disk.
+pub fn index_facts(source: &impl FactSource, paths: &RepoPaths) -> Result<IndexSummary> {
+    index_facts_with_progress(source, paths, None)
+}
+
+pub fn index_facts_with_progress(
+    source: &impl FactSource,
+    paths: &RepoPaths,
     mut progress: Option<&mut IndexProgress<'_>>,
 ) -> Result<IndexSummary> {
     let mut bad_lines = 0u64;
+    let stats = source.stats();
 
     // ── 图存储 ───────────────────────────────────────────────
     let db_path = paths.graph_db();
@@ -78,11 +98,11 @@ pub fn index_artifact_with_progress(
     emit_index_progress(
         progress.as_deref_mut(),
         "graph:nodes",
-        format!("ingesting {} artifact nodes", artifact.manifest.stats.nodes),
+        format!("ingesting {} fact nodes", stats.nodes),
         Some(0),
-        Some(artifact.manifest.stats.nodes),
+        Some(stats.nodes),
     );
-    let nodes = artifact.nodes()?.filter_map(|r| match r {
+    let nodes = source.nodes()?.filter_map(|r| match r {
         Ok(n) => Some(n),
         Err(_) => {
             bad_lines += 1;
@@ -95,19 +115,19 @@ pub fn index_artifact_with_progress(
         progress.as_deref_mut(),
         "graph:nodes",
         "node ingest complete".into(),
-        Some(artifact.manifest.stats.nodes),
-        Some(artifact.manifest.stats.nodes),
+        Some(stats.nodes),
+        Some(stats.nodes),
     );
 
     emit_index_progress(
         progress.as_deref_mut(),
         "graph:edges",
-        format!("ingesting {} artifact edges", artifact.manifest.stats.edges),
+        format!("ingesting {} fact edges", stats.edges),
         Some(0),
-        Some(artifact.manifest.stats.edges),
+        Some(stats.edges),
     );
     let mut bad_edge_lines = 0u64;
-    let edges = artifact.edges()?.filter_map(|r| match r {
+    let edges = source.edges()?.filter_map(|r| match r {
         Ok(e) => Some(e),
         Err(_) => {
             bad_edge_lines += 1;
@@ -123,8 +143,8 @@ pub fn index_artifact_with_progress(
             "edge ingest complete; dangling_edges={}",
             stats_edges.dangling_edges
         ),
-        Some(artifact.manifest.stats.edges),
-        Some(artifact.manifest.stats.edges),
+        Some(stats.edges),
+        Some(stats.edges),
     );
 
     // 布局（确定性 phyllotaxis，给可视化用）。
@@ -166,32 +186,26 @@ pub fn index_artifact_with_progress(
         emit_index_progress(
             progress.as_deref_mut(),
             "search:nodes",
-            format!(
-                "adding {} nodes to search index",
-                artifact.manifest.stats.nodes
-            ),
+            format!("adding {} nodes to search index", stats.nodes),
             Some(0),
-            Some(artifact.manifest.stats.nodes),
+            Some(stats.nodes),
         );
-        search.add_nodes(artifact.nodes()?.filter_map(|r| r.ok()))?;
+        search.add_nodes(source.nodes()?.filter_map(|r| r.ok()))?;
         emit_index_progress(
             progress.as_deref_mut(),
             "search:nodes",
             "search node add complete".into(),
-            Some(artifact.manifest.stats.nodes),
-            Some(artifact.manifest.stats.nodes),
+            Some(stats.nodes),
+            Some(stats.nodes),
         );
         let mut chunk_count = 0u64;
-        if let Some(chunks) = artifact.chunks()? {
+        if let Some(chunks) = source.chunks()? {
             emit_index_progress(
                 progress.as_deref_mut(),
                 "search:chunks",
-                format!(
-                    "adding {} chunks to search index",
-                    artifact.manifest.stats.chunks
-                ),
+                format!("adding {} chunks to search index", stats.chunks),
                 Some(0),
-                Some(artifact.manifest.stats.chunks),
+                Some(stats.chunks),
             );
             search.add_chunks(chunks.filter_map(|r| r.ok()).inspect(|_| chunk_count += 1))?;
             emit_index_progress(
@@ -199,7 +213,7 @@ pub fn index_artifact_with_progress(
                 "search:chunks",
                 "search chunk add complete".into(),
                 Some(chunk_count),
-                Some(artifact.manifest.stats.chunks),
+                Some(stats.chunks),
             );
         } else {
             emit_index_progress(
@@ -240,11 +254,12 @@ pub fn index_artifact_with_progress(
 
 /// File-scoped incremental replacement over an existing graph/search index.
 ///
-/// The engine still emits a full artifact. This function conservatively slices
-/// that artifact down to added/modified files, deletes old rows for those files
-/// from the existing indexes, and appends replacement rows. If any condition
-/// could make file-scoped replacement unsafe, it reports `FullRebuildRequired`
-/// and leaves the existing indexes untouched.
+/// A replayable source may still come from a full legacy artifact or a direct
+/// fact batch. This function conservatively slices it down to added/modified
+/// files, deletes old rows for those files from the existing indexes, and
+/// appends replacement rows. If any condition could make file-scoped
+/// replacement unsafe, it reports `FullRebuildRequired` and leaves the
+/// existing indexes untouched.
 pub fn index_artifact_incremental(
     artifact: &ArtifactDir,
     paths: &RepoPaths,
@@ -252,18 +267,39 @@ pub fn index_artifact_incremental(
     previous_state: &IndexState,
     current_state: &IndexState,
 ) -> Result<IncrementalIndexOutcome> {
-    index_artifact_incremental_with_progress(
+    index_facts_incremental(artifact, paths, delta, previous_state, current_state)
+}
+
+pub fn index_artifact_incremental_with_progress(
+    artifact: &ArtifactDir,
+    paths: &RepoPaths,
+    delta: &IndexDelta,
+    previous_state: &IndexState,
+    current_state: &IndexState,
+    progress: Option<&mut IndexProgress<'_>>,
+) -> Result<IncrementalIndexOutcome> {
+    index_facts_incremental_with_progress(
         artifact,
         paths,
         delta,
         previous_state,
         current_state,
-        None,
+        progress,
     )
 }
 
-pub fn index_artifact_incremental_with_progress(
-    artifact: &ArtifactDir,
+pub fn index_facts_incremental(
+    source: &impl FactSource,
+    paths: &RepoPaths,
+    delta: &IndexDelta,
+    previous_state: &IndexState,
+    current_state: &IndexState,
+) -> Result<IncrementalIndexOutcome> {
+    index_facts_incremental_with_progress(source, paths, delta, previous_state, current_state, None)
+}
+
+pub fn index_facts_incremental_with_progress(
+    source: &impl FactSource,
     paths: &RepoPaths,
     delta: &IndexDelta,
     previous_state: &IndexState,
@@ -288,7 +324,7 @@ pub fn index_artifact_incremental_with_progress(
         None,
         None,
     );
-    let slice = match build_incremental_slice(artifact, delta)? {
+    let slice = match build_incremental_slice(source, delta)? {
         Ok(slice) => slice,
         Err(reason) => {
             emit_index_progress(
@@ -398,7 +434,7 @@ pub fn index_artifact_incremental_with_progress(
         nodes: store.node_count()?,
         edges: store.edge_count()?,
         dangling_edges: stats_nodes.dangling_edges + stats_edges.dangling_edges,
-        chunks: artifact.manifest.stats.chunks,
+        chunks: source.stats().chunks,
         bad_lines: slice.bad_lines,
         incremental: true,
     }))
@@ -467,7 +503,7 @@ fn incremental_preflight(
 }
 
 fn build_incremental_slice(
-    artifact: &ArtifactDir,
+    source: &impl FactSource,
     delta: &IndexDelta,
 ) -> Result<std::result::Result<IncrementalSlice, String>> {
     let changed_paths: BTreeSet<String> = delta
@@ -485,7 +521,7 @@ fn build_incremental_slice(
     let mut changed_node_ids = BTreeSet::new();
     let mut node_info: HashMap<String, NodeInfo> = HashMap::new();
 
-    for node in artifact.nodes()? {
+    for node in source.nodes()? {
         let node = match node {
             Ok(node) => node,
             Err(_) => {
@@ -520,7 +556,7 @@ fn build_incremental_slice(
     }
 
     let mut edges = Vec::new();
-    for edge in artifact.edges()? {
+    for edge in source.edges()? {
         let edge = match edge {
             Ok(edge) => edge,
             Err(_) => {
@@ -551,7 +587,7 @@ fn build_incremental_slice(
     }
 
     let mut chunks = Vec::new();
-    if let Some(chunk_iter) = artifact.chunks()? {
+    if let Some(chunk_iter) = source.chunks()? {
         for chunk in chunk_iter {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
@@ -602,5 +638,64 @@ fn remove_if_exists(path: &Path) -> Result<()> {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aka_core::{FactBatch, FactStats};
+
+    #[test]
+    fn indexes_replayable_fact_batch_without_artifact_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "fn load_manifest() {}\n").unwrap();
+
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let batch = FactBatch::new(
+            FactStats {
+                files: 1,
+                nodes: 1,
+                edges: 0,
+                chunks: 1,
+            },
+            vec![NodeRec {
+                id: "sym:load_manifest".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({
+                    "name": "load_manifest",
+                    "qualifiedName": "demo::load_manifest",
+                    "filePath": "src/lib.rs",
+                    "startLine": 0,
+                    "endLine": 0
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }],
+            Vec::new(),
+            vec![ChunkRec {
+                node_id: "sym:load_manifest".into(),
+                kind: "ast-function".into(),
+                file_path: "src/lib.rs".into(),
+                start_line: 0,
+                end_line: 0,
+                text: "fn load_manifest() {}".into(),
+            }],
+        );
+
+        let summary = index_facts(&batch, &paths).unwrap();
+
+        assert_eq!(summary.nodes, 1);
+        assert_eq!(summary.edges, 0);
+        assert_eq!(summary.chunks, 1);
+        assert!(!paths.artifact_dir().exists());
+        assert!(paths.graph_db().is_file());
+        assert!(paths.search_dir().is_dir());
     }
 }

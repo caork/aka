@@ -1,8 +1,11 @@
 # engine/
 
-aka 的解析入口是第一方原生 `aka-engine` 二进制。Rust 侧仍消费
-`docs/contracts/artifacts.md` 中的 NDJSON 工件合同，`crates/aka-core` 会运行
-AKA engine、读取它的 SQLite 图谱，再导出 aka 工件。
+aka 的解析入口正在从第一方原生 `aka-engine` 二进制迁移到 direct facts API。
+新的热路径合同是 `docs/contracts/artifacts.md` 中的 `aka-facts`：engine/library
+直接产出 nodes/edges/chunks facts，Rust graph/search writer 直接消费 `FactSource`。
+
+当前 `aka-engine` binary + engine SQLite + legacy artifact export 仍保留为兼容 fallback
+和调试导出，但新能力不应该依赖 SQLite->NDJSON 作为必经路径。
 
 初始化/构建方式：
 
@@ -13,6 +16,7 @@ scripts/sync-engine.sh
 脚本默认使用 aka 维护的第一方仓库 `caork/aka-engine`，并构建被 git 忽略的
 `engine/aka-engine-src/` 当前 checkout，复制可执行文件到
 `engine/aka-engine`，并把当前 engine commit 写入 `engine/ENGINE_SHA`。
+后续 direct API 稳定后，脚本还应同步构建 `libaka_engine` 和公开 header。
 随后运行 `scripts/pin-engine-ref.sh`，把 Dockerfile 和 release workflow 的 `AKA_ENGINE_REF`
 同步到同一个 commit，保证 Docker/Windows/macOS 分发用的都是我们维护并验证过的 engine。
 

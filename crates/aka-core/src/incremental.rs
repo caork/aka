@@ -2,7 +2,7 @@
 //!
 //! This is the Rust-side landing zone for the GitNexus `fileHashes` idea.  The
 //! engine may still be invoked as a whole for changed repositories, but aka now
-//! records exact file deltas and artifact ownership so the next layer can do
+//! records exact file deltas and fact ownership so the next layer can do
 //! file-scoped graph/search replacement without guessing.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use aka_facts::{FactSource, FactSourceError};
 
 use crate::artifact::ArtifactDir;
 use crate::types::ArtifactStats;
@@ -221,6 +223,15 @@ pub fn build_parse_cache_manifest(
     current: &IndexState,
     delta: IndexDelta,
 ) -> Result<ParseCacheManifest, crate::artifact::ArtifactError> {
+    build_parse_cache_manifest_from_facts(artifact, current, delta)
+        .map_err(crate::artifact::ArtifactError::from)
+}
+
+pub fn build_parse_cache_manifest_from_facts(
+    source: &impl FactSource,
+    current: &IndexState,
+    delta: IndexDelta,
+) -> Result<ParseCacheManifest, FactSourceError> {
     let mut files: BTreeMap<String, FileArtifactStats> = current
         .files
         .iter()
@@ -239,7 +250,7 @@ pub fn build_parse_cache_manifest(
         .collect();
     let mut node_files: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-    for node in artifact.nodes()? {
+    for node in source.nodes()? {
         let node = node?;
         if let Some(file_path) = node
             .file_path()
@@ -251,7 +262,7 @@ pub fn build_parse_cache_manifest(
         }
     }
 
-    for edge in artifact.edges()? {
+    for edge in source.edges()? {
         let edge = edge?;
         let mut seen = BTreeSet::new();
         if let Some(paths) = node_files.get(&edge.source_id) {
@@ -265,7 +276,7 @@ pub fn build_parse_cache_manifest(
         }
     }
 
-    if let Some(chunks) = artifact.chunks()? {
+    if let Some(chunks) = source.chunks()? {
         for chunk in chunks {
             let chunk = chunk?;
             if !chunk.file_path.is_empty() {
@@ -279,7 +290,7 @@ pub fn build_parse_cache_manifest(
         contract_version: CONTRACT_VERSION,
         engine_sha: current.engine_sha.clone(),
         no_chunks: current.no_chunks,
-        totals: artifact.manifest.stats.clone(),
+        totals: source.stats().clone(),
         last_delta: delta,
         files,
     })

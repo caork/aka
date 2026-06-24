@@ -1,7 +1,11 @@
 //! Engine runner backed by AKA engine.
 //!
-//! `aka` still consumes the artifact contract in `docs/contracts/artifacts.md`,
-//! but the producer is now the first-party native AKA engine.
+//! Engine runner backed by AKA engine.
+//!
+//! This file still contains the legacy binary + SQLite -> artifact adapter.
+//! The primary indexing seam is now `aka_facts::FactSource`; `ArtifactDir`
+//! adapts the legacy transport into that seam while the embedded/direct engine
+//! API is built out.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -2254,7 +2258,11 @@ fn synthesize_graph_with_progress(
             stage_timeout,
             Vec::new(),
             move || {
-                synthesize_commands_from_sources(repo.as_path(), nodes.as_ref(), processes.as_slice())
+                synthesize_commands_from_sources(
+                    repo.as_path(),
+                    nodes.as_ref(),
+                    processes.as_slice(),
+                )
             },
         )
     };
@@ -2352,7 +2360,11 @@ fn synthesize_graph_with_progress(
             stage_timeout,
             Vec::new(),
             move || {
-                synthesize_graphql_from_sources(repo.as_path(), nodes.as_ref(), processes.as_slice())
+                synthesize_graphql_from_sources(
+                    repo.as_path(),
+                    nodes.as_ref(),
+                    processes.as_slice(),
+                )
             },
         )
     };

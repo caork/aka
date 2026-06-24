@@ -1,0 +1,668 @@
+//! aka-facts — stable code-intelligence facts shared by parser, fusion, and indexes.
+//!
+//! This crate is the new in-process contract. Legacy artifact files can still
+//! adapt into these records, but graph/search indexing should depend on facts
+//! rather than on a disk artifact transport.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+pub const FACTS_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FactStats {
+    #[serde(default)]
+    pub files: u64,
+    #[serde(default)]
+    pub nodes: u64,
+    #[serde(default)]
+    pub edges: u64,
+    #[serde(default)]
+    pub chunks: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FactManifest {
+    pub contract_version: u32,
+    pub engine_version: String,
+    pub repo_path: String,
+    #[serde(default)]
+    pub commit: Option<String>,
+    pub generated_at: String,
+    #[serde(default)]
+    pub stats: FactStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeFact {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub properties: serde_json::Map<String, serde_json::Value>,
+}
+
+impl NodeFact {
+    fn prop_str(&self, key: &str) -> Option<&str> {
+        self.properties.get(key).and_then(|v| v.as_str())
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.prop_str("name")
+    }
+
+    pub fn file_path(&self) -> Option<&str> {
+        self.prop_str("filePath").or_else(|| self.prop_str("path"))
+    }
+
+    /// Fact contract raw value: parser/tree-sitter 0-based row.
+    pub fn start_line(&self) -> Option<u32> {
+        self.properties
+            .get("startLine")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+    }
+
+    /// Fact contract raw value: parser/tree-sitter 0-based row.
+    pub fn end_line(&self) -> Option<u32> {
+        self.properties
+            .get("endLine")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+    }
+
+    /// 1-based human line number used by downstream graph/search/editor APIs.
+    pub fn start_line_1based(&self) -> Option<u32> {
+        self.start_line().map(|v| v + 1)
+    }
+
+    /// 1-based human line number used by downstream graph/search/editor APIs.
+    pub fn end_line_1based(&self) -> Option<u32> {
+        self.end_line().map(|v| v + 1)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeFact {
+    pub id: String,
+    pub source_id: String,
+    pub target_id: String,
+    #[serde(rename = "type")]
+    pub edge_type: String,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkFact {
+    pub node_id: String,
+    pub kind: String,
+    pub file_path: String,
+    /// Fact contract raw value: parser/tree-sitter 0-based row.
+    #[serde(default)]
+    pub start_line: u32,
+    #[serde(default)]
+    pub end_line: u32,
+    pub text: String,
+}
+
+impl ChunkFact {
+    pub fn start_line_1based(&self) -> u32 {
+        self.start_line + 1
+    }
+
+    pub fn end_line_1based(&self) -> u32 {
+        self.end_line + 1
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum FactRecord {
+    Manifest(FactManifest),
+    Node(NodeFact),
+    Edge(EdgeFact),
+    Chunk(ChunkFact),
+    Done { stats: FactStats },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FactSourceError {
+    #[error("{0}")]
+    Message(String),
+}
+
+pub type FactItem<T> = Result<T, FactSourceError>;
+
+pub type FactId = String;
+pub type SymbolId = String;
+pub type JsonMap = Map<String, Value>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextRange {
+    pub start_line_0based: u32,
+    pub end_line_0based: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_col_0based: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_col_0based: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SymbolKind {
+    File,
+    Module,
+    Package,
+    Class,
+    Interface,
+    Enum,
+    Trait,
+    Type,
+    Function,
+    Method,
+    Field,
+    Variable,
+    Route,
+    GraphQl,
+    Tool,
+    Command,
+    Config,
+    Topic,
+    Table,
+    Repository,
+    Migration,
+    Resource,
+    Transaction,
+    Process,
+    Community,
+    Unknown(String),
+}
+
+impl SymbolKind {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::File => "File",
+            Self::Module => "Module",
+            Self::Package => "Package",
+            Self::Class => "Class",
+            Self::Interface => "Interface",
+            Self::Enum => "Enum",
+            Self::Trait => "Trait",
+            Self::Type => "Type",
+            Self::Function => "Function",
+            Self::Method => "Method",
+            Self::Field => "Field",
+            Self::Variable => "Variable",
+            Self::Route => "Route",
+            Self::GraphQl => "GraphQL",
+            Self::Tool => "Tool",
+            Self::Command => "Command",
+            Self::Config => "Config",
+            Self::Topic => "Topic",
+            Self::Table => "Table",
+            Self::Repository => "Repository",
+            Self::Migration => "Migration",
+            Self::Resource => "Resource",
+            Self::Transaction => "Transaction",
+            Self::Process => "Process",
+            Self::Community => "Community",
+            Self::Unknown(label) => label,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OccurrenceRole {
+    Definition,
+    Declaration,
+    Reference,
+    Read,
+    Write,
+    Import,
+    Export,
+    Call,
+    Implementation,
+    Override,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelationKind {
+    Contains,
+    Defines,
+    Calls,
+    Imports,
+    Inherits,
+    Implements,
+    DependsOn,
+    Reads,
+    Writes,
+    HandlesRoute,
+    HandlesGraphQl,
+    HandlesTool,
+    HandlesCommand,
+    HandlesGraphQlOperation,
+    ConsumesTopic,
+    PublishesTopic,
+    StepInProcess,
+    EntryPointOf,
+    MemberOf,
+    Unknown(String),
+}
+
+impl RelationKind {
+    pub fn edge_type(&self) -> &str {
+        match self {
+            Self::Contains => "CONTAINS",
+            Self::Defines => "DEFINES",
+            Self::Calls => "CALLS",
+            Self::Imports => "IMPORTS",
+            Self::Inherits => "INHERITS",
+            Self::Implements => "IMPLEMENTS",
+            Self::DependsOn => "DEPENDS_ON",
+            Self::Reads => "READS",
+            Self::Writes => "WRITES",
+            Self::HandlesRoute => "HANDLES_ROUTE",
+            Self::HandlesGraphQl => "HANDLES_GRAPHQL",
+            Self::HandlesTool => "HANDLES_TOOL",
+            Self::HandlesCommand => "HANDLES_COMMAND",
+            Self::HandlesGraphQlOperation => "HANDLES_GRAPHQL",
+            Self::ConsumesTopic => "CONSUMES_TOPIC",
+            Self::PublishesTopic => "PUBLISHES_TOPIC",
+            Self::StepInProcess => "STEP_IN_PROCESS",
+            Self::EntryPointOf => "ENTRY_POINT_OF",
+            Self::MemberOf => "MEMBER_OF",
+            Self::Unknown(edge_type) => edge_type,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileFact {
+    pub id: FactId,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    #[serde(default)]
+    pub generated: bool,
+    #[serde(default)]
+    pub properties: JsonMap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymbolFact {
+    pub id: FactId,
+    pub symbol: SymbolId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualified_name: Option<String>,
+    pub kind: SymbolKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<TextRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    #[serde(default)]
+    pub properties: JsonMap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OccurrenceFact {
+    pub id: FactId,
+    pub symbol_id: FactId,
+    pub file_id: FactId,
+    pub range: TextRange,
+    pub role: OccurrenceRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syntax_kind: Option<String>,
+    #[serde(default)]
+    pub properties: JsonMap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationFact {
+    pub id: FactId,
+    pub source: FactId,
+    pub target: FactId,
+    pub kind: RelationKind,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SemanticFactBundle {
+    #[serde(default)]
+    pub files: Vec<FileFact>,
+    #[serde(default)]
+    pub symbols: Vec<SymbolFact>,
+    #[serde(default)]
+    pub occurrences: Vec<OccurrenceFact>,
+    #[serde(default)]
+    pub relations: Vec<RelationFact>,
+    #[serde(default)]
+    pub chunks: Vec<ChunkFact>,
+}
+
+impl SemanticFactBundle {
+    pub fn lower(self) -> FactBatch {
+        let mut nodes = Vec::with_capacity(self.files.len() + self.symbols.len());
+        let mut symbol_ranges = std::collections::BTreeMap::<FactId, TextRange>::new();
+
+        for occurrence in &self.occurrences {
+            if matches!(
+                occurrence.role,
+                OccurrenceRole::Definition | OccurrenceRole::Declaration
+            ) {
+                symbol_ranges
+                    .entry(occurrence.symbol_id.clone())
+                    .or_insert_with(|| occurrence.range.clone());
+            }
+        }
+
+        for file in self.files {
+            nodes.push(file.lower());
+        }
+        for symbol in self.symbols {
+            let fallback_range = symbol_ranges.get(&symbol.id);
+            nodes.push(symbol.lower(fallback_range));
+        }
+        let edges: Vec<_> = self
+            .relations
+            .into_iter()
+            .map(RelationFact::lower)
+            .collect();
+        let stats = FactStats {
+            files: nodes
+                .iter()
+                .filter(|node| node.label == SymbolKind::File.label())
+                .count() as u64,
+            nodes: nodes.len() as u64,
+            edges: edges.len() as u64,
+            chunks: self.chunks.len() as u64,
+        };
+        FactBatch::new(stats, nodes, edges, self.chunks)
+    }
+}
+
+impl FileFact {
+    pub fn lower(self) -> NodeFact {
+        let mut properties = self.properties;
+        properties.insert("name".into(), Value::String(self.path.clone()));
+        properties.insert("path".into(), Value::String(self.path.clone()));
+        properties.insert("filePath".into(), Value::String(self.path));
+        if let Some(language) = self.language {
+            properties.insert("language".into(), Value::String(language));
+        }
+        if let Some(digest) = self.digest {
+            properties.insert("digest".into(), Value::String(digest));
+        }
+        properties.insert("generated".into(), Value::Bool(self.generated));
+        NodeFact {
+            id: self.id,
+            label: SymbolKind::File.label().into(),
+            properties,
+        }
+    }
+}
+
+impl SymbolFact {
+    pub fn lower(self, fallback_range: Option<&TextRange>) -> NodeFact {
+        let mut properties = self.properties;
+        properties.insert("name".into(), Value::String(self.name));
+        properties.insert("symbol".into(), Value::String(self.symbol.clone()));
+        properties.insert(
+            "qualifiedName".into(),
+            Value::String(self.qualified_name.unwrap_or(self.symbol)),
+        );
+        if let Some(file_path) = self.file_path {
+            properties.insert("filePath".into(), Value::String(file_path));
+        }
+        let range = self.range.as_ref().or(fallback_range);
+        if let Some(range) = range {
+            properties.insert("startLine".into(), Value::from(range.start_line_0based));
+            properties.insert("endLine".into(), Value::from(range.end_line_0based));
+            if let Some(col) = range.start_col_0based {
+                properties.insert("startCol".into(), Value::from(col));
+            }
+            if let Some(col) = range.end_col_0based {
+                properties.insert("endCol".into(), Value::from(col));
+            }
+        }
+        if let Some(documentation) = self.documentation {
+            properties.insert("documentation".into(), Value::String(documentation));
+        }
+        NodeFact {
+            id: self.id,
+            label: self.kind.label().into(),
+            properties,
+        }
+    }
+}
+
+impl RelationFact {
+    pub fn lower(self) -> EdgeFact {
+        EdgeFact {
+            id: self.id,
+            source_id: self.source,
+            target_id: self.target,
+            edge_type: self.kind.edge_type().into(),
+            confidence: self.confidence,
+            reason: self.reason.unwrap_or_default(),
+            step: self.step,
+            evidence: self.evidence,
+        }
+    }
+}
+
+/// Reopenable source of normalized facts.
+///
+/// The current graph/search indexer reads nodes more than once. Direct engine
+/// producers can satisfy this contract with an in-memory batch, a replayable
+/// channel spool, or a debug file export while the final one-pass writer lands.
+pub trait FactSource {
+    fn stats(&self) -> &FactStats;
+
+    fn nodes(&self) -> Result<Box<dyn Iterator<Item = FactItem<NodeFact>> + '_>, FactSourceError>;
+
+    fn edges(&self) -> Result<Box<dyn Iterator<Item = FactItem<EdgeFact>> + '_>, FactSourceError>;
+
+    fn chunks(
+        &self,
+    ) -> Result<Option<Box<dyn Iterator<Item = FactItem<ChunkFact>> + '_>>, FactSourceError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FactBatch {
+    pub stats: FactStats,
+    pub nodes: Vec<NodeFact>,
+    pub edges: Vec<EdgeFact>,
+    pub chunks: Vec<ChunkFact>,
+}
+
+impl FactBatch {
+    pub fn new(
+        stats: FactStats,
+        nodes: Vec<NodeFact>,
+        edges: Vec<EdgeFact>,
+        chunks: Vec<ChunkFact>,
+    ) -> Self {
+        Self {
+            stats,
+            nodes,
+            edges,
+            chunks,
+        }
+    }
+}
+
+impl FactSource for FactBatch {
+    fn stats(&self) -> &FactStats {
+        &self.stats
+    }
+
+    fn nodes(&self) -> Result<Box<dyn Iterator<Item = FactItem<NodeFact>> + '_>, FactSourceError> {
+        Ok(Box::new(self.nodes.iter().cloned().map(Ok)))
+    }
+
+    fn edges(&self) -> Result<Box<dyn Iterator<Item = FactItem<EdgeFact>> + '_>, FactSourceError> {
+        Ok(Box::new(self.edges.iter().cloned().map(Ok)))
+    }
+
+    fn chunks(
+        &self,
+    ) -> Result<Option<Box<dyn Iterator<Item = FactItem<ChunkFact>> + '_>>, FactSourceError> {
+        Ok(Some(Box::new(self.chunks.iter().cloned().map(Ok))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_fact_preserves_line_semantics() {
+        let node = NodeFact {
+            id: "n1".into(),
+            label: "Function".into(),
+            properties: serde_json::json!({
+                "name": "loadManifest",
+                "filePath": "src/lib.rs",
+                "startLine": 0,
+                "endLine": 2
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        };
+
+        assert_eq!(node.name(), Some("loadManifest"));
+        assert_eq!(node.file_path(), Some("src/lib.rs"));
+        assert_eq!(node.start_line(), Some(0));
+        assert_eq!(node.start_line_1based(), Some(1));
+        assert_eq!(node.end_line_1based(), Some(3));
+    }
+
+    #[test]
+    fn semantic_bundle_lowers_to_replayable_facts() {
+        let bundle = SemanticFactBundle {
+            files: vec![FileFact {
+                id: "file:src/lib.rs".into(),
+                path: "src/lib.rs".into(),
+                language: Some("rust".into()),
+                digest: Some("sha256:abc".into()),
+                generated: false,
+                properties: JsonMap::new(),
+            }],
+            symbols: vec![SymbolFact {
+                id: "sym:loadManifest".into(),
+                symbol: "rust src/lib.rs/loadManifest().".into(),
+                name: "loadManifest".into(),
+                qualified_name: None,
+                kind: SymbolKind::Function,
+                file_path: Some("src/lib.rs".into()),
+                range: None,
+                documentation: None,
+                properties: JsonMap::new(),
+            }],
+            occurrences: vec![OccurrenceFact {
+                id: "occ:1".into(),
+                symbol_id: "sym:loadManifest".into(),
+                file_id: "file:src/lib.rs".into(),
+                range: TextRange {
+                    start_line_0based: 4,
+                    end_line_0based: 8,
+                    start_col_0based: Some(0),
+                    end_col_0based: Some(1),
+                },
+                role: OccurrenceRole::Definition,
+                syntax_kind: None,
+                properties: JsonMap::new(),
+            }],
+            relations: vec![RelationFact {
+                id: "rel:1".into(),
+                source: "sym:loadManifest".into(),
+                target: "file:src/lib.rs".into(),
+                kind: RelationKind::Defines,
+                confidence: 1.0,
+                reason: Some("definition".into()),
+                step: None,
+                evidence: Some(Value::String("test".into())),
+            }],
+            chunks: vec![ChunkFact {
+                node_id: "sym:loadManifest".into(),
+                kind: "ast-function".into(),
+                file_path: "src/lib.rs".into(),
+                start_line: 4,
+                end_line: 8,
+                text: "fn load_manifest() {}".into(),
+            }],
+        };
+
+        let facts = bundle.lower();
+        let nodes: Vec<_> = facts.nodes().unwrap().map(Result::unwrap).collect();
+        let edges: Vec<_> = facts.edges().unwrap().map(Result::unwrap).collect();
+        let chunks: Vec<_> = facts
+            .chunks()
+            .unwrap()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        assert_eq!(facts.stats.files, 1);
+        assert_eq!(facts.stats.nodes, 2);
+        assert_eq!(facts.stats.edges, 1);
+        assert_eq!(facts.stats.chunks, 1);
+        assert_eq!(nodes[1].label, "Function");
+        assert_eq!(nodes[1].start_line(), Some(4));
+        assert_eq!(edges[0].edge_type, "DEFINES");
+        assert_eq!(chunks[0].start_line_1based(), 5);
+    }
+
+    #[test]
+    fn fact_batch_is_replayable() {
+        let batch = FactBatch::new(
+            FactStats {
+                files: 1,
+                nodes: 1,
+                edges: 0,
+                chunks: 0,
+            },
+            vec![NodeFact {
+                id: "n1".into(),
+                label: "File".into(),
+                properties: serde_json::Map::new(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(batch.nodes().unwrap().count(), 1);
+        assert_eq!(batch.nodes().unwrap().count(), 1);
+        assert_eq!(batch.stats().nodes, 1);
+    }
+}

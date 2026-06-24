@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 
+use aka_facts::{FactItem, FactSource, FactSourceError};
+
 use crate::types::{ChunkRec, EdgeRec, Manifest, NodeRec, CONTRACT_VERSION};
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +30,14 @@ pub enum ArtifactError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("fact source error: {0}")]
+    FactSource(String),
+}
+
+impl From<FactSourceError> for ArtifactError {
+    fn from(value: FactSourceError) -> Self {
+        Self::FactSource(value.to_string())
+    }
 }
 
 /// 一个已校验完整性（manifest 存在 + 合同版本匹配）的工件目录。
@@ -78,6 +88,41 @@ impl ArtifactDir {
             return Ok(None);
         }
         NdjsonIter::open(path).map(Some)
+    }
+}
+
+impl FactSource for ArtifactDir {
+    fn stats(&self) -> &aka_facts::FactStats {
+        &self.manifest.stats
+    }
+
+    fn nodes(&self) -> Result<Box<dyn Iterator<Item = FactItem<NodeRec>> + '_>, FactSourceError> {
+        let iter = self
+            .nodes()
+            .map_err(|err| FactSourceError::Message(err.to_string()))?
+            .map(|item| item.map_err(|err| FactSourceError::Message(err.to_string())));
+        Ok(Box::new(iter))
+    }
+
+    fn edges(&self) -> Result<Box<dyn Iterator<Item = FactItem<EdgeRec>> + '_>, FactSourceError> {
+        let iter = self
+            .edges()
+            .map_err(|err| FactSourceError::Message(err.to_string()))?
+            .map(|item| item.map_err(|err| FactSourceError::Message(err.to_string())));
+        Ok(Box::new(iter))
+    }
+
+    fn chunks(
+        &self,
+    ) -> Result<Option<Box<dyn Iterator<Item = FactItem<ChunkRec>> + '_>>, FactSourceError> {
+        let Some(iter) = self
+            .chunks()
+            .map_err(|err| FactSourceError::Message(err.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let iter = iter.map(|item| item.map_err(|err| FactSourceError::Message(err.to_string())));
+        Ok(Some(Box::new(iter)))
     }
 }
 

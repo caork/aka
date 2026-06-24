@@ -40,11 +40,21 @@ dependencies = [
 name = "aka-core"
 version = "0.1.23"
 dependencies = [
+ "aka-facts",
  "chrono",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "aka-facts"
+version = "0.1.23"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

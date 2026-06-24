@@ -2,7 +2,7 @@
 
 感知所有代码——过去、现在与未来——的代码全知引擎。名字源自 Akasha records（阿卡西记录）。用户侧只有 AKA 桌面端和客户端插件包；MCP/索引能力由桌面端内置服务提供。
 
-解析层使用第一方 AKA engine 原生 C 引擎：AKA engine 负责多语言 tree-sitter/LSP 解析并写入 SQLite，aka-core 通过 SQLite->NDJSON adapter 产出稳定工件；存储 / 搜索 / 服务 / UI 仍由 Rust + Tauri 承担。
+解析层使用第一方 AKA engine 原生 C 引擎，并迁移到 `aka-facts` 直连合同：engine / SCIP importer / stack-graphs adapter 产出稳定 facts，Rust 侧直接写入图与搜索索引。旧 SQLite->NDJSON artifact 路径只作为兼容 fallback 和调试导出保留。
 
 ## 架构
 
@@ -13,9 +13,9 @@ Rust core       aka-search (tantivy BM25 + usearch 向量 + RRF)
                 aka-graph  (SQLite 持久 + 内存 CSR 邻接 + LOD 聚合)
                 aka-mcp    (rmcp · stdio / Streamable HTTP)
                 aka-server (axum)
-                aka-core   (域模型 · 仓库注册 · 工件摄取 · 增量)
-                          │  NDJSON 工件合同 (docs/contracts/artifacts.md)
-解析引擎        engine/ — AKA engine native C binary（SQLite -> NDJSON adapter）
+                aka-core   (域模型 · 仓库注册 · facts 融合 · 增量)
+                          │  aka-facts 合同 (docs/contracts/artifacts.md)
+解析引擎        engine/ · SCIP importers · stack-graphs adapters（direct facts）
 ```
 
 详细设计见 [docs/architecture.md](docs/architecture.md)。
@@ -29,7 +29,7 @@ Rust core       aka-search (tantivy BM25 + usearch 向量 + RRF)
 
 ## 里程碑
 
-- **M0** ✅ AKA engine native engine 接入、SQLite->NDJSON 工件层（合同 v0）、demo-ts E2E
+- **M0** ✅ AKA engine native engine 接入、legacy artifact fallback、demo-ts E2E；`aka-facts` direct pipeline 迁移中
 - **M1** ✅ Rust 索引核心：tantivy(代码感知 tokenizer) + usearch + RRF + SQLite/CSR 图存储
 - **M2** ✅ MCP 工具面（rmcp stdio/HTTP，含 `search_code` 行级源码搜索、影响分析和仓库管理工具）+ axum HTTP；桌面端内置 HTTP MCP，stdio 仅作 fallback
 - **M3** ✅ 桌面 MVP：液态玻璃三视图全接真实数据；WebGL2 渲染器 500K 节点/1M 边 60fps

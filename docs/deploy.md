@@ -3,7 +3,7 @@
 > 许可提醒：解析引擎 AKA engine 为 MIT，aka 镜像 OCI label 使用
 > `org.opencontainers.image.licenses=MIT`。
 
-镜像内容：`aka` 二进制（serve / analyze / mcp 等八命令）+ AKA engine 原生 C 解析引擎 + git（git 导入用）。AKA engine 负责解析并写入 SQLite，aka-core adapter 导出 NDJSON 后进入 Rust 索引。默认启动 `aka serve`，HTTP API 在 4111。
+镜像内容：`aka` 二进制（serve / analyze / mcp 等内部 runtime 命令）+ AKA engine 原生 C 解析引擎 + git（git 导入用）。索引主线正在迁移到 `aka-facts` direct pipeline：解析器产出 facts，Rust 图/搜索 writer 直接消费；当前镜像仍保留 AKA engine SQLite->legacy artifact fallback。默认启动 `aka serve`，HTTP API 在 4111。
 
 ## 构建
 
@@ -37,7 +37,7 @@ curl http://127.0.0.1:4111/api/health     # → {"status":"ok","service":"aka-se
 
 关键环境变量（镜像内已设好，一般不用动）：
 
-- `AKA_HOME=/data` — registry.json 与各仓库索引数据（artifact / graph.db / search）都在这，**挂卷持久化**。
+- `AKA_HOME=/data` — registry.json 与各仓库索引数据（graph.db / search / legacy artifact debug export）都在这，**挂卷持久化**。
 - `AKA_ENGINE_DIR=/opt/aka/engine` — AKA engine 目录（含 `aka-engine`）。
 - `AKA_ENGINE_MODE=fast|moderate|full` — AKA engine 解析模式，默认 `fast`。
 
@@ -63,7 +63,7 @@ curl -X POST http://127.0.0.1:4111/api/repos/import-zip \
   -F name=myrepo -F file=@repo.zip
 ```
 
-镜像自带冒烟样本 `/opt/aka/fixtures-demo`（fixtures/demo-ts），可快速验证 AKA engine 和 adapter 在容器内可用：
+镜像自带冒烟样本 `/opt/aka/fixtures-demo`（fixtures/demo-ts），可快速验证 AKA engine、facts/legacy adapter 和 Rust 索引在容器内可用：
 
 ```bash
 docker exec aka aka analyze /opt/aka/fixtures-demo
@@ -73,8 +73,8 @@ curl -X POST http://127.0.0.1:4111/api/query \
 
 ## 数据卷
 
-`/data`（`AKA_HOME`）布局：`registry.json` + `repos/<slug>-<hash8>/{artifact,graph.db,search}/` +
-git 导入的 `checkouts/`。删除容器不丢索引；要全清就 `docker volume rm aka-data`。
+`/data`（`AKA_HOME`）布局：`registry.json` + `repos/<slug>-<hash8>/{graph.db,search,artifact?}/` +
+git 导入的 `checkouts/`。`artifact/` 只用于 legacy fallback 或调试导出。删除容器不丢索引；要全清就 `docker volume rm aka-data`。
 容器内用户是非 root（uid 10001），bind mount 目录注意可写权限（git 导入需写 /data）。
 
 ## 远程访问注意
@@ -90,7 +90,7 @@ git 导入的 `checkouts/`。删除容器不丢索引；要全清就 `docker vol
 
 1. Dockerfile 按 AKA engine pin 拉取 aka 维护的 engine fork 并构建 native C binary；日常 pin 由 `engine/ENGINE_SHA` 经 `scripts/pin-engine-ref.sh` 同步，只在显式上游验证或临时分支验证时用 `--build-arg AKA_ENGINE_REPO=... --build-arg AKA_ENGINE_REF=...` 覆盖；
 2. 构建 linux/amd64 镜像并**容器内冒烟**（health → `analyze /opt/aka/fixtures-demo` → query 非空，
-   覆盖 AKA engine + SQLite->NDJSON adapter 这一关键风险点）；
+   覆盖 AKA engine + facts/legacy adapter + Rust graph/search writer 这一关键风险点）；
 3. 推 `ghcr.io/caork/aka:<版本>` 与 `:latest`（私有 package，拉取需 `read:packages` 的 PAT：
    `echo $PAT | docker login ghcr.io -u caork --password-stdin`）；
 4. `docker save` 的镜像 tar、macOS/Windows 桌面 GUI 包、Claude Code/OpenCode 插件包、

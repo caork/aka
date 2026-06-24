@@ -4,10 +4,10 @@
 //! ~/.aka/
 //!   registry.json            # 仓库注册表
 //!   repos/<slug>-<hash8>/    # 每仓库数据
-//!     artifact/              # engine 产出的 NDJSON 工件
+//!     artifact/              # legacy debug/compat facts export
 //!     engine-cache/           # AKA engine SQLite/cache 工作目录
 //!     index-state.json        # 文件哈希/engine/合同版本快照，用于安全复用索引
-//!     parse-cache/            # 预留给 engine adapter 的内容寻址 parse-cache
+//!     parse-cache/            # 内容寻址 parse/fact ownership cache
 //!     graph.db               # aka-graph SQLite
 //!     search/                # tantivy 索引
 //!     vectors/               # 向量库（embedding 开启后）
