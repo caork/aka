@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aka-cli"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "aka-core",
  "aka-graph",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "aka-core"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "aka-graph"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "aka-core",
  "rayon",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "aka-mcp"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "aka-core",
  "anyhow",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "aka-search"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "aka-core",
  "fastrand",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "aka-server"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "aka-mcp",
  "anyhow",
