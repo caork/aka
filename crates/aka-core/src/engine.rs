@@ -25,7 +25,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, Row};
 use serde_json::{json, Map, Value};
 
-use aka_facts::{read_complete_fact_records_ndjson, FactBatch};
+use aka_facts::FactBatch;
 
 use crate::artifact::ArtifactDir;
 use crate::types::{
@@ -39,6 +39,7 @@ mod command_synth;
 mod config_synth;
 mod dependency_synth;
 mod event_synth;
+mod fact_producer;
 mod graphql_synth;
 mod job_synth;
 mod migration_synth;
@@ -78,6 +79,7 @@ use dependency_synth::{
     synthesize_dependency_edges_from_sources, DependencyProgress, DependencyProgressPhase,
 };
 use event_synth::{synthesize_events_from_sources, SynthEvent};
+use fact_producer::{EngineFactProducer, ProducedEngineFacts, SidecarEngineFactProducer};
 use graphql_synth::{synthesize_graphql_from_sources, SynthGraphqlOperation};
 use job_synth::{job_entry_hints_from_sources, synthesize_jobs_from_sources, SynthJob};
 use persistence_synth::{synthesize_persistence_from_sources, SynthPersistenceGraph};
@@ -543,48 +545,27 @@ impl EngineRunner {
     ) -> Result<EngineFacts, EngineError> {
         let cache_root = engine_cache_root(repo, options.debug_artifact_dir, options.cache_dir);
         std::fs::create_dir_all(&cache_root)?;
-        let sidecar_path = cache_root.join("facts.jsonl");
-        let _ = std::fs::remove_file(&sidecar_path);
+        let producer = SidecarEngineFactProducer;
+        let request = producer.prepare(&cache_root)?;
         let (cache_root, engine_repo) = self.run_engine_index(
             repo,
             options.debug_artifact_dir,
             options.cache_dir,
-            Some(&sidecar_path),
+            request.facts_output_path.as_deref(),
             &mut on_event,
         )?;
-        if sidecar_path.is_file() {
-            on_event(&EngineEvent::Log {
-                stream: "facts".into(),
-                line: format!("using engine direct facts {}", sidecar_path.display()),
-            });
-            emit_phase(&mut on_event, "aka-engine:facts:read-sidecar", 0, 0);
-            let batch = read_engine_facts_sidecar(
-                &sidecar_path,
+        let produced =
+            producer.finish(&cache_root, &engine_repo, options.no_chunks, &mut on_event)?;
+        let batch = match produced {
+            ProducedEngineFacts::DirectBatch(batch) => batch,
+            ProducedEngineFacts::EngineDbFallback { project, db_path } => collect_engine_facts(
                 &engine_repo,
+                &db_path,
+                &project,
                 options.no_chunks,
                 &mut on_event,
-            )?;
-            let done = EngineEvent::Done {
-                stats: batch.stats.clone(),
-            };
-            on_event(&done);
-            return Ok(EngineFacts::DirectBatch(batch));
-        }
-        let (project, db_path) = find_single_project_db(&cache_root, &engine_repo)?;
-        on_event(&EngineEvent::Log {
-            stream: "facts".into(),
-            line: format!(
-                "using engine db project={project} path={}",
-                db_path.display()
-            ),
-        });
-        let batch = collect_engine_facts(
-            &engine_repo,
-            &db_path,
-            &project,
-            options.no_chunks,
-            &mut on_event,
-        )?;
+            )?,
+        };
         let done = EngineEvent::Done {
             stats: batch.stats.clone(),
         };
@@ -644,7 +625,7 @@ fn engine_mode() -> String {
 }
 
 fn emit_phase(
-    on_event: &mut impl FnMut(&EngineEvent),
+    on_event: &mut (impl FnMut(&EngineEvent) + ?Sized),
     phase: impl Into<String>,
     current: u64,
     total: u64,
@@ -1097,148 +1078,6 @@ fn export_artifacts(
     let file = File::create(manifest_path)?;
     serde_json::to_writer_pretty(BufWriter::new(file), &manifest)?;
     Ok(stats)
-}
-
-fn read_engine_facts_sidecar(
-    path: &Path,
-    repo: &Path,
-    no_chunks: bool,
-    on_event: &mut impl FnMut(&EngineEvent),
-) -> Result<FactBatch, EngineError> {
-    let file = File::open(path)?;
-    let mut batch = read_complete_fact_records_ndjson(BufReader::new(file))?;
-    normalize_engine_sidecar_facts(&mut batch, repo, no_chunks, on_event);
-    Ok(batch)
-}
-
-fn normalize_engine_sidecar_facts(
-    batch: &mut FactBatch,
-    repo: &Path,
-    no_chunks: bool,
-    on_event: &mut impl FnMut(&EngineEvent),
-) {
-    for node in &mut batch.nodes {
-        normalize_engine_node_fact(node);
-    }
-    for edge in &mut batch.edges {
-        normalize_engine_edge_fact(edge);
-    }
-    if no_chunks {
-        batch.chunks.clear();
-    } else if batch.chunks.is_empty() {
-        batch.chunks = synthesize_chunks_from_node_facts(repo, &batch.nodes, on_event);
-    }
-    batch.stats.files = batch
-        .nodes
-        .iter()
-        .filter(|node| node.label == "File")
-        .count() as u64;
-    batch.stats.nodes = batch.nodes.len() as u64;
-    batch.stats.edges = batch.edges.len() as u64;
-    batch.stats.chunks = batch.chunks.len() as u64;
-}
-
-fn synthesize_chunks_from_node_facts(
-    repo: &Path,
-    nodes: &[NodeRec],
-    on_event: &mut impl FnMut(&EngineEvent),
-) -> Vec<ChunkRec> {
-    let candidates: Vec<_> = nodes
-        .iter()
-        .filter(|node| {
-            node.file_path().is_some()
-                && !matches!(
-                    node.label.as_str(),
-                    "File" | "Folder" | "Project" | "Package" | "Module"
-                )
-        })
-        .collect();
-    let total = candidates.len() as u64;
-    emit_phase(on_event, "aka-core:enrichment:chunks-from-facts", 0, total);
-    let mut sources = SourceCache::new(repo);
-    let mut chunks = Vec::with_capacity(candidates.len());
-    let mut count = 0u64;
-    for node in candidates {
-        let Some(file_path) = node.file_path() else {
-            continue;
-        };
-        let start_line = node.start_line().map(|line| line as i64 + 1).unwrap_or(1);
-        let end_line = node
-            .end_line()
-            .map(|line| line as i64 + 1)
-            .unwrap_or(start_line);
-        let text = sources
-            .read_line_span(file_path, start_line, end_line)
-            .unwrap_or_default();
-        chunks.push(ChunkRec {
-            node_id: node.id.clone(),
-            kind: format!("ast-{}", node.label.to_ascii_lowercase()),
-            file_path: file_path.to_string(),
-            start_line: to_artifact_line(start_line),
-            end_line: to_artifact_line(end_line),
-            text,
-        });
-        count += 1;
-        if count == total || count.is_multiple_of(1000) {
-            emit_phase(
-                on_event,
-                "aka-core:enrichment:chunks-from-facts",
-                count,
-                total,
-            );
-        }
-    }
-    chunks
-}
-
-fn normalize_engine_edge_fact(edge: &mut EdgeRec) {
-    let Some(Value::Object(evidence)) = edge.evidence.as_ref() else {
-        return;
-    };
-    if edge.reason.is_empty() {
-        if let Some(reason) = evidence.get("reason").and_then(Value::as_str) {
-            edge.reason = reason.to_string();
-        }
-    }
-    if let Some(confidence) = evidence.get("confidence").and_then(Value::as_f64) {
-        edge.confidence = confidence;
-    }
-    if edge.step.is_none() {
-        edge.step = evidence
-            .get("step")
-            .and_then(Value::as_u64)
-            .map(|value| value as u32);
-    }
-}
-
-fn normalize_engine_node_fact(node: &mut NodeRec) {
-    let mut cbm_id = None;
-    let mut qualified_name = None;
-    if let Some(rest) = node.id.strip_prefix("cbm:") {
-        if let Some((id, qn)) = rest.split_once(':') {
-            cbm_id = id.parse::<i64>().ok();
-            qualified_name = Some(qn.to_string());
-        }
-    }
-    if let Some(id) = cbm_id {
-        insert_if_missing(&mut node.properties, "cbmId", Value::from(id));
-    }
-    if let Some(qn) = qualified_name {
-        insert_if_missing(
-            &mut node.properties,
-            "qualifiedName",
-            Value::String(qn.clone()),
-        );
-        insert_if_missing(&mut node.properties, "name", Value::String(short_name(&qn)));
-    }
-}
-
-fn short_name(qualified_name: &str) -> String {
-    qualified_name
-        .rsplit([':', '.', '/', '#'])
-        .find(|part| !part.is_empty())
-        .unwrap_or(qualified_name)
-        .to_string()
 }
 
 fn collect_engine_facts(
