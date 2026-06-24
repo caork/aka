@@ -597,6 +597,38 @@ pub trait FactSource {
     ) -> Result<Option<Box<dyn Iterator<Item = FactItem<ChunkFact>> + '_>>, FactSourceError>;
 }
 
+/// Streaming target for in-process fact producers.
+///
+/// Embedded parsers, SCIP importers, and stack-graphs adapters should write to
+/// this trait instead of serializing to a transport first. `FactSource` is the
+/// replayable read side used by the current indexer; `FactSink` is the write
+/// side that lets producers feed the same contract through callbacks.
+pub trait FactSink {
+    type Error;
+
+    fn push_record(&mut self, record: FactRecord) -> Result<(), Self::Error>;
+
+    fn push_manifest(&mut self, manifest: FactManifest) -> Result<(), Self::Error> {
+        self.push_record(FactRecord::Manifest(manifest))
+    }
+
+    fn push_node(&mut self, node: NodeFact) -> Result<(), Self::Error> {
+        self.push_record(FactRecord::Node(node))
+    }
+
+    fn push_edge(&mut self, edge: EdgeFact) -> Result<(), Self::Error> {
+        self.push_record(FactRecord::Edge(edge))
+    }
+
+    fn push_chunk(&mut self, chunk: ChunkFact) -> Result<(), Self::Error> {
+        self.push_record(FactRecord::Chunk(chunk))
+    }
+
+    fn push_done(&mut self, stats: FactStats) -> Result<(), Self::Error> {
+        self.push_record(FactRecord::Done { stats })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FactBatch {
     pub stats: FactStats,
@@ -655,6 +687,15 @@ impl FactBatchBuilder {
             .or_else(|| self.manifest.map(|manifest| manifest.stats))
             .unwrap_or(computed);
         FactBatch::new(stats, self.nodes, self.edges, self.chunks)
+    }
+}
+
+impl FactSink for FactBatchBuilder {
+    type Error = std::convert::Infallible;
+
+    fn push_record(&mut self, record: FactRecord) -> Result<(), Self::Error> {
+        FactBatchBuilder::push_record(self, record);
+        Ok(())
     }
 }
 
@@ -863,6 +904,73 @@ mod tests {
         assert_eq!(batch.nodes().unwrap().count(), 1);
         assert_eq!(batch.nodes().unwrap().count(), 1);
         assert_eq!(batch.stats().nodes, 1);
+    }
+
+    #[test]
+    fn fact_batch_builder_accepts_streaming_sink_events() {
+        let mut builder = FactBatchBuilder::new();
+        {
+            let sink: &mut dyn FactSink<Error = std::convert::Infallible> = &mut builder;
+            sink.push_node(NodeFact {
+                id: "file:src/lib.rs".into(),
+                label: "File".into(),
+                properties: serde_json::json!({ "filePath": "src/lib.rs" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            })
+            .unwrap();
+            sink.push_node(NodeFact {
+                id: "sym:main".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({
+                    "name": "main",
+                    "filePath": "src/lib.rs"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            })
+            .unwrap();
+            sink.push_edge(EdgeFact {
+                id: "edge:1".into(),
+                source_id: "sym:main".into(),
+                target_id: "file:src/lib.rs".into(),
+                edge_type: "DEFINES".into(),
+                confidence: 1.0,
+                reason: "streaming callback".into(),
+                step: None,
+                evidence: None,
+            })
+            .unwrap();
+            sink.push_chunk(ChunkFact {
+                node_id: "sym:main".into(),
+                kind: "ast-function".into(),
+                file_path: "src/lib.rs".into(),
+                start_line: 0,
+                end_line: 0,
+                text: "fn main() {}".into(),
+            })
+            .unwrap();
+            sink.push_done(FactStats {
+                files: 1,
+                nodes: 2,
+                edges: 1,
+                chunks: 1,
+            })
+            .unwrap();
+        }
+
+        assert!(builder.saw_done());
+        let batch = builder.finish();
+
+        assert_eq!(batch.stats.files, 1);
+        assert_eq!(batch.stats.nodes, 2);
+        assert_eq!(batch.stats.edges, 1);
+        assert_eq!(batch.stats.chunks, 1);
+        assert_eq!(batch.nodes().unwrap().count(), 2);
+        assert_eq!(batch.edges().unwrap().count(), 1);
+        assert_eq!(batch.chunks().unwrap().unwrap().count(), 1);
     }
 
     #[test]
