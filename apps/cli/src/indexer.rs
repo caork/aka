@@ -23,6 +23,17 @@ pub struct IndexSummary {
     pub incremental: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnrichmentMergeSummary {
+    pub new_nodes: u64,
+    pub duplicate_nodes: u64,
+    pub new_edges: u64,
+    pub duplicate_edges: u64,
+    pub dangling_edges: u64,
+    pub chunks: u64,
+    pub bad_lines: u64,
+}
+
 pub enum IncrementalIndexOutcome {
     Applied(IndexSummary),
     FullRebuildRequired(String),
@@ -76,6 +87,173 @@ pub fn index_facts_with_deadline_progress(
     progress: Option<&mut IndexProgress<'_>>,
 ) -> Result<IndexSummary> {
     index_facts_inner(source, paths, Some(deadline), progress)
+}
+
+/// Merge optional analyzer facts into an already-ready graph/search index.
+///
+/// This is intentionally append-only and conservative:
+/// - graph edges rely on provenance edge ids for dedupe;
+/// - search documents are added only for newly inserted nodes and their chunks;
+/// - existing baseline graph/search stays usable if callers decide to skip this
+///   optional pass on error.
+pub fn merge_enrichment_facts(
+    source: &impl FactSource,
+    paths: &RepoPaths,
+) -> Result<EnrichmentMergeSummary> {
+    merge_enrichment_facts_with_progress(source, paths, None)
+}
+
+pub fn merge_enrichment_facts_with_progress(
+    source: &impl FactSource,
+    paths: &RepoPaths,
+    progress: Option<&mut IndexProgress<'_>>,
+) -> Result<EnrichmentMergeSummary> {
+    merge_enrichment_facts_inner(source, paths, None, progress)
+}
+
+pub fn merge_enrichment_facts_with_deadline_progress(
+    source: &impl FactSource,
+    paths: &RepoPaths,
+    deadline: IndexingDeadline,
+    progress: Option<&mut IndexProgress<'_>>,
+) -> Result<EnrichmentMergeSummary> {
+    merge_enrichment_facts_inner(source, paths, Some(deadline), progress)
+}
+
+fn merge_enrichment_facts_inner(
+    source: &impl FactSource,
+    paths: &RepoPaths,
+    deadline: Option<IndexingDeadline>,
+    mut progress: Option<&mut IndexProgress<'_>>,
+) -> Result<EnrichmentMergeSummary> {
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "enrichment:open",
+        "opening existing graph and search indexes".into(),
+        None,
+        None,
+    );
+    let mut store = GraphStore::open(&paths.graph_db())
+        .with_context(|| format!("open graph index {}", paths.graph_db().display()))?;
+    let mut search = SearchIndexWriter::open(&paths.search_dir())
+        .with_context(|| format!("open search index {}", paths.search_dir().display()))?;
+
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "enrichment:slice",
+        "filtering enrichment nodes already present in graph".into(),
+        Some(0),
+        Some(source.stats().nodes),
+    );
+    let mut summary = EnrichmentMergeSummary::default();
+    let mut new_node_ids = BTreeSet::new();
+    let mut nodes = Vec::new();
+    for node in source.nodes()? {
+        let node = match node {
+            Ok(node) => node,
+            Err(_) => {
+                summary.bad_lines += 1;
+                continue;
+            }
+        };
+        check_deadline(deadline, "enrichment:slice:nodes")?;
+        if store.node_by_id(&node.id)?.is_some() {
+            summary.duplicate_nodes += 1;
+            continue;
+        }
+        new_node_ids.insert(node.id.clone());
+        nodes.push(node);
+    }
+
+    let mut edges = Vec::new();
+    for edge in source.edges()? {
+        let edge = match edge {
+            Ok(edge) => edge,
+            Err(_) => {
+                summary.bad_lines += 1;
+                continue;
+            }
+        };
+        check_deadline(deadline, "enrichment:slice:edges")?;
+        edges.push(edge);
+    }
+
+    let mut chunks = Vec::new();
+    if let Some(chunk_iter) = source.chunks()? {
+        for chunk in chunk_iter {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(_) => {
+                    summary.bad_lines += 1;
+                    continue;
+                }
+            };
+            check_deadline(deadline, "enrichment:slice:chunks")?;
+            if new_node_ids.contains(&chunk.node_id) {
+                chunks.push(chunk);
+            }
+        }
+    }
+
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "enrichment:graph",
+        format!("appending {} nodes and {} edges", nodes.len(), edges.len()),
+        Some(0),
+        Some((nodes.len() + edges.len()) as u64),
+    );
+    let graph_stats =
+        store.ingest_with_cancel(nodes.clone().into_iter(), edges.into_iter(), || {
+            deadline_expired(deadline)
+        })?;
+    summary.new_nodes = graph_stats.nodes;
+    summary.duplicate_nodes += graph_stats.duplicate_nodes;
+    summary.new_edges = graph_stats.edges;
+    summary.duplicate_edges = graph_stats.duplicate_edges;
+    summary.dangling_edges = graph_stats.dangling_edges;
+    check_deadline(deadline, "enrichment:graph")?;
+
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "enrichment:layout",
+        "rebuilding adjacency and layout after enrichment".into(),
+        None,
+        None,
+    );
+    let adj = Adjacency::build(&store)?;
+    check_deadline(deadline, "enrichment:layout")?;
+    compute_layout(&store, &adj)?;
+
+    emit_index_progress(
+        progress.as_deref_mut(),
+        "enrichment:search",
+        format!(
+            "adding {} new enrichment nodes and {} chunks to search",
+            nodes.len(),
+            chunks.len()
+        ),
+        Some(0),
+        Some((nodes.len() + chunks.len()) as u64),
+    );
+    search.add_nodes_with_cancel(nodes.into_iter(), || deadline_expired(deadline))?;
+    check_deadline(deadline, "enrichment:search:nodes")?;
+    let chunk_count = chunks.len() as u64;
+    search.add_chunks_with_cancel(chunks.into_iter(), || deadline_expired(deadline))?;
+    summary.chunks = chunk_count;
+    check_deadline(deadline, "enrichment:search:chunks")?;
+    search.commit()?;
+    emit_index_progress(
+        progress,
+        "enrichment:done",
+        format!(
+            "enrichment merge complete; nodes={} edges={} duplicate_edges={} dangling_edges={}",
+            summary.new_nodes, summary.new_edges, summary.duplicate_edges, summary.dangling_edges
+        ),
+        None,
+        None,
+    );
+
+    Ok(summary)
 }
 
 fn index_facts_inner(
@@ -726,6 +904,7 @@ fn remove_if_exists(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use aka_core::{FactBatch, FactStats};
+    use aka_search::SearchIndex;
 
     #[test]
     fn indexes_replayable_fact_batch_without_ndjson_artifacts() {
@@ -777,5 +956,129 @@ mod tests {
         assert_eq!(summary.chunks, 1);
         assert!(paths.graph_db().is_file());
         assert!(paths.search_dir().is_dir());
+    }
+
+    #[test]
+    fn merge_enrichment_facts_appends_new_nodes_and_dedupes_provenance_edges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 1,
+                nodes: 1,
+                edges: 0,
+                chunks: 0,
+            },
+            vec![NodeRec {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({
+                    "name": "handler",
+                    "filePath": "src/lib.rs",
+                    "startLine": 0
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        index_facts(&baseline, &paths).unwrap();
+
+        let enrichment = FactBatch::new(
+            FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 1,
+                chunks: 1,
+            },
+            vec![NodeRec {
+                id: "scip:symbol:service".into(),
+                label: "Interface".into(),
+                properties: serde_json::json!({
+                    "name": "Service",
+                    "source": "scip",
+                    "provenance": {
+                        "source": "scip",
+                        "analyzerId": "scip",
+                        "toolVersion": "1.0",
+                        "adapterVersion": "test",
+                        "oss": true
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }],
+            vec![EdgeRec {
+                id: "scip:edge:handler-service".into(),
+                source_id: "sym:handler".into(),
+                target_id: "scip:symbol:service".into(),
+                edge_type: "DEPENDS_ON".into(),
+                confidence: 1.0,
+                reason: "scip relationship".into(),
+                step: None,
+                evidence: Some(serde_json::json!({
+                    "source": "scip",
+                    "provenance": {
+                        "source": "scip",
+                        "analyzerId": "scip",
+                        "toolVersion": "1.0",
+                        "adapterVersion": "test",
+                        "oss": true
+                    }
+                })),
+            }],
+            vec![ChunkRec {
+                node_id: "scip:symbol:service".into(),
+                kind: "scip-symbol".into(),
+                file_path: "src/lib.rs".into(),
+                start_line: 0,
+                end_line: 0,
+                text: "trait Service".into(),
+            }],
+        );
+
+        let first = merge_enrichment_facts(&enrichment, &paths).unwrap();
+        let second = merge_enrichment_facts(&enrichment, &paths).unwrap();
+
+        assert_eq!(first.new_nodes, 1);
+        assert_eq!(first.new_edges, 1);
+        assert_eq!(first.chunks, 1);
+        assert_eq!(second.new_nodes, 0);
+        assert_eq!(second.duplicate_nodes, 1);
+        assert_eq!(second.new_edges, 0);
+        assert_eq!(second.duplicate_edges, 1);
+
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        assert_eq!(graph.node_count().unwrap(), 2);
+        assert_eq!(graph.edge_count().unwrap(), 1);
+        let handler = graph.node_by_id("sym:handler").unwrap().unwrap();
+        let linked = graph
+            .outgoing_linked_nodes(handler.rowid, &["DEPENDS_ON"])
+            .unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(
+            linked[0]
+                .evidence
+                .as_ref()
+                .and_then(|value| value.get("provenance"))
+                .and_then(|value| value.get("analyzerId")),
+            Some(&serde_json::json!("scip"))
+        );
+
+        let search = SearchIndex::open(&paths.search_dir()).unwrap();
+        let hits = search.search("Service", 10).unwrap();
+        assert_eq!(
+            hits.iter()
+                .filter(|hit| hit.node_id == "scip:symbol:service")
+                .count(),
+            1
+        );
     }
 }
