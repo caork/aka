@@ -235,6 +235,37 @@ pub fn run_analyze_with_progress(
     let settings = aka_core::AkaSettings::load().unwrap_or_default();
     let enrichment_policy = OssAnalyzerEnrichmentPolicy::from_settings(settings.clone());
     let mut enrichment_progress = |ev: &EngineEvent| {
+        match ev {
+            EngineEvent::Progress { progress } => {
+                eprintln!(
+                    "  · enrichment {}: {}",
+                    progress.stage.as_str(),
+                    progress.message
+                );
+            }
+            EngineEvent::Phase {
+                phase,
+                current,
+                total,
+            } => {
+                eprintln!("  · enrichment {phase} ({current}/{total})");
+            }
+            EngineEvent::Log { stream, line }
+                if stream == "oss-analyzer-enrichment" || stream == "runtime" =>
+            {
+                eprintln!("  · {line}");
+            }
+            EngineEvent::Warning { message } => {
+                eprintln!("  ! enrichment {message}");
+            }
+            EngineEvent::Done { stats } => {
+                eprintln!(
+                    "  ✓ enrichment stats: {} files / {} nodes / {} edges / {} chunks",
+                    stats.files, stats.nodes, stats.edges, stats.chunks
+                );
+            }
+            _ => {}
+        }
         if let Some(cb) = progress.as_deref_mut() {
             cb(ev);
         }
