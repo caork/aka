@@ -1,6 +1,6 @@
 {
   "name": "aka",
-  "version": "0.1.22",
+  "version": "0.1.24",
   "description": "aka 代码知识引擎：捆绑 AKA 桌面端本地 HTTP MCP 配置、19 个代码图谱工具与使用策略 skill。",
   "author": {
     "name": "caork",

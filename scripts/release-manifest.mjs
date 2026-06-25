@@ -147,6 +147,20 @@ function assetInfo(name) {
       label: "Windows Setup EXE",
     };
   }
+  const linux = name.match(
+    /aka-desktop-.+-(aarch64|x86_64)-unknown-linux-gnu\.(AppImage|deb|rpm)$/,
+  );
+  if (linux) {
+    const arch = linux[1] === "aarch64" ? "arm64" : "x64";
+    const kind = linux[2] === "AppImage" ? "appimage" : linux[2];
+    return {
+      platform: "linux",
+      kind,
+      arch,
+      target: `${linux[1]}-unknown-linux-gnu`,
+      label: `Linux ${linux[2]} (${arch})`,
+    };
+  }
   return null;
 }
 

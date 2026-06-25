@@ -18,6 +18,10 @@
 #   dist/aka-desktop-<ver>-<host-triple>.app.tar.gz[.sig]
 #                                             macOS Tauri updater 包（存在签名密钥时生成）
 #   dist/aka-desktop-<ver>-macos-open.sh      macOS 无公证包打开助手（去 quarantine）
+#   dist/aka-desktop-<ver>-x86_64-unknown-linux-gnu.AppImage
+#                                             Linux Tauri GUI AppImage
+#   dist/aka-desktop-<ver>-x86_64-unknown-linux-gnu.deb
+#                                             Linux Tauri GUI deb
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe
 #                                             Windows Tauri GUI NSIS installer
 #   dist/aka-desktop-<ver>-x86_64-pc-windows-msvc-setup.exe.sig
@@ -87,6 +91,8 @@ platform_from_triple() {
   case "$1" in
     aarch64-apple-darwin) echo "darwin-arm64" ;;
     x86_64-apple-darwin) echo "darwin-x64" ;;
+    aarch64-unknown-linux-gnu) echo "linux-arm64" ;;
+    x86_64-unknown-linux-gnu) echo "linux-x64" ;;
     x86_64-pc-windows-msvc) echo "win-x64" ;;
     *) echo "error: 不支持的桌面资源平台 $1" >&2; return 1 ;;
   esac
@@ -101,7 +107,7 @@ engine_dll_for_platform() {
 
 legacy_engine_resource_names() {
   case "$1" in
-    darwin-arm64|darwin-x64) printf '%s\n' "aka-engine" "codebase-memory-mcp" ;;
+    darwin-arm64|darwin-x64|linux-arm64|linux-x64) printf '%s\n' "aka-engine" "codebase-memory-mcp" ;;
     win-x64) printf '%s\n' "aka-engine.exe" "codebase-memory-mcp.exe" ;;
     *) echo "error: 不支持的 AKA engine 平台 $1" >&2; return 1 ;;
   esac
@@ -411,6 +417,64 @@ assert_zip_engine_resources() {
   return 1
 }
 
+assert_extracted_engine_resources() {
+  local root platform label dir
+  root="$1"
+  platform="$2"
+  label="$3"
+  [[ -d "${root}" ]] || { echo "error: 解包目录不存在: ${root}" >&2; return 1; }
+  while IFS= read -r dir; do
+    dir="$(dirname "${dir}")"
+    assert_engine_resource_dir "${platform}" "${dir}"
+    echo "==> 校验 ${label} 包内 engine metadata: ${dir}/ENGINE_SHA"
+    return 0
+  done < <(find "${root}" -type f -path '*/engine/ENGINE_SHA' -print)
+  echo "error: ${label} 包内缺少 engine metadata: ${root}" >&2
+  return 1
+}
+
+assert_deb_engine_resources() {
+  local deb_path platform stage
+  deb_path="$1"
+  platform="$2"
+  [[ -f "${deb_path}" ]] || { echo "error: 找不到 deb: ${deb_path}" >&2; return 1; }
+  command -v dpkg-deb >/dev/null 2>&1 || { echo "warning: 未安装 dpkg-deb，跳过 deb engine 资源解包校验" >&2; return 0; }
+  stage="$(mktemp -d)"
+  dpkg-deb -x "${deb_path}" "${stage}"
+  assert_extracted_engine_resources "${stage}" "${platform}" "deb"
+  rm -rf "${stage}"
+}
+
+assert_rpm_engine_resources() {
+  local rpm_path platform stage
+  rpm_path="$1"
+  platform="$2"
+  [[ -f "${rpm_path}" ]] || { echo "error: 找不到 rpm: ${rpm_path}" >&2; return 1; }
+  if ! command -v rpm2cpio >/dev/null 2>&1 || ! command -v cpio >/dev/null 2>&1; then
+    echo "warning: 未安装 rpm2cpio/cpio，跳过 rpm engine 资源解包校验" >&2
+    return 0
+  fi
+  stage="$(mktemp -d)"
+  (cd "${stage}" && rpm2cpio "${rpm_path}" | cpio -id --quiet)
+  assert_extracted_engine_resources "${stage}" "${platform}" "rpm"
+  rm -rf "${stage}"
+}
+
+assert_appimage_engine_resources() {
+  local appimage_path platform stage
+  appimage_path="$1"
+  platform="$2"
+  [[ -f "${appimage_path}" ]] || { echo "error: 找不到 AppImage: ${appimage_path}" >&2; return 1; }
+  chmod +x "${appimage_path}"
+  stage="$(mktemp -d)"
+  if (cd "${stage}" && "${appimage_path}" --appimage-extract >/dev/null 2>&1); then
+    assert_extracted_engine_resources "${stage}/squashfs-root" "${platform}" "AppImage"
+  else
+    echo "warning: AppImage 解包失败，跳过 engine 资源解包校验: ${appimage_path}" >&2
+  fi
+  rm -rf "${stage}"
+}
+
 prepare_desktop_resources() {
   local triple platform
   triple="$1"
@@ -512,6 +576,15 @@ find_tauri_dmg() {
   local dmg_dir
   dmg_dir="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/dmg"
   find "${dmg_dir}" -maxdepth 1 -type f -name '*.dmg' | sort | tail -n 1
+}
+
+find_tauri_linux_artifact() {
+  local bundle_kind pattern artifact_dir
+  bundle_kind="$1"
+  pattern="$2"
+  artifact_dir="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/${bundle_kind}"
+  [[ -d "${artifact_dir}" ]] || return 0
+  find "${artifact_dir}" -maxdepth 1 -type f -name "${pattern}" | sort | tail -n 1
 }
 
 find_tauri_updater_archive() {
@@ -668,7 +741,7 @@ package_clients() {
 }
 
 package_desktop() {
-  local host_os host_arch desktop_triple desktop_platform app_path desktop_dmg desktop_zip desktop_updater helper_script signed_release tauri_dmg tauri_updater tauri_macos_bundle_dir
+  local host_os host_arch desktop_triple desktop_platform app_path desktop_dmg desktop_zip desktop_updater helper_script signed_release tauri_dmg tauri_updater tauri_macos_bundle_dir linux_appimage_src linux_appimage linux_deb_src linux_deb linux_rpm_src linux_rpm
   host_os="$(uname -s)"
   host_arch="$(uname -m)"
 
@@ -777,8 +850,61 @@ package_desktop() {
       chmod +x "${helper_script}"
       echo "==> ${helper_script}"
       ;;
+    Linux)
+      case "${host_arch}" in
+        x86_64)        desktop_triple="x86_64-unknown-linux-gnu" ;;
+        arm64|aarch64) desktop_triple="aarch64-unknown-linux-gnu" ;;
+        *) echo "error: 不支持的 Linux 架构 ${host_arch}" >&2; return 1 ;;
+      esac
+      desktop_platform="$(platform_from_triple "${desktop_triple}")"
+
+      if [[ "${SKIP_BUILD}" -eq 0 ]]; then
+        prepare_desktop_resources "${desktop_triple}"
+        local tauri_args=(build --bundles appimage,deb --features embedded-engine --ci)
+        local updater_config_args
+        local native_updater_env=()
+        updater_config_args="$(tauri_updater_config_args)" || return 1
+        if [[ -n "${updater_config_args}" ]]; then
+          native_updater_env=(AKA_ENABLE_NATIVE_UPDATER=1)
+          while IFS= read -r arg; do
+            tauri_args+=("${arg}")
+          done <<< "${updater_config_args}"
+        fi
+        echo "==> npm run tauri -- ${tauri_args[*]}"
+        if [[ "${#native_updater_env[@]}" -gt 0 ]]; then
+          (cd "${REPO_ROOT}/apps/desktop" && env "${native_updater_env[@]}" npm run tauri -- "${tauri_args[@]}")
+        else
+          (cd "${REPO_ROOT}/apps/desktop" && npm run tauri -- "${tauri_args[@]}")
+        fi
+      fi
+
+      linux_appimage_src="$(find_tauri_linux_artifact appimage '*.AppImage' || true)"
+      [[ -f "${linux_appimage_src}" ]] || { echo "error: Tauri 未产出 Linux AppImage" >&2; return 1; }
+      linux_appimage="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.AppImage"
+      rm -f "${linux_appimage}"
+      cp "${linux_appimage_src}" "${linux_appimage}"
+      assert_appimage_engine_resources "${linux_appimage}" "${desktop_platform}"
+      echo "==> ${linux_appimage}"
+
+      linux_deb_src="$(find_tauri_linux_artifact deb '*.deb' || true)"
+      [[ -f "${linux_deb_src}" ]] || { echo "error: Tauri 未产出 Linux deb" >&2; return 1; }
+      linux_deb="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.deb"
+      rm -f "${linux_deb}"
+      cp "${linux_deb_src}" "${linux_deb}"
+      assert_deb_engine_resources "${linux_deb}" "${desktop_platform}"
+      echo "==> ${linux_deb}"
+
+      linux_rpm_src="$(find_tauri_linux_artifact rpm '*.rpm' || true)"
+      if [[ -f "${linux_rpm_src}" ]]; then
+        linux_rpm="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.rpm"
+        rm -f "${linux_rpm}"
+        cp "${linux_rpm_src}" "${linux_rpm}"
+        assert_rpm_engine_resources "${linux_rpm}" "${desktop_platform}"
+        echo "==> ${linux_rpm}"
+      fi
+      ;;
     *)
-      echo "error: --desktop/--desktop-only 当前只打包本机 macOS GUI；Windows GUI 请用 --desktop-windows。" >&2
+      echo "error: --desktop/--desktop-only 当前只支持本机 macOS/Linux GUI；Windows GUI 请用 --desktop-windows。" >&2
       return 1
       ;;
   esac
@@ -873,7 +999,7 @@ if [[ "${DESKTOP_ONLY}" -eq 1 ]]; then
   package_desktop
   echo
   echo "==> 完成桌面 GUI 包。校验和请最后单独跑: scripts/package-release.sh --checksums-only"
-  ls -lh "${DIST_DIR}/aka-desktop-${VERSION}-"*.dmg "${DIST_DIR}/aka-desktop-${VERSION}-"*.app.zip
+  ls -lh "${DIST_DIR}/aka-desktop-${VERSION}-"*
   exit 0
 fi
 
