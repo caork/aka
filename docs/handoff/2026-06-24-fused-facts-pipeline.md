@@ -23,13 +23,16 @@ Latest relevant main repo commits:
 
 Nested engine repo `engine/aka-engine-src` latest relevant commits:
 
+- `e261808 fix: support pic embedded engine archive`
+- `6f00aed feat: add baseline direct facts mode`
+- `ce40255 feat: add embedded index progress callbacks`
 - `f77d34f feat: add embedded facts api`
 - `1d9c4f6 refactor: emit facts through sink`
 - `f96acdd feat: emit direct facts sidecar`
 
 Pinned engine ref:
 
-- `engine/ENGINE_SHA`: `f77d34f853ca1252cde573ff4e49443f95d7efed`
+- `engine/ENGINE_SHA`: `e26180806dee7a63156a73751616d78ce27b017e`
 - `Dockerfile` and `.github/workflows/release.yml` are pinned to the same SHA.
 - The nested engine commits have been pushed to `caork/aka-engine main`.
 
