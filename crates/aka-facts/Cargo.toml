@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+scip-import = ["dep:protobuf", "dep:scip"]
+
 [dependencies]
+protobuf = { version = "=3.7.2", optional = true }
+scip = { version = "0.8.1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
