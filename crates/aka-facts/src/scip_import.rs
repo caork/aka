@@ -183,10 +183,28 @@ impl ScipImporter {
         };
         let symbol_id = symbol_id(&occurrence.symbol);
         let role = occurrence_role(occurrence.symbol_roles);
+        let occurrence_id = occurrence_id(file_id, &symbol_id, &range, occurrence.symbol_roles);
         if role == OccurrenceRole::Definition || role == OccurrenceRole::Declaration {
             self.definition_ranges
                 .entry(symbol_id.clone())
                 .or_insert_with(|| range.clone());
+            let edge_id = format!("{occurrence_id}:def");
+            self.relations
+                .entry(edge_id.clone())
+                .or_insert(RelationFact {
+                    id: edge_id,
+                    source: file_id.to_string(),
+                    target: symbol_id.clone(),
+                    kind: RelationKind::Defines,
+                    confidence: 1.0,
+                    reason: Some("scip definition occurrence".into()),
+                    step: None,
+                    evidence: Some(serde_json::json!({
+                        "source": "scip",
+                        "role": format!("{role:?}"),
+                        "range": occurrence.range,
+                    })),
+                });
         }
 
         let mut properties = JsonMap::new();
@@ -206,7 +224,6 @@ impl ScipImporter {
             properties.insert("syntaxKind".into(), Value::String(format!("{syntax:?}")));
         }
 
-        let occurrence_id = occurrence_id(file_id, &symbol_id, &range, occurrence.symbol_roles);
         self.occurrences.push(OccurrenceFact {
             id: occurrence_id.clone(),
             symbol_id: symbol_id.clone(),
@@ -495,6 +512,10 @@ mod tests {
         assert!(bundle
             .relations
             .iter()
+            .any(|relation| relation.kind == RelationKind::Defines));
+        assert!(bundle
+            .relations
+            .iter()
             .any(|relation| relation.kind == RelationKind::Implements));
         assert!(bundle
             .relations
@@ -524,6 +545,42 @@ mod tests {
             bundle.relations[0].target,
             "scip:symbol:rust cargo dep 1.0.0 dep/Service#"
         );
+    }
+
+    #[test]
+    fn imports_definition_occurrences_as_file_defines_symbol_edges() {
+        let mut index = Index::new();
+        let mut doc = Document::new();
+        doc.relative_path = "src/app.py".into();
+
+        let mut service = SymbolInformation::new();
+        service.symbol = "python pip demo 1.0.0 demo/Service#".into();
+        service.display_name = "Service".into();
+        service.kind = EnumOrUnknown::new(symbol_information::Kind::Class);
+
+        let mut def = Occurrence::new();
+        def.symbol = service.symbol.clone();
+        def.range = vec![4, 0, 4, 12];
+        def.symbol_roles = SymbolRole::Definition.value();
+
+        doc.symbols.push(service);
+        doc.occurrences.push(def);
+        index.documents.push(doc);
+
+        let bundle = import_scip_index(&index);
+        let defines: Vec<_> = bundle
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Defines)
+            .collect();
+
+        assert_eq!(defines.len(), 1);
+        assert_eq!(defines[0].source, "file:src/app.py");
+        assert_eq!(
+            defines[0].target,
+            "scip:symbol:python pip demo 1.0.0 demo/Service#"
+        );
+        assert!(defines[0].id.ends_with(":def"));
     }
 
     #[test]
