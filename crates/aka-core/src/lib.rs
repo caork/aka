@@ -15,11 +15,11 @@ pub use aka_facts::{
 };
 pub use aka_facts::{
     produce_semantic_batch, produce_semantic_into, replay_semantic_bundle_into, ChunkFact,
-    EdgeFact, FactBatch, FactItem, FactManifest, FactRecord, FactSink, FactSource, FactSourceError,
-    FactStats, FileFact, JsonMap, NodeFact, OccurrenceFact, OccurrenceRole, ProducerCapability,
-    ProducerContext, RelationFact, RelationKind, SemanticFactBundle, SemanticFactBundleBuilder,
-    SemanticFactProducer, SemanticFactSink, SymbolFact, SymbolId, SymbolKind, TextRange,
-    FACTS_VERSION,
+    EdgeFact, FactBatch, FactBatchFileError, FactItem, FactManifest, FactRecord, FactSink,
+    FactSource, FactSourceError, FactStats, FileFact, JsonMap, NodeFact, OccurrenceFact,
+    OccurrenceRole, ProducerCapability, ProducerContext, RelationFact, RelationKind,
+    SemanticFactBundle, SemanticFactBundleBuilder, SemanticFactProducer, SemanticFactSink,
+    SymbolFact, SymbolId, SymbolKind, TextRange, FACTS_VERSION,
 };
 pub use engine::{
     index_max_duration, AnalyzeFactsOptions, EngineError, EngineRunner, IndexingDeadline,

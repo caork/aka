@@ -89,6 +89,7 @@ async fn app_settings_default_and_update() {
     assert_eq!(v["ossAnalyzerEnrichmentEnabled"], false);
     assert_eq!(v["ossAnalyzerEnrichmentMaxSecs"], 30);
     assert!(v["scipIndexPath"].is_null());
+    assert!(v["ossAnalyzerFactsPath"].is_null());
 
     let res = app()
         .oneshot(post_json("/api/settings", json!({ "indexMaxSecs": 3 })))
@@ -100,6 +101,7 @@ async fn app_settings_default_and_update() {
     assert_eq!(v["ossAnalyzerEnrichmentEnabled"], false);
     assert_eq!(v["ossAnalyzerEnrichmentMaxSecs"], 30);
     assert!(v["scipIndexPath"].is_null());
+    assert!(v["ossAnalyzerFactsPath"].is_null());
 
     let res = app()
         .oneshot(post_json(
@@ -108,7 +110,8 @@ async fn app_settings_default_and_update() {
                 "indexMaxSecs": 120,
                 "ossAnalyzerEnrichmentEnabled": true,
                 "ossAnalyzerEnrichmentMaxSecs": 1,
-                "scipIndexPath": "/tmp/repo/index.scip"
+                "scipIndexPath": "/tmp/repo/index.scip",
+                "ossAnalyzerFactsPath": "/tmp/repo/.aka/oss-analyzer-facts.json"
             }),
         ))
         .await
@@ -119,6 +122,10 @@ async fn app_settings_default_and_update() {
     assert_eq!(v["ossAnalyzerEnrichmentEnabled"], true);
     assert_eq!(v["ossAnalyzerEnrichmentMaxSecs"], 5);
     assert_eq!(v["scipIndexPath"], "/tmp/repo/index.scip");
+    assert_eq!(
+        v["ossAnalyzerFactsPath"],
+        "/tmp/repo/.aka/oss-analyzer-facts.json"
+    );
 
     let res = app()
         .oneshot(post_json(

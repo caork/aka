@@ -79,6 +79,8 @@ export default function AppSettingsModal({
     useState(OSS_ANALYZER_MAX_DEFAULT);
   const [scipIndexPath, setScipIndexPath] = useState("");
   const [savedScipIndexPath, setSavedScipIndexPath] = useState("");
+  const [ossAnalyzerFactsPath, setOssAnalyzerFactsPath] = useState("");
+  const [savedOssAnalyzerFactsPath, setSavedOssAnalyzerFactsPath] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -99,6 +101,9 @@ export default function AppSettingsModal({
         const nextScipPath = settings.scipIndexPath ?? "";
         setScipIndexPath(nextScipPath);
         setSavedScipIndexPath(nextScipPath);
+        const nextFactsPath = settings.ossAnalyzerFactsPath ?? "";
+        setOssAnalyzerFactsPath(nextFactsPath);
+        setSavedOssAnalyzerFactsPath(nextFactsPath);
       })
       .catch((e) => {
         if (!cancelled) {
@@ -219,6 +224,9 @@ export default function AppSettingsModal({
           ossAnalyzerEnrichmentMaxSecs,
         ),
         scipIndexPath: scipIndexPath.trim() ? scipIndexPath.trim() : null,
+        ossAnalyzerFactsPath: ossAnalyzerFactsPath.trim()
+          ? ossAnalyzerFactsPath.trim()
+          : null,
         lspEnrichmentEnabled: ossAnalyzerEnrichmentEnabled,
         lspEnrichmentMaxSecs: clampOssAnalyzerMaxSecs(ossAnalyzerEnrichmentMaxSecs),
       });
@@ -233,6 +241,9 @@ export default function AppSettingsModal({
       const nextScipPath = settings.scipIndexPath ?? "";
       setScipIndexPath(nextScipPath);
       setSavedScipIndexPath(nextScipPath);
+      const nextFactsPath = settings.ossAnalyzerFactsPath ?? "";
+      setOssAnalyzerFactsPath(nextFactsPath);
+      setSavedOssAnalyzerFactsPath(nextFactsPath);
       setNotice("Indexing 设置已保存");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -246,7 +257,8 @@ export default function AppSettingsModal({
     ossAnalyzerEnrichmentEnabled !== savedOssAnalyzerEnrichmentEnabled ||
     clampOssAnalyzerMaxSecs(ossAnalyzerEnrichmentMaxSecs) !==
       savedOssAnalyzerEnrichmentMaxSecs ||
-    scipIndexPath.trim() !== savedScipIndexPath;
+    scipIndexPath.trim() !== savedScipIndexPath ||
+    ossAnalyzerFactsPath.trim() !== savedOssAnalyzerFactsPath;
 
   return (
     <Modal open={open} onClose={onClose} title="Settings" width={520}>
@@ -433,6 +445,22 @@ export default function AppSettingsModal({
                 placeholder="repo/index.scip"
                 className="h-full w-full text-[12.5px]"
                 data-testid="scip-index-path-input"
+              />
+            </span>
+          </label>
+          <label className="mt-3 block">
+            <span className="mb-1 block text-[11.5px] text-ink-3">
+              External aka-facts bundle path
+            </span>
+            <span className="cmd-input flex h-8 items-center px-2.5">
+              <input
+                type="text"
+                value={ossAnalyzerFactsPath}
+                onChange={(e) => setOssAnalyzerFactsPath(e.target.value)}
+                disabled={settingsBusy || !ossAnalyzerEnrichmentEnabled}
+                placeholder="repo/.aka/oss-analyzer-facts.json"
+                className="h-full w-full text-[12.5px]"
+                data-testid="oss-analyzer-facts-path-input"
               />
             </span>
           </label>

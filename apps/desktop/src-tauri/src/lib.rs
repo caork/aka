@@ -207,6 +207,8 @@ struct AppSettingsRequest {
     #[serde(default)]
     scip_index_path: Option<PathBuf>,
     #[serde(default)]
+    oss_analyzer_facts_path: Option<PathBuf>,
+    #[serde(default)]
     lsp_enrichment_enabled: Option<bool>,
     #[serde(default)]
     lsp_enrichment_max_secs: Option<u64>,
@@ -583,6 +585,7 @@ async fn set_app_settings(settings: AppSettingsRequest) -> Result<AkaSettings, S
                 .unwrap_or(DEFAULT_OSS_ANALYZER_ENRICHMENT_MAX_SECS),
         ),
         scip_index_path: settings.scip_index_path,
+        oss_analyzer_facts_path: settings.oss_analyzer_facts_path,
     }
     .save()
     .map_err(|e| format!("{e:#}"))

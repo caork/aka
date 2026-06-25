@@ -245,6 +245,7 @@ pub fn run_analyze_with_progress(
         enrichment_policy,
         enrichment::EnrichmentProviderConfig {
             scip_index_path: settings.scip_index_path,
+            oss_analyzer_facts_path: settings.oss_analyzer_facts_path,
         },
         &mut enrichment_progress,
     );

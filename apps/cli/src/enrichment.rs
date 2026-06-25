@@ -33,12 +33,17 @@ pub enum OptionalEnrichmentOutcome {
 pub trait OptionalEnrichmentProvider {
     fn id(&self) -> &'static str;
 
+    fn analyzer_id(&self) -> Option<&'static str> {
+        Some(self.id())
+    }
+
     fn produce(&self, repo: &Path) -> Result<Option<FactBatch>, FactSourceError>;
 }
 
 #[derive(Debug, Clone)]
 pub struct EnrichmentProviderConfig {
     pub scip_index_path: Option<PathBuf>,
+    pub oss_analyzer_facts_path: Option<PathBuf>,
 }
 
 pub fn run_optional_enrichment(
@@ -48,16 +53,18 @@ pub fn run_optional_enrichment(
     config: EnrichmentProviderConfig,
     on_event: &mut dyn FnMut(&EngineEvent),
 ) -> OptionalEnrichmentOutcome {
+    let facts_file = FactsFileProvider::new(config.oss_analyzer_facts_path);
     #[cfg(feature = "scip-import")]
     {
         let scip = ScipIndexProvider::new(config.scip_index_path, policy.max_duration);
-        let providers: [&dyn OptionalEnrichmentProvider; 1] = [&scip];
+        let providers: [&dyn OptionalEnrichmentProvider; 2] = [&facts_file, &scip];
         run_optional_enrichment_with_providers(repo, paths, policy, &providers, on_event)
     }
     #[cfg(not(feature = "scip-import"))]
     {
-        let _ = config;
-        run_optional_enrichment_with_providers(repo, paths, policy, &[], on_event)
+        let _ = config.scip_index_path;
+        let providers: [&dyn OptionalEnrichmentProvider; 1] = [&facts_file];
+        run_optional_enrichment_with_providers(repo, paths, policy, &providers, on_event)
     }
 }
 
@@ -109,16 +116,19 @@ pub fn run_optional_enrichment_with_providers(
             );
             break;
         }
-        if find_oss_analyzer(provider.id()).is_none() {
-            failed += 1;
-            emit_log(
-                on_event,
-                format!(
-                    "provider={} rejected reason=unsupported_analyzer",
-                    provider.id()
-                ),
-            );
-            continue;
+        if let Some(analyzer_id) = provider.analyzer_id() {
+            if find_oss_analyzer(analyzer_id).is_none() {
+                failed += 1;
+                emit_log(
+                    on_event,
+                    format!(
+                        "provider={} rejected analyzer={} reason=unsupported_analyzer",
+                        provider.id(),
+                        analyzer_id
+                    ),
+                );
+                continue;
+            }
         }
         attempted += 1;
         emit_log(
@@ -227,6 +237,43 @@ pub fn run_optional_enrichment_with_providers(
         ),
     );
     OptionalEnrichmentOutcome::Skipped { attempted, failed }
+}
+
+#[derive(Debug, Clone)]
+struct FactsFileProvider {
+    configured_path: Option<PathBuf>,
+}
+
+impl FactsFileProvider {
+    fn new(configured_path: Option<PathBuf>) -> Self {
+        Self { configured_path }
+    }
+
+    fn candidate_path(&self, repo: &Path) -> PathBuf {
+        self.configured_path
+            .clone()
+            .unwrap_or_else(|| repo.join(".aka").join("oss-analyzer-facts.json"))
+    }
+}
+
+impl OptionalEnrichmentProvider for FactsFileProvider {
+    fn id(&self) -> &'static str {
+        "aka-facts-file"
+    }
+
+    fn analyzer_id(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn produce(&self, repo: &Path) -> Result<Option<FactBatch>, FactSourceError> {
+        let path = self.candidate_path(repo);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        aka_core::FactBatch::from_json_file(&path)
+            .map(Some)
+            .map_err(|err| FactSourceError::Message(err.to_string()))
+    }
 }
 
 #[cfg(feature = "scip-import")]
@@ -762,6 +809,111 @@ mod tests {
         let graph = GraphStore::open(&paths.graph_db()).unwrap();
         assert_eq!(graph.node_count().unwrap(), 3);
         assert_eq!(graph.edge_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn facts_file_provider_imports_existing_oss_analyzer_facts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 0,
+                chunks: 0,
+            },
+            vec![NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({"name": "handler"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        index_facts(&baseline, &paths).unwrap();
+        let facts_path = repo.join("oss-analyzer-facts.json");
+        std::fs::write(
+            &facts_path,
+            serde_json::json!({
+                "stats": {"files": 0, "nodes": 1, "edges": 1, "chunks": 0},
+                "nodes": [{
+                    "id": "pyright:symbol:service",
+                    "label": "Function",
+                    "properties": {
+                        "name": "service",
+                        "source": "lsp",
+                        "provenance": {
+                            "source": "lsp",
+                            "analyzerId": "pyright",
+                            "analyzerKind": "lsp",
+                            "tool": "Pyright",
+                            "toolVersion": "1.1.400",
+                            "adapterVersion": "test",
+                            "oss": true
+                        }
+                    }
+                }],
+                "edges": [{
+                    "id": "pyright:edge:handler-service",
+                    "sourceId": "sym:handler",
+                    "targetId": "pyright:symbol:service",
+                    "type": "CALLS",
+                    "confidence": 1.0,
+                    "reason": "pyright references",
+                    "evidence": {
+                        "source": "lsp",
+                        "provenance": {
+                            "source": "lsp",
+                            "analyzerId": "pyright",
+                            "analyzerKind": "lsp",
+                            "tool": "Pyright",
+                            "toolVersion": "1.1.400",
+                            "adapterVersion": "test",
+                            "oss": true
+                        }
+                    }
+                }],
+                "chunks": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let provider = FactsFileProvider::new(Some(facts_path));
+
+        let outcome = run_optional_enrichment_with_providers(
+            &repo,
+            &paths,
+            OssAnalyzerEnrichmentPolicy {
+                enabled: true,
+                max_duration: Duration::from_secs(5),
+            },
+            &[&provider],
+            &mut |_| {},
+        );
+
+        let OptionalEnrichmentOutcome::Merged {
+            summary,
+            attempted,
+            failed,
+        } = outcome
+        else {
+            panic!("expected facts file merge, got {outcome:?}");
+        };
+        assert_eq!(attempted, 1);
+        assert_eq!(failed, 0);
+        assert_eq!(summary.new_nodes, 1);
+        assert_eq!(summary.new_edges, 1);
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        assert_eq!(graph.node_count().unwrap(), 2);
+        assert_eq!(graph.edge_count().unwrap(), 1);
     }
 
     struct UnsupportedProvider;

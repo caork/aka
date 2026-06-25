@@ -38,6 +38,8 @@ pub struct AkaSettings {
     pub oss_analyzer_enrichment_max_secs: u64,
     #[serde(default)]
     pub scip_index_path: Option<PathBuf>,
+    #[serde(default)]
+    pub oss_analyzer_facts_path: Option<PathBuf>,
 }
 
 impl Default for AkaSettings {
@@ -47,6 +49,7 @@ impl Default for AkaSettings {
             oss_analyzer_enrichment_enabled: DEFAULT_OSS_ANALYZER_ENRICHMENT_ENABLED,
             oss_analyzer_enrichment_max_secs: DEFAULT_OSS_ANALYZER_ENRICHMENT_MAX_SECS,
             scip_index_path: None,
+            oss_analyzer_facts_path: None,
         }
     }
 }
@@ -101,6 +104,13 @@ impl AkaSettings {
         self.oss_analyzer_enrichment_max_secs =
             clamp_oss_analyzer_enrichment_max_secs(self.oss_analyzer_enrichment_max_secs);
         self.scip_index_path = self.scip_index_path.take().and_then(|path| {
+            if path.as_os_str().is_empty() {
+                None
+            } else {
+                Some(path)
+            }
+        });
+        self.oss_analyzer_facts_path = self.oss_analyzer_facts_path.take().and_then(|path| {
             if path.as_os_str().is_empty() {
                 None
             } else {
@@ -170,6 +180,7 @@ mod tests {
         assert!(!settings.oss_analyzer_enrichment_enabled);
         assert_eq!(settings.oss_analyzer_enrichment_max_secs, 30);
         assert!(settings.scip_index_path.is_none());
+        assert!(settings.oss_analyzer_facts_path.is_none());
     }
 
     #[test]
@@ -183,6 +194,7 @@ mod tests {
             oss_analyzer_enrichment_enabled: true,
             oss_analyzer_enrichment_max_secs: 1,
             scip_index_path: Some(dir.join("index.scip")),
+            oss_analyzer_facts_path: Some(dir.join("aka-facts.json")),
         }
         .save_to(&path)
         .unwrap();
@@ -196,6 +208,10 @@ mod tests {
             saved.scip_index_path.as_deref(),
             Some(dir.join("index.scip").as_path())
         );
+        assert_eq!(
+            saved.oss_analyzer_facts_path.as_deref(),
+            Some(dir.join("aka-facts.json").as_path())
+        );
 
         let loaded = AkaSettings::load_from(&path).unwrap();
         assert_eq!(loaded.index_max_secs, MIN_INDEX_MAX_SECS);
@@ -207,6 +223,10 @@ mod tests {
         assert_eq!(
             loaded.scip_index_path.as_deref(),
             Some(dir.join("index.scip").as_path())
+        );
+        assert_eq!(
+            loaded.oss_analyzer_facts_path.as_deref(),
+            Some(dir.join("aka-facts.json").as_path())
         );
     }
 

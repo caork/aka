@@ -4,6 +4,9 @@
 //! return replayable batches; graph/search indexing does not depend on a disk
 //! artifact transport.
 
+use std::fs;
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -145,6 +148,31 @@ pub enum FactRecord {
     Edge(EdgeFact),
     Chunk(ChunkFact),
     Done { stats: FactStats },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FactBatchFileError {
+    #[error("read facts file {path}: {source}")]
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse facts file {path}: {source}")]
+    Json {
+        path: std::path::PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("parse facts JSONL file {path} line {line}: {source}")]
+    JsonLine {
+        path: std::path::PathBuf,
+        line: usize,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("facts file {path} is empty")]
+    Empty { path: std::path::PathBuf },
 }
 
 impl Serialize for FactRecord {
@@ -644,7 +672,7 @@ pub trait FactSink {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FactBatch {
     pub stats: FactStats,
     pub nodes: Vec<NodeFact>,
@@ -741,6 +769,86 @@ impl FactBatch {
         }
         sink.push_done(self.stats.clone())
     }
+
+    pub fn from_json_file(path: &Path) -> Result<Self, FactBatchFileError> {
+        let bytes = fs::read(path).map_err(|source| FactBatchFileError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let trimmed = trim_ascii_whitespace(&bytes);
+        if trimmed.is_empty() {
+            return Err(FactBatchFileError::Empty {
+                path: path.to_path_buf(),
+            });
+        }
+        if trimmed[0] == b'[' {
+            read_record_array(path, trimmed)
+        } else if trimmed[0] == b'{' {
+            match serde_json::from_slice(trimmed) {
+                Ok(batch) => Ok(batch),
+                Err(bundle_error) => read_jsonl_records(path, trimmed).map_err(|line_error| {
+                    if matches!(line_error, FactBatchFileError::JsonLine { .. }) {
+                        line_error
+                    } else {
+                        FactBatchFileError::Json {
+                            path: path.to_path_buf(),
+                            source: bundle_error,
+                        }
+                    }
+                }),
+            }
+        } else {
+            read_jsonl_records(path, trimmed)
+        }
+    }
+}
+
+fn read_record_array(path: &Path, bytes: &[u8]) -> Result<FactBatch, FactBatchFileError> {
+    let records: Vec<FactRecord> =
+        serde_json::from_slice(bytes).map_err(|source| FactBatchFileError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(batch_from_records(records))
+}
+
+fn read_jsonl_records(path: &Path, bytes: &[u8]) -> Result<FactBatch, FactBatchFileError> {
+    let mut builder = FactBatchBuilder::new();
+    for (idx, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        let trimmed = trim_ascii_whitespace(line);
+        if trimmed.is_empty() {
+            continue;
+        }
+        let record: FactRecord =
+            serde_json::from_slice(trimmed).map_err(|source| FactBatchFileError::JsonLine {
+                path: path.to_path_buf(),
+                line: idx + 1,
+                source,
+            })?;
+        builder.push_record(record);
+    }
+    Ok(builder.finish())
+}
+
+fn batch_from_records(records: Vec<FactRecord>) -> FactBatch {
+    let mut builder = FactBatchBuilder::new();
+    for record in records {
+        builder.push_record(record);
+    }
+    builder.finish()
+}
+
+fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|idx| idx + 1)
+        .unwrap_or(start);
+    &bytes[start..end]
 }
 
 impl FactSource for FactBatch {
@@ -931,6 +1039,98 @@ mod tests {
         assert_eq!(replayed.nodes.len(), 1);
         assert_eq!(replayed.edges.len(), 1);
         assert_eq!(replayed.chunks.len(), 1);
+    }
+
+    #[test]
+    fn fact_batch_reads_json_bundle_file() {
+        let dir = std::env::temp_dir().join("aka-facts-json-bundle-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("facts.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "stats": {"files": 0, "nodes": 1, "edges": 0, "chunks": 0},
+                "nodes": [{
+                    "id": "sym:handler",
+                    "label": "Function",
+                    "properties": {"name": "handler"}
+                }],
+                "edges": [],
+                "chunks": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let batch = FactBatch::from_json_file(&path).unwrap();
+
+        assert_eq!(batch.stats.nodes, 1);
+        assert_eq!(batch.nodes[0].id, "sym:handler");
+    }
+
+    #[test]
+    fn fact_batch_reads_record_array_file() {
+        let dir = std::env::temp_dir().join("aka-facts-record-array-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("facts.json");
+        let records = vec![
+            FactRecord::Node(NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({"name": "handler"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            }),
+            FactRecord::Done {
+                stats: FactStats {
+                    files: 0,
+                    nodes: 1,
+                    edges: 0,
+                    chunks: 0,
+                },
+            },
+        ];
+        fs::write(&path, serde_json::to_vec(&records).unwrap()).unwrap();
+
+        let batch = FactBatch::from_json_file(&path).unwrap();
+
+        assert_eq!(batch.stats.nodes, 1);
+        assert_eq!(batch.nodes[0].id, "sym:handler");
+    }
+
+    #[test]
+    fn fact_batch_reads_jsonl_record_file() {
+        let dir = std::env::temp_dir().join("aka-facts-jsonl-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("facts.jsonl");
+        let node = serde_json::to_string(&FactRecord::Node(NodeFact {
+            id: "sym:handler".into(),
+            label: "Function".into(),
+            properties: serde_json::json!({"name": "handler"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        }))
+        .unwrap();
+        let done = serde_json::to_string(&FactRecord::Done {
+            stats: FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 0,
+                chunks: 0,
+            },
+        })
+        .unwrap();
+        fs::write(&path, format!("{node}\n{done}\n")).unwrap();
+
+        let batch = FactBatch::from_json_file(&path).unwrap();
+
+        assert_eq!(batch.stats.nodes, 1);
+        assert_eq!(batch.nodes[0].id, "sym:handler");
     }
 
     #[test]

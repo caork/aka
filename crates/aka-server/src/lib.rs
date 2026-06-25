@@ -678,6 +678,8 @@ pub struct AppSettingsRequest {
     #[serde(default)]
     pub scip_index_path: Option<PathBuf>,
     #[serde(default)]
+    pub oss_analyzer_facts_path: Option<PathBuf>,
+    #[serde(default)]
     pub lsp_enrichment_enabled: Option<bool>,
     #[serde(default)]
     pub lsp_enrichment_max_secs: Option<u64>,
@@ -703,6 +705,7 @@ async fn update_app_settings(Json(req): Json<AppSettingsRequest>) -> Response {
                 .unwrap_or(DEFAULT_OSS_ANALYZER_ENRICHMENT_MAX_SECS),
         ),
         scip_index_path: req.scip_index_path,
+        oss_analyzer_facts_path: req.oss_analyzer_facts_path,
     };
     match settings.save() {
         Ok(settings) => Json(settings).into_response(),

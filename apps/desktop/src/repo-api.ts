@@ -168,6 +168,7 @@ export interface AppSettings {
   ossAnalyzerEnrichmentEnabled: boolean;
   ossAnalyzerEnrichmentMaxSecs: number;
   scipIndexPath: string | null;
+  ossAnalyzerFactsPath: string | null;
   lspEnrichmentEnabled: boolean;
   lspEnrichmentMaxSecs: number;
 }
@@ -182,6 +183,7 @@ function normalizeAppSettings(settings: Partial<AppSettings>): AppSettings {
     ossAnalyzerEnrichmentEnabled: enrichmentEnabled,
     ossAnalyzerEnrichmentMaxSecs: enrichmentMaxSecs,
     scipIndexPath: settings.scipIndexPath ?? null,
+    ossAnalyzerFactsPath: settings.ossAnalyzerFactsPath ?? null,
     lspEnrichmentEnabled: enrichmentEnabled,
     lspEnrichmentMaxSecs: enrichmentMaxSecs,
   };

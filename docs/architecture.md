@@ -8,6 +8,8 @@ Rust workspace 承担存储、搜索、服务、UI。唯一热路径合同是 `a
 
 不在 Rust 侧手写多语言 parser，也不引入 WASM tree-sitter worker 池。解析层优先使用 AKA engine embedded/direct fact API，但默认只取 baseline parser facts：结构、定义、导入和事实发射；engine 旧的 route/config/k8s/tests/git-history/similarity/complexity/call-heuristic/usages/semantic 推断 pass 不进入默认图。语言生态已有能力通过 SCIP、stack-graphs 或成熟 LSP 接入。后续 enrichment 只接 rust-analyzer / pyright / jdtls / typescript-language-server / gopls 这类热门开源实现，作为 baseline index ready 之后的可跳过事实源；失败、超时或缺 provider 都不能影响 graph/search 可用。具体入场条件以 [facts 合同](contracts/artifacts.md#producer-ownership) 为准：allowlist、provenance、非阻塞和大仓基准缺一不可。
 
+外部 analyzer adapter 可以通过 `ossAnalyzerFactsPath` 交付 `aka-facts` JSON/JSONL bundle；这是显式配置的 OSS analyzer 结果导入入口，不是旧 sidecar/fallback/debug transport。runtime 只校验、合并和索引这些 facts，不启动语言服务、不扫描源码、不做业务语义推断。
+
 ## 解析引擎层（engine/，AKA engine native C）
 
 - 来源：AKA engine 是第一方组件，含 MIT 派生代码；维护仓库为 `caork/aka-engine`，不追求和官方仓兼容。
