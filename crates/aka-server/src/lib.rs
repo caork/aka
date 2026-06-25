@@ -17,6 +17,8 @@
 //! - `POST   /api/repos/{name}/update` — git pull+analyze / local 重 analyze → 202（zip 来源 400）
 //! - `POST   /api/repos/{name}/update-zip` — multipart（file）→ 202
 //! - `POST   /api/repos/{name}/settings` — `{embeddings_enabled, render_max_nodes}` → 200
+//! - `GET    /api/settings`          — 全局设置（indexing 时间预算等）
+//! - `POST   /api/settings`          — 更新全局设置
 //! - `DELETE /api/repos/{name}`        — 移除注册 + 数据目录 → 200
 //! - `GET    /api/node`                — 节点详情 `?repo=&id=`
 //! - `GET    /api/graph/ego`           — ego 子图 `?repo=&id=&depth=&max_nodes=`
@@ -43,6 +45,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use aka_core::{clamp_index_max_secs, AkaSettings};
 pub use aka_mcp::ops;
 pub use aka_mcp::{
     clamp_render_nodes, Backend, RepoInfo, RepoProgress, RepoSettingsUpdate, SearchHit, SymbolRef,
@@ -71,6 +74,7 @@ pub fn router(backend: Arc<dyn Backend>) -> Router {
         .route("/api/repos/{name}/update", post(repo_update))
         .route("/api/repos/{name}/update-zip", post(repo_update_zip))
         .route("/api/repos/{name}/settings", post(repo_settings))
+        .route("/api/settings", get(app_settings).post(update_app_settings))
         .route("/api/repos/{name}", delete(repo_delete))
         .route("/api/query", post(query))
         .route("/api/detect-changes", post(detect_changes))
@@ -193,6 +197,14 @@ fn bad_request(msg: impl Into<String>) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({ "error": msg.into() })),
+    )
+        .into_response()
+}
+
+fn server_error(error: impl std::fmt::Display) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": error.to_string() })),
     )
         .into_response()
 }
@@ -650,6 +662,29 @@ pub struct SettingsRequest {
     /// 缺省 / null = 恢复默认渲染预算（50_000）。
     #[serde(default)]
     pub render_max_nodes: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettingsRequest {
+    pub index_max_secs: u64,
+}
+
+async fn app_settings() -> Response {
+    match AkaSettings::load() {
+        Ok(settings) => Json(settings).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+async fn update_app_settings(Json(req): Json<AppSettingsRequest>) -> Response {
+    let settings = AkaSettings {
+        index_max_secs: clamp_index_max_secs(req.index_max_secs),
+    };
+    match settings.save() {
+        Ok(settings) => Json(settings).into_response(),
+        Err(e) => server_error(e),
+    }
 }
 
 /// `POST /api/repos/{name}/settings` → 200 `{"ok":true}`。

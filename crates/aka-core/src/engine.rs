@@ -14,6 +14,7 @@ use serde_json::{json, Map, Value};
 
 use aka_facts::{FactBatch, FactBatchBuilder, FactStats};
 
+use crate::settings::{clamp_index_max_secs, AkaSettings, DEFAULT_INDEX_MAX_SECS};
 use crate::types::{ChunkRec, EdgeRec, EngineEvent, NodeRec};
 
 mod build_config_scan;
@@ -104,7 +105,6 @@ use topic_synth::{
 use transaction_synth::{synthesize_transactions_from_sources, SynthTransaction};
 
 const DEFAULT_ENGINE_MODE: &str = "fast";
-const DEFAULT_INDEX_MAX_SECS: u64 = 30 * 60;
 const PROCESS_MAX_STARTS: usize = 200;
 const PROCESS_MIN_COUNT: usize = 20;
 const PROCESS_MAX_COUNT: usize = 300;
@@ -388,12 +388,17 @@ impl EngineRunner {
 }
 
 pub fn index_max_duration() -> Duration {
-    std::env::var("AKA_INDEX_MAX_SECS")
+    let seconds = std::env::var("AKA_INDEX_MAX_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(DEFAULT_INDEX_MAX_SECS))
+        .or_else(|| {
+            AkaSettings::load()
+                .ok()
+                .map(|settings| settings.index_max_secs)
+        })
+        .unwrap_or(DEFAULT_INDEX_MAX_SECS);
+    Duration::from_secs(clamp_index_max_secs(seconds))
 }
 
 pub(super) fn enrich_direct_fact_batch(

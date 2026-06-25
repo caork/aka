@@ -163,6 +163,53 @@ export async function setRepoSettings(
   });
 }
 
+export interface AppSettings {
+  indexMaxSecs: number;
+}
+
+export async function getAppSettings(): Promise<AppSettings> {
+  if (isDesktopRuntime()) {
+    try {
+      return await invokeDesktop<AppSettings>("get_app_settings");
+    } catch (e) {
+      throw asDesktopError(e, "读取设置失败");
+    }
+  }
+  let r: Response;
+  try {
+    r = await fetch(apiUrl("/api/settings"), {
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (e) {
+    throw asError(e);
+  }
+  await ensureOk(r);
+  return (await r.json()) as AppSettings;
+}
+
+export async function setAppSettings(settings: AppSettings): Promise<AppSettings> {
+  if (isDesktopRuntime()) {
+    try {
+      return await invokeDesktop<AppSettings>("set_app_settings", { settings });
+    } catch (e) {
+      throw asDesktopError(e, "保存设置失败");
+    }
+  }
+  let r: Response;
+  try {
+    r = await fetch(apiUrl("/api/settings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(settings),
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (e) {
+    throw asError(e);
+  }
+  await ensureOk(r);
+  return (await r.json()) as AppSettings;
+}
+
 export async function deleteRepo(name: string): Promise<void> {
   if (isDesktopRuntime()) {
     try {

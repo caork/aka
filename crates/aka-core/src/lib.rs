@@ -4,6 +4,7 @@ pub mod engine;
 pub mod incremental;
 pub mod paths;
 pub mod registry;
+pub mod settings;
 pub mod types;
 
 pub use aka_facts::{
@@ -26,5 +27,9 @@ pub use paths::{aka_home, repo_dir_name, user_facing_path, RepoPaths};
 pub use registry::{
     clamp_render_nodes, Registry, RegistryError, RepoEntry, DEFAULT_RENDER_MAX_NODES,
     MAX_RENDER_NODES, MIN_RENDER_NODES,
+};
+pub use settings::{
+    clamp_index_max_secs, settings_path, AkaSettings, SettingsError, DEFAULT_INDEX_MAX_SECS,
+    MAX_INDEX_MAX_SECS, MIN_INDEX_MAX_SECS,
 };
 pub use types::*;

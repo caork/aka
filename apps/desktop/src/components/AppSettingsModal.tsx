@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   checkForNativeAppUpdate,
   installNativeAppUpdate,
@@ -16,7 +16,7 @@ import {
   type ReleaseAsset,
   type ReleaseInfo,
 } from "../release-api";
-import { clearAppData } from "../repo-api";
+import { clearAppData, getAppSettings, setAppSettings } from "../repo-api";
 import { useAppStore } from "../store";
 import type { ThemeMode } from "../theme";
 import Modal, { ErrorBar } from "./Modal";
@@ -26,6 +26,15 @@ const THEME_OPTIONS: { id: ThemeMode; label: string }[] = [
   { id: "dark", label: "Dark" },
   { id: "auto", label: "Auto" },
 ];
+
+const INDEX_MAX_DEFAULT = 60;
+const INDEX_MAX_MIN = 10;
+const INDEX_MAX_LIMIT = 24 * 60 * 60;
+
+function clampIndexMaxSecs(value: number): number {
+  if (!Number.isFinite(value)) return INDEX_MAX_DEFAULT;
+  return Math.min(INDEX_MAX_LIMIT, Math.max(INDEX_MAX_MIN, Math.round(value)));
+}
 
 export default function AppSettingsModal({
   open,
@@ -39,14 +48,37 @@ export default function AppSettingsModal({
   const resetRepos = useAppStore((s) => s.resetRepos);
   const [confirmClear, setConfirmClear] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [settingsBusy, setSettingsBusy] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [openingUrl, setOpeningUrl] = useState<string | null>(null);
   const [nativeUpdate, setNativeUpdate] = useState<NativeUpdateInfo | null>(null);
   const [installProgress, setInstallProgress] = useState<InstallProgress | null>(null);
   const [release, setRelease] = useState<ReleaseInfo | null>(null);
+  const [indexMaxSecs, setIndexMaxSecs] = useState(INDEX_MAX_DEFAULT);
+  const [savedIndexMaxSecs, setSavedIndexMaxSecs] = useState(INDEX_MAX_DEFAULT);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void getAppSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        const next = clampIndexMaxSecs(settings.indexMaxSecs);
+        setIndexMaxSecs(next);
+        setSavedIndexMaxSecs(next);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   const checkUpdates = async () => {
     if (checkingUpdate) return;
@@ -144,6 +176,28 @@ export default function AppSettingsModal({
     }
   };
 
+  const saveIndexSettings = async () => {
+    if (settingsBusy) return;
+    setSettingsBusy(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const settings = await setAppSettings({
+        indexMaxSecs: clampIndexMaxSecs(indexMaxSecs),
+      });
+      const next = clampIndexMaxSecs(settings.indexMaxSecs);
+      setIndexMaxSecs(next);
+      setSavedIndexMaxSecs(next);
+      setNotice("Indexing 时间预算已保存");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const indexDirty = clampIndexMaxSecs(indexMaxSecs) !== savedIndexMaxSecs;
+
   return (
     <Modal open={open} onClose={onClose} title="Settings" width={520}>
       {error && <ErrorBar message={error} />}
@@ -196,6 +250,71 @@ export default function AppSettingsModal({
               </button>
             );
           })}
+        </div>
+      </div>
+
+      <div className="themed-divider mt-5 border-t pt-4">
+        <div className="flex items-start gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-medium text-ink">Indexing timeout</div>
+            <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
+              全局索引时间预算；环境变量 AKA_INDEX_MAX_SECS 会临时覆盖此设置。
+            </div>
+          </div>
+          <span className="cmd-input flex h-8 w-[96px] flex-none items-center px-2.5">
+            <input
+              type="number"
+              min={INDEX_MAX_MIN}
+              max={INDEX_MAX_LIMIT}
+              step={10}
+              value={indexMaxSecs}
+              onChange={(e) => setIndexMaxSecs(Number(e.target.value))}
+              onBlur={() => setIndexMaxSecs(clampIndexMaxSecs(indexMaxSecs))}
+              disabled={settingsBusy}
+              className="tabular h-full w-full text-[12.5px]"
+              data-testid="index-max-secs-input"
+            />
+          </span>
+        </div>
+        <input
+          type="range"
+          min={INDEX_MAX_MIN}
+          max={600}
+          step={10}
+          value={Math.min(600, clampIndexMaxSecs(indexMaxSecs))}
+          onChange={(e) => setIndexMaxSecs(Number(e.target.value))}
+          disabled={settingsBusy}
+          className="mt-3 w-full"
+          style={{ accentColor: "var(--accent)" }}
+          aria-label="Indexing timeout seconds"
+          data-testid="index-max-secs-slider"
+        />
+        <div className="mt-2 flex items-center gap-2 text-[11.5px] text-ink-3">
+          <span>{formatDuration(clampIndexMaxSecs(indexMaxSecs))}</span>
+          <button
+            type="button"
+            onClick={() => setIndexMaxSecs(INDEX_MAX_DEFAULT)}
+            disabled={settingsBusy || indexMaxSecs === INDEX_MAX_DEFAULT}
+            className="focus-ring rounded-[8px] px-2 py-1 transition-colors duration-150 ease-out hover:text-[var(--accent)] disabled:opacity-45"
+          >
+            Default
+          </button>
+          <button
+            type="button"
+            disabled={settingsBusy || !indexDirty}
+            onClick={() => void saveIndexSettings()}
+            className={`focus-ring ml-auto rounded-[9px] px-3 py-1.5 text-[12px] font-semibold transition-all duration-150 ease-out ${
+              indexDirty ? "btn-primary" : "text-ink-3 opacity-60"
+            }`}
+            style={
+              indexDirty
+                ? undefined
+                : { boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }
+            }
+            data-testid="index-max-secs-save"
+          >
+            {settingsBusy ? "Saving..." : "Save"}
+          </button>
         </div>
       </div>
 
@@ -487,6 +606,13 @@ function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`;
 }
 
 function formatDate(value: string): string {

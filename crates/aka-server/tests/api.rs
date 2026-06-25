@@ -1,6 +1,6 @@
 //! HTTP API 集成测试：tower `oneshot` 直接驱动 Router，不开真实端口。
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use aka_server::{router, Backend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef};
 use axum::body::Body;
@@ -12,6 +12,38 @@ use tower::ServiceExt;
 mod support;
 
 use support::fixture_backend::FixtureBackend;
+
+struct EnvGuard {
+    aka_home: Option<std::ffi::OsString>,
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(value) = &self.aka_home {
+            std::env::set_var("AKA_HOME", value);
+        } else {
+            std::env::remove_var("AKA_HOME");
+        }
+    }
+}
+
+async fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
+fn isolate_aka_home(name: &str) -> EnvGuard {
+    let guard = EnvGuard {
+        aka_home: std::env::var_os("AKA_HOME"),
+    };
+    let home =
+        std::env::temp_dir().join(format!("aka-server-settings-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::env::set_var("AKA_HOME", home);
+    guard
+}
 
 fn app() -> axum::Router {
     router(Arc::new(FixtureBackend::fixture()))
@@ -40,6 +72,28 @@ async fn health_ok() {
     assert_eq!(res.status(), StatusCode::OK);
     let v = body_json(res).await;
     assert_eq!(v["status"], "ok");
+}
+
+#[tokio::test]
+async fn app_settings_default_and_update() {
+    let _lock = env_lock().await;
+    let _guard = isolate_aka_home("api");
+
+    let res = app()
+        .oneshot(Request::get("/api/settings").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["indexMaxSecs"], 60);
+
+    let res = app()
+        .oneshot(post_json("/api/settings", json!({ "indexMaxSecs": 3 })))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["indexMaxSecs"], 10);
 }
 
 #[tokio::test]

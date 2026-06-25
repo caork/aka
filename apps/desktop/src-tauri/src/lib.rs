@@ -11,6 +11,7 @@ use std::sync::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aka_cli::AkaBackend;
+use aka_core::{clamp_index_max_secs, AkaSettings};
 use aka_mcp::{clamp_render_nodes, ops, Backend, RepoSettingsUpdate, MAX_RENDER_NODES};
 use serde::Deserialize;
 use serde_json::json;
@@ -190,6 +191,12 @@ struct RepoSettingsRequest {
     embeddings_enabled: bool,
     #[serde(default)]
     render_max_nodes: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppSettingsRequest {
+    index_max_secs: u64,
 }
 
 async fn run_backend<T, F>(backend: State<'_, BackendState>, f: F) -> Result<T, String>
@@ -544,6 +551,20 @@ async fn set_repo_settings(
 }
 
 #[tauri::command]
+async fn get_app_settings() -> Result<AkaSettings, String> {
+    AkaSettings::load().map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn set_app_settings(settings: AppSettingsRequest) -> Result<AkaSettings, String> {
+    AkaSettings {
+        index_max_secs: clamp_index_max_secs(settings.index_max_secs),
+    }
+    .save()
+    .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
 async fn delete_repo(
     backend: State<'_, BackendState>,
     name: String,
@@ -695,6 +716,8 @@ pub fn run() {
             update_repo,
             update_repo_zip,
             set_repo_settings,
+            get_app_settings,
+            set_app_settings,
             delete_repo,
             clear_app_data,
             app_version,

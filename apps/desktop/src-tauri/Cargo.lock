@@ -54,6 +54,7 @@ name = "aka-desktop"
 version = "0.1.24"
 dependencies = [
  "aka-cli",
+ "aka-core",
  "aka-mcp",
  "anyhow",
  "serde",
@@ -118,6 +119,7 @@ dependencies = [
 name = "aka-server"
 version = "0.1.24"
 dependencies = [
+ "aka-core",
  "aka-mcp",
  "anyhow",
  "axum",

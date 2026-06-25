@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 # Backend trait 与 ops 输出 DTO 共享自 aka-mcp（aka-mcp 不依赖本 crate，无循环）。
+aka-core = { path = "../aka-core" }
 aka-mcp = { path = "../aka-mcp" }
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }

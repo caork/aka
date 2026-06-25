@@ -12,13 +12,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = []
-embedded-engine = ["aka-cli/embedded-engine"]
+embedded-engine = ["aka-cli/embedded-engine", "aka-core/embedded-engine"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 aka-cli = { path = "../../cli" }
+aka-core = { path = "../../../crates/aka-core" }
 aka-mcp = { path = "../../../crates/aka-mcp" }
 anyhow = "1"
 tauri = { version = "2", features = [] }
