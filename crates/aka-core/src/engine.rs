@@ -20,7 +20,7 @@ const DEFAULT_ENGINE_MODE: &str = "fast";
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error("embedded AKA engine runtime not found: {0} (set --engine-dir, AKA_ENGINE_DIR, AKA_ENGINE_LIB_DIR, or AKA_ENGINE_DLL)")]
+    #[error("embedded AKA engine resources not found: {0} (set --engine-dir, AKA_ENGINE_DIR, AKA_ENGINE_LIB_DIR, or AKA_ENGINE_DLL)")]
     EngineDirMissing(PathBuf),
     #[error("engine exited with {code:?}; stderr tail:\n{stderr_tail}")]
     Failed {

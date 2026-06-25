@@ -27,7 +27,7 @@ enum Cmd {
     /// Analyze a repository: engine/facts parse -> graph/search indexes.
     Analyze {
         path: PathBuf,
-        /// Engine directory. Defaults to $AKA_ENGINE_DIR or bundled/workspace engine.
+        /// Embedded engine resource directory or DLL path. Defaults to bundled/workspace resources.
         #[arg(long)]
         engine_dir: Option<PathBuf>,
         /// Skip embedding chunks.

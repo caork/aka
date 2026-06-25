@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use aka_core::{
-    ChunkRec, EdgeRec, FactSource, IndexDelta, IndexState, IndexingDeadline, NodeRec, RepoPaths,
+    validate_enrichment_batch_provenance, ChunkRec, EdgeRec, FactBatch, FactSource, IndexDelta,
+    IndexState, IndexingDeadline, NodeRec, RepoPaths,
 };
 use aka_graph::{compute_layout, Adjacency, GraphStore};
 use aka_search::SearchIndexWriter;
@@ -138,6 +139,7 @@ fn merge_enrichment_facts_inner(
     deadline: Option<IndexingDeadline>,
     progress: Option<&mut IndexProgress<'_>>,
 ) -> Result<EnrichmentMergeSummary> {
+    validate_enrichment_source_provenance(source)?;
     let staged_paths = stage_existing_indexes_for_enrichment(paths)?;
     let summary = merge_enrichment_facts_staged(source, &staged_paths, deadline, progress);
     match summary {
@@ -150,6 +152,18 @@ fn merge_enrichment_facts_inner(
             Err(err)
         }
     }
+}
+
+fn validate_enrichment_source_provenance(source: &impl FactSource) -> Result<()> {
+    let nodes = source
+        .nodes()?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let edges = source
+        .edges()?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let batch = FactBatch::new(source.stats().clone(), nodes, edges, Vec::new());
+    validate_enrichment_batch_provenance(&batch).context("validate enrichment facts provenance")?;
+    Ok(())
 }
 
 fn merge_enrichment_facts_staged(
@@ -1272,6 +1286,97 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn merge_enrichment_facts_rejects_missing_oss_provenance_before_staging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 1,
+                nodes: 1,
+                edges: 0,
+                chunks: 1,
+            },
+            vec![NodeRec {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({
+                    "name": "handler",
+                    "filePath": "src/lib.rs",
+                    "startLine": 0
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }],
+            Vec::new(),
+            vec![ChunkRec {
+                node_id: "sym:handler".into(),
+                kind: "ast-function".into(),
+                file_path: "src/lib.rs".into(),
+                start_line: 0,
+                end_line: 0,
+                text: "fn handler() {}".into(),
+            }],
+        );
+        index_facts(&baseline, &paths).unwrap();
+
+        let enrichment = FactBatch::new(
+            FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 0,
+                chunks: 1,
+            },
+            vec![NodeRec {
+                id: "private:symbol:service".into(),
+                label: "Interface".into(),
+                properties: serde_json::json!({"name": "Service"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            }],
+            Vec::new(),
+            vec![ChunkRec {
+                node_id: "private:symbol:service".into(),
+                kind: "private-symbol".into(),
+                file_path: "src/lib.rs".into(),
+                start_line: 0,
+                end_line: 0,
+                text: "trait Service".into(),
+            }],
+        );
+
+        let err = merge_enrichment_facts(&enrichment, &paths).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("validate enrichment facts provenance"),
+            "unexpected enrichment error: {err:#}"
+        );
+
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        assert_eq!(graph.node_count().unwrap(), 1);
+        assert!(graph
+            .node_by_id("private:symbol:service")
+            .unwrap()
+            .is_none());
+        let search = SearchIndex::open(&paths.search_dir()).unwrap();
+        assert!(search
+            .search("handler", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.node_id == "sym:handler"));
+        assert!(search
+            .search("Service", 10)
+            .unwrap()
+            .iter()
+            .all(|hit| hit.node_id != "private:symbol:service"));
     }
 
     #[test]
