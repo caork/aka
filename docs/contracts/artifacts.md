@@ -146,7 +146,7 @@ scripts/smoke-oss-analyzer-scip.sh \
   --context Service
 ```
 
-判定标准：baseline analyze 必须先报告 ready；optional SCIP provider 必须明确输出 merged/skipped/timeout outcome；provider failed、invalid provenance 或 merge failed 视为失败；`search` 必须返回非空；指定 `--context` 时 definitions 必须非空。
+判定标准：baseline analyze 必须先报告 ready；optional SCIP provider 必须明确输出 merged/skipped/timeout outcome；provider failed、invalid provenance 或 merge failed 视为失败；`search` 必须返回非空；指定 `--context` 时 definitions 必须非空。脚本默认要求 `--min-lines` 达标；小仓只能显式 `--allow-small-repo` 用于 importer 调试，不能作为大仓基准结论。
 
 `ossAnalyzerFactsPath` 是外部 OSS analyzer adapter 的通用导入入口：文件可以是 `FactBatch` JSON、`FactRecord[]` JSON、一行一个 `FactRecord` 的 JSONL，或带顶层 analyzer 元数据的 bundle：
 
@@ -166,6 +166,22 @@ scripts/smoke-oss-analyzer-scip.sh \
 带顶层 `analyzer` 的 bundle 由 AKA runtime 统一 stamp `source` / `provenance` 后再校验；不带顶层 analyzer 的旧格式仍要求每个新增 node/edge 自带完整 provenance。这个入口只消费已经由 rust-analyzer / pyright / jdtls / typescript-language-server / gopls / stack-graphs 等开源工具 adapter 产出的 `aka-facts`；AKA runtime 不在这里启动语言服务、不扫描源码、不做业务语义推断。文件不存在是 skipped；文件内每个新增 node/edge 仍必须通过 allowlist provenance 校验。它不是旧 sidecar、fallback 或 debug transport。
 
 源码调试时可以用内部 runtime 命令 `aka validate-facts <path>` 预检 adapter 输出；这只做合同校验，不写 graph/search，也不是用户可见产品形态。
+
+Pyright 路径的大仓 smoke 用 `scripts/oss-analyzer-pyright-lsp.mjs` 生成 bundle，再用 `scripts/smoke-oss-analyzer-pyright.sh` 导入。这个 adapter 是脚本层工具：它启动外部开源 `pyright-langserver --stdio`，通过 LSP `textDocument/documentSymbol` 读取 Pyright 的分析结果，转换成 `File` / symbol 节点、`DEFINES` / `CONTAINS` 边和 symbol chunks。AKA runtime 仍只读取 `ossAnalyzerFactsPath`、校验 provenance、在 baseline ready 后 staging merge；它不启动 Pyright、不持有 LSP 会话、不扫描源码做自研语义推断。
+
+推荐在 CPython 这类 50 万行以上仓库执行：
+
+```bash
+scripts/smoke-oss-analyzer-pyright.sh \
+  --repo /path/to/cpython \
+  --facts /path/to/cpython/.aka/pyright-oss-analyzer-facts.json \
+  --server 'npx --yes --package pyright@latest pyright-langserver --stdio' \
+  --tool-version npx-pyright-latest \
+  --query importlib \
+  --context main
+```
+
+判定标准同 SCIP：源码行数必须达到 `--min-lines`，facts bundle 必须先通过 `validate-facts`，baseline graph/search 必须先 ready，`provider=aka-facts-file` 必须明确 merged/skipped/timeout outcome；provider failed、invalid provenance 或 merge failed 视为失败；`search` 和指定 `context` 必须返回非空。
 
 内部 runtime 的 optional enrichment merge 只在 baseline graph/search ready 后追加 facts：新节点和对应 chunks 追加到 search，边写入 graph 并依赖 provenance edge id 去重。merge 使用同一个 `ossAnalyzerEnrichmentMaxSecs` deadline，并先写入临时 staging 副本；只有 merge 全流程成功后才安装回正式 graph/search。merge 失败或 provider 失败只能产生 skipped outcome 与日志，并继续尝试后续 provider；原 baseline graph/search 不被污染、不置 failed、不阻塞查询。
 

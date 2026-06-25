@@ -22,6 +22,7 @@ Options:
   --aka-home PATH          Isolated AKA_HOME. Defaults to a temp dir.
   --index-max-secs N       Global indexing budget. Default: 1800.
   --enrichment-max-secs N  Optional SCIP import budget. Default: 600.
+  --allow-small-repo       Allow source lines below --min-lines for importer debugging.
   --keep-aka-home          Do not delete the temporary AKA_HOME.
   --dry-run                Validate inputs and generated settings, then exit.
 
@@ -47,6 +48,7 @@ min_lines=500000
 aka_home=""
 index_max_secs=1800
 enrichment_max_secs=600
+allow_small_repo=0
 keep_aka_home=0
 dry_run=0
 
@@ -87,6 +89,10 @@ while [[ $# -gt 0 ]]; do
     --enrichment-max-secs)
       enrichment_max_secs="${2:-}"
       shift 2
+      ;;
+    --allow-small-repo)
+      allow_small_repo=1
+      shift
       ;;
     --keep-aka-home)
       keep_aka_home=1
@@ -157,6 +163,9 @@ echo "==> scip index: ${scip_index}"
 echo "==> AKA_HOME: ${aka_home}"
 
 if [[ "${line_count}" -lt "${min_lines}" ]]; then
+  if [[ "${allow_small_repo}" -eq 0 ]]; then
+    die "source line count ${line_count} is below requested ${min_lines}; pass --allow-small-repo only for importer debugging"
+  fi
   echo "warning: source line count ${line_count} is below requested ${min_lines}" >&2
 fi
 
