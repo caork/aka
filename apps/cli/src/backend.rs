@@ -26,8 +26,8 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::rename;
 use aka_core::{
-    aka_home, clamp_render_nodes, load_index_state, repo_dir_name, user_facing_path, ArtifactStats,
-    EngineEvent, IndexState, Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
+    aka_home, clamp_render_nodes, load_index_state, repo_dir_name, user_facing_path, EngineEvent,
+    FactStats, IndexState, Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
 };
 use aka_graph::{Adjacency, GraphStore, NodeRow};
 use aka_mcp::{
@@ -462,15 +462,8 @@ impl JobInfo {
                     }
                     return;
                 }
-                if phase_lc.contains("facts")
-                    || phase_lc.contains("enrichment")
-                    || phase_lc.contains("export-artifacts")
-                {
-                    self.progress.stage = if phase_lc.contains("export-artifacts") {
-                        "legacy-adapter".into()
-                    } else {
-                        "facts".into()
-                    };
+                if phase_lc.contains("facts") || phase_lc.contains("enrichment") {
+                    self.progress.stage = "facts".into();
                     self.progress.message = phase.clone();
                     self.progress.current = (*total > 0 || *current > 0).then_some(*current);
                     self.progress.total = (*total > 0).then_some(*total);
@@ -516,7 +509,7 @@ impl JobInfo {
         }
     }
 
-    fn apply_stats(&mut self, stats: &ArtifactStats) {
+    fn apply_stats(&mut self, stats: &FactStats) {
         self.progress.files = stats.files;
         self.progress.nodes = stats.nodes;
         self.progress.edges = stats.edges;
@@ -3642,17 +3635,17 @@ mod tests {
     }
 
     #[test]
-    fn facts_progress_tracks_synthesis_before_legacy_writes() {
+    fn facts_progress_tracks_synthesis_before_fact_counts() {
         let synth_nodes = adapter_percent("aka-core:enrichment:nodes", 0, 0);
         let deps_start = adapter_percent("aka-core:enrichment:dependency-edges", 0, 570);
         let deps_mid = adapter_percent("aka-core:enrichment:dependency-edges", 285, 570);
         let processes = adapter_percent("aka-core:enrichment:processes", 0, 0);
-        let write_nodes = adapter_percent("aka-engine:export-artifacts:nodes", 0, 12_687);
+        let fact_nodes = adapter_percent("aka-engine:facts:nodes", 0, 12_687);
 
         assert!(deps_start > synth_nodes);
         assert!(deps_mid > deps_start);
         assert!(processes > deps_mid);
-        assert!(write_nodes > processes);
+        assert!(fact_nodes > processes);
     }
 
     #[test]
@@ -3844,7 +3837,7 @@ mod tests {
             data_dir: "/tmp/data".into(),
             indexed_at: None,
             engine_sha: None,
-            stats: ArtifactStats::default(),
+            stats: FactStats::default(),
             embeddings_enabled: false,
             source_kind: "local".into(),
             source_url: None,
@@ -4009,7 +4002,7 @@ mod tests {
             data_dir: aka_home().join("repos").join("workspace-update-path"),
             indexed_at: Some(1),
             engine_sha: None,
-            stats: ArtifactStats::default(),
+            stats: FactStats::default(),
             embeddings_enabled: false,
             source_kind: "local".into(),
             source_url: None,

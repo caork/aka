@@ -89,27 +89,6 @@ fn insert_node_props_at(
         .unwrap();
 }
 
-#[test]
-fn embedded_engine_request_env_is_explicit_opt_in() {
-    std::env::remove_var("AKA_ENGINE_EMBEDDED");
-    assert_eq!(embedded_engine_request(), default_embedded_engine_request());
-
-    std::env::set_var("AKA_ENGINE_EMBEDDED", "1");
-    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Enabled);
-
-    std::env::set_var("AKA_ENGINE_EMBEDDED", "true");
-    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Enabled);
-
-    std::env::set_var("AKA_ENGINE_EMBEDDED", "require");
-    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Required);
-
-    std::env::set_var("AKA_ENGINE_EMBEDDED", "0");
-    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Disabled);
-    std::env::set_var("AKA_ENGINE_EMBEDDED", "off");
-    assert_eq!(embedded_engine_request(), EmbeddedEngineRequest::Disabled);
-    std::env::remove_var("AKA_ENGINE_EMBEDDED");
-}
-
 fn insert_function_node_props_at(
     conn: &Connection,
     id: i64,
@@ -154,14 +133,11 @@ fn insert_file_hash(conn: &Connection, file_path: &str) {
 }
 
 fn exported_edge_types(conn: &Connection) -> Vec<String> {
-    let dir = temp_repo("edges");
-    let path = dir.join("edges.ndjson");
     let synth = SynthGraph::default();
-    export_edges(conn, "demo", &path, &synth, 0, &mut |_| {}).unwrap();
-    std::fs::read_to_string(path)
+    collect_edges(conn, "demo", &synth, 0, &mut |_| {})
         .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<EdgeRec>(line).unwrap().edge_type)
+        .into_iter()
+        .map(|edge| edge.edge_type)
         .collect()
 }
 
@@ -180,26 +156,6 @@ fn run_git(repo: &Path, args: &[&str]) {
         .status()
         .expect("run git");
     assert!(status.success(), "git {args:?} failed");
-}
-
-fn write_engine_project_db(path: &Path, project: &str, root_path: &Path) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    let conn = Connection::open(path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE projects (
-            name TEXT PRIMARY KEY,
-            indexed_at TEXT,
-            root_path TEXT
-        );",
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO projects (name, indexed_at, root_path) VALUES (?1, 'now', ?2)",
-        rusqlite::params![project, root_path.display().to_string()],
-    )
-    .unwrap();
 }
 
 fn synthesize_graph_quiet(conn: &Connection, repo: &Path) -> Result<SynthGraph, EngineError> {
@@ -278,32 +234,172 @@ fn route_synthesis_emits_subphase_progress() {
 }
 
 #[test]
-fn finds_project_db_recursively() {
-    let repo = temp_repo("recursive-project-db-repo");
-    let cache = temp_repo("recursive-project-db-cache");
-    let db_path = cache.join("nested").join("C-repo.db");
-    write_engine_project_db(&db_path, "C-repo", &repo);
+fn direct_facts_enrichment_adds_routes_and_processes_without_sqlite_artifacts() {
+    let repo = temp_repo("direct-facts-enrichment");
+    std::fs::create_dir_all(repo.join("api")).unwrap();
+    std::fs::write(
+        repo.join("api/orders.py"),
+        r#"from fastapi import APIRouter
 
-    let (project, found_path) = find_single_project_db(&cache, &repo).unwrap();
+router = APIRouter()
 
-    assert_eq!(project, "C-repo");
-    assert_eq!(found_path, db_path);
-}
+def authenticate():
+    return verify_token()
 
-#[test]
-fn prefers_project_db_matching_repo_root() {
-    let repo = temp_repo("matching-project-db-repo");
-    let other_repo = temp_repo("matching-project-db-other");
-    let cache = temp_repo("matching-project-db-cache");
-    let old_db = cache.join("old.db");
-    let wanted_db = cache.join("nested").join("wanted.db");
-    write_engine_project_db(&old_db, "old", &other_repo);
-    write_engine_project_db(&wanted_db, "wanted", &repo);
+def verify_token():
+    return "maya"
 
-    let (project, found_path) = find_single_project_db(&cache, &repo).unwrap();
+def load_order():
+    return {"id": "1"}
 
-    assert_eq!(project, "wanted");
-    assert_eq!(found_path, wanted_db);
+@router.get("/orders/{id}")
+def get_order():
+    authenticate()
+    return load_order()
+"#,
+    )
+    .unwrap();
+
+    let mut batch = FactBatch::new(
+        FactStats::default(),
+        vec![
+            NodeRec {
+                id: "file:api/orders.py".into(),
+                label: "File".into(),
+                properties: json!({"name": "orders.py", "filePath": "api/orders.py"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            },
+            NodeRec {
+                id: "sym:api.orders.get_order".into(),
+                label: "Function".into(),
+                properties: json!({
+                    "name": "get_order",
+                    "qualifiedName": "api.orders.get_order",
+                    "filePath": "api/orders.py",
+                    "language": "python",
+                    "startLine": 10,
+                    "endLine": 13,
+                    "decorators": ["@router.get(\"/orders/{id}\")"],
+                    "route_method": "GET",
+                    "route_path": "/orders/{id}",
+                    "isExported": true
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            },
+            NodeRec {
+                id: "sym:api.orders.authenticate".into(),
+                label: "Function".into(),
+                properties: json!({
+                    "name": "authenticate",
+                    "qualifiedName": "api.orders.authenticate",
+                    "filePath": "api/orders.py",
+                    "language": "python",
+                    "startLine": 4,
+                    "endLine": 5
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            },
+            NodeRec {
+                id: "sym:api.orders.load_order".into(),
+                label: "Function".into(),
+                properties: json!({
+                    "name": "load_order",
+                    "qualifiedName": "api.orders.load_order",
+                    "filePath": "api/orders.py",
+                    "language": "python",
+                    "startLine": 7,
+                    "endLine": 8
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            },
+            NodeRec {
+                id: "sym:api.orders.verify_token".into(),
+                label: "Function".into(),
+                properties: json!({
+                    "name": "verify_token",
+                    "qualifiedName": "api.orders.verify_token",
+                    "filePath": "api/orders.py",
+                    "language": "python",
+                    "startLine": 7,
+                    "endLine": 8
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            },
+        ],
+        vec![
+            EdgeRec {
+                id: "edge:get-order-auth".into(),
+                source_id: "sym:api.orders.get_order".into(),
+                target_id: "sym:api.orders.authenticate".into(),
+                edge_type: "CALLS".into(),
+                confidence: 1.0,
+                reason: "direct-facts-test".into(),
+                step: None,
+                evidence: None,
+            },
+            EdgeRec {
+                id: "edge:auth-verify".into(),
+                source_id: "sym:api.orders.authenticate".into(),
+                target_id: "sym:api.orders.verify_token".into(),
+                edge_type: "CALLS".into(),
+                confidence: 1.0,
+                reason: "direct-facts-test".into(),
+                step: None,
+                evidence: None,
+            },
+            EdgeRec {
+                id: "edge:get-order-load".into(),
+                source_id: "sym:api.orders.get_order".into(),
+                target_id: "sym:api.orders.load_order".into(),
+                edge_type: "CALLS".into(),
+                confidence: 1.0,
+                reason: "direct-facts-test".into(),
+                step: None,
+                evidence: None,
+            },
+        ],
+        Vec::new(),
+    );
+    let mut events = Vec::new();
+
+    enrich_direct_fact_batch(&repo, &mut batch, &mut |event| {
+        if let EngineEvent::Phase { phase, .. } = event {
+            events.push(phase.clone());
+        }
+    })
+    .unwrap();
+
+    let route = batch
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label == "Route"
+                && node.properties.get("name").and_then(Value::as_str) == Some("/orders/{id}")
+        })
+        .expect("direct facts enrichment should append route node");
+    assert!(batch.edges.iter().any(|edge| {
+        edge.edge_type == "HANDLES_ROUTE"
+            && edge.source_id == "sym:api.orders.get_order"
+            && edge.target_id == route.id
+    }));
+    assert!(batch.nodes.iter().any(|node| node.label == "Process"));
+    assert!(batch
+        .edges
+        .iter()
+        .any(|edge| edge.edge_type == "STEP_IN_PROCESS"));
+    assert!(events
+        .iter()
+        .any(|phase| phase == "aka-core:enrichment:direct-facts"));
 }
 
 #[test]

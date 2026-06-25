@@ -227,7 +227,6 @@ Get-Process AKA -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction
 $desktopLogPath = Join-Path $env:APPDATA "com.aka.desktop\logs\aka-desktop.log"
 Remove-Item -Force $desktopLogPath -ErrorAction SilentlyContinue
 $env:AKA_HOME = $akaHome
-$env:AKA_ENGINE_EMBEDDED = "require"
 Write-Host "aka smoke: starting AKA.exe"
 $desktop = Start-Process -FilePath $akaExe -PassThru
 try {
@@ -271,7 +270,7 @@ try {
         throw "repo progress did not show actual embedded engine indexing`nProgress:`n$progressText`nDesktop log:`n$(Get-DesktopLogTail)"
     }
     if ($progressText -match "falling back to binary engine") {
-        throw "repo progress shows embedded engine fallback despite require mode`nProgress:`n$progressText"
+        throw "repo progress shows binary engine fallback`nProgress:`n$progressText"
     }
 
     Write-Host "aka smoke: MCP list/search/context"
@@ -308,7 +307,7 @@ try {
         throw "desktop log did not show Windows direct-facts embedded DLL path"
     }
     if ($logTail -match "falling back to binary engine") {
-        throw "desktop log shows embedded engine fallback despite require mode"
+        throw "desktop log shows binary engine fallback"
     }
 
     [PSCustomObject]@{

@@ -4,7 +4,7 @@
 //!
 //! 1. **BM25 全文检索**（[`SearchIndex`]，基于 tantivy）— 用代码感知 tokenizer
 //!    （[`CodeTokenizer`]，camelCase / snake_case / kebab-case / 数字边界拆分子词）
-//!    索引解析引擎产出的节点（`nodes.ndjson`）与切块（`chunks.ndjson`）。
+//!    索引 `FactSource` 产出的节点与切块。
 //! 2. **向量检索**（[`VectorStore`]，基于 usearch HNSW）— cosine 距离的 f32
 //!    近邻索引，node_id ↔ u64 key 双向映射持久化到同目录 sidecar 文件。
 //! 3. **RRF 混排**（[`rrf_merge`]）— Reciprocal Rank Fusion（K=60）融合两路结果。

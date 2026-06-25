@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use aka_core::{
     build_parse_cache_manifest_from_facts, load_index_state, load_parse_cache_manifest,
     registry::now_unix, save_index_state, save_parse_cache_manifest, user_facing_path,
-    AnalyzeFactsOptions, ArtifactDir, EngineEvent, EngineRunner, FactSource, FactStats, IndexDelta,
-    IndexState, Registry, RepoEntry, RepoPaths,
+    AnalyzeFactsOptions, EngineEvent, EngineRunner, FactSource, FactStats, IndexDelta, IndexState,
+    Registry, RepoEntry, RepoPaths,
 };
 use anyhow::{Context, Result};
 
@@ -35,7 +35,6 @@ pub fn run_analyze_with_progress(
         .with_context(|| format!("仓库路径不存在: {}", path.display()))?;
     let repo = user_facing_path(&repo);
     let paths = RepoPaths::for_repo(&repo);
-    let artifact_dir = paths.artifact_dir();
     let runner = EngineRunner::discover(engine_dir.as_deref())?;
     let engine_sha = std::fs::read_to_string(runner.dir().join("ENGINE_SHA"))
         .ok()
@@ -76,16 +75,6 @@ pub fn run_analyze_with_progress(
         ));
     }
 
-    if artifact_dir.exists() {
-        if let Some(cb) = progress.as_mut() {
-            cb(&EngineEvent::Log {
-                stream: "runtime".into(),
-                line: format!("clear stale artifact dir {}", artifact_dir.display()),
-            });
-        }
-        std::fs::remove_dir_all(&artifact_dir)
-            .with_context(|| format!("clear stale artifact dir {}", artifact_dir.display()))?;
-    }
     let engine_cache_dir = paths.engine_cache_dir();
     std::fs::create_dir_all(&engine_cache_dir)
         .with_context(|| format!("create engine cache dir {}", engine_cache_dir.display()))?;
@@ -101,7 +90,6 @@ pub fn run_analyze_with_progress(
         &repo,
         AnalyzeFactsOptions {
             cache_dir: Some(&engine_cache_dir),
-            debug_artifact_dir: None,
             no_chunks,
         },
         |ev| match ev {
@@ -281,9 +269,6 @@ fn reusable_existing_index_stats(
     {
         return Ok(Some(entry.stats.clone()));
     }
-    if let Ok(artifact) = ArtifactDir::open(paths.artifact_dir()) {
-        return Ok(Some(artifact.manifest.stats));
-    }
     Ok(None)
 }
 
@@ -337,26 +322,13 @@ fn register(
     Ok(())
 }
 
-pub fn run_index(path: PathBuf) -> Result<()> {
-    let repo = user_facing_path(&path.canonicalize()?);
-    let paths = RepoPaths::for_repo(&repo);
-    let artifact = ArtifactDir::open(paths.artifact_dir()).context("工件不存在——先 aka analyze")?;
-    let idx = indexer::index_artifact(&artifact, &paths)?;
-    register(&repo, &paths, &artifact.manifest.stats, None)?;
-    eprintln!(
-        "aka ▸ 重建索引完成：{} 节点 / {} 边 / {} 切块",
-        idx.nodes, idx.edges, idx.chunks
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use aka_core::{save_index_state, ParseCacheManifest};
 
     #[test]
-    fn reusable_index_reads_parse_cache_stats_without_artifact_dir() {
+    fn reusable_index_reads_parse_cache_stats_from_parse_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join("src")).unwrap();
@@ -394,6 +366,5 @@ mod tests {
             reusable_existing_index_stats(&repo, &paths, previous.as_ref(), &current).unwrap();
 
         assert_eq!(stats, Some(expected));
-        assert!(!paths.artifact_dir().exists());
     }
 }

@@ -5,9 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use aka_core::{
-    ArtifactDir, ChunkRec, EdgeRec, FactSource, IndexDelta, IndexState, NodeRec, RepoPaths,
-};
+use aka_core::{ChunkRec, EdgeRec, FactSource, IndexDelta, IndexState, NodeRec, RepoPaths};
 use aka_graph::{compute_layout, Adjacency, GraphStore};
 use aka_search::SearchIndexWriter;
 
@@ -52,24 +50,11 @@ struct NodeInfo {
     file_path: Option<String>,
 }
 
-/// 从 legacy 工件目录全量重建图与搜索索引（幂等：先清旧再建新）。
-pub fn index_artifact(artifact: &ArtifactDir, paths: &RepoPaths) -> Result<IndexSummary> {
-    index_facts(artifact, paths)
-}
-
-pub fn index_artifact_with_progress(
-    artifact: &ArtifactDir,
-    paths: &RepoPaths,
-    progress: Option<&mut IndexProgress<'_>>,
-) -> Result<IndexSummary> {
-    index_facts_with_progress(artifact, paths, progress)
-}
-
 /// Index a replayable fact source into graph and search storage.
 ///
-/// This is the primary seam for the fused pipeline: direct engine producers,
-/// SCIP/stack-graph importers, and the legacy artifact adapter all feed this
-/// same graph/search writer without requiring NDJSON artifacts on disk.
+/// This is the primary seam for the fused pipeline: direct engine producers
+/// and future SCIP/stack-graph importers feed this graph/search writer without
+/// requiring NDJSON artifacts on disk.
 pub fn index_facts(source: &impl FactSource, paths: &RepoPaths) -> Result<IndexSummary> {
     index_facts_with_progress(source, paths, None)
 }
@@ -254,40 +239,11 @@ pub fn index_facts_with_progress(
 
 /// File-scoped incremental replacement over an existing graph/search index.
 ///
-/// A replayable source may still come from a full legacy artifact or a direct
-/// fact batch. This function conservatively slices it down to added/modified
-/// files, deletes old rows for those files from the existing indexes, and
-/// appends replacement rows. If any condition could make file-scoped
-/// replacement unsafe, it reports `FullRebuildRequired` and leaves the
-/// existing indexes untouched.
-pub fn index_artifact_incremental(
-    artifact: &ArtifactDir,
-    paths: &RepoPaths,
-    delta: &IndexDelta,
-    previous_state: &IndexState,
-    current_state: &IndexState,
-) -> Result<IncrementalIndexOutcome> {
-    index_facts_incremental(artifact, paths, delta, previous_state, current_state)
-}
-
-pub fn index_artifact_incremental_with_progress(
-    artifact: &ArtifactDir,
-    paths: &RepoPaths,
-    delta: &IndexDelta,
-    previous_state: &IndexState,
-    current_state: &IndexState,
-    progress: Option<&mut IndexProgress<'_>>,
-) -> Result<IncrementalIndexOutcome> {
-    index_facts_incremental_with_progress(
-        artifact,
-        paths,
-        delta,
-        previous_state,
-        current_state,
-        progress,
-    )
-}
-
+/// This function conservatively slices a replayable direct-facts source down to
+/// added/modified files, deletes old rows for those files from the existing
+/// indexes, and appends replacement rows. If any condition could make
+/// file-scoped replacement unsafe, it reports `FullRebuildRequired` and leaves
+/// the existing indexes untouched.
 pub fn index_facts_incremental(
     source: &impl FactSource,
     paths: &RepoPaths,
@@ -647,7 +603,7 @@ mod tests {
     use aka_core::{FactBatch, FactStats};
 
     #[test]
-    fn indexes_replayable_fact_batch_without_artifact_dir() {
+    fn indexes_replayable_fact_batch_without_ndjson_artifacts() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join("src")).unwrap();
@@ -694,7 +650,6 @@ mod tests {
         assert_eq!(summary.nodes, 1);
         assert_eq!(summary.edges, 0);
         assert_eq!(summary.chunks, 1);
-        assert!(!paths.artifact_dir().exists());
         assert!(paths.graph_db().is_file());
         assert!(paths.search_dir().is_dir());
     }

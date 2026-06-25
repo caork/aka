@@ -1,37 +1,20 @@
-//! Engine runner backed by AKA engine.
-//!
-//! Engine runner backed by AKA engine.
-//!
-//! This file still contains the legacy binary + SQLite -> artifact adapter.
-//! The primary indexing seam is now `aka_facts::FactSource`; `ArtifactDir`
-//! adapts the legacy transport into that seam while the embedded/direct engine
-//! API is built out.
+//! Engine runner backed by the embedded AKA engine direct-facts API.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
-use std::sync::mpsc;
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-use chrono::Utc;
+#[cfg(test)]
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OpenFlags, Row};
+#[cfg(test)]
+use rusqlite::{Connection, Row};
 use serde_json::{json, Map, Value};
 
-use aka_facts::{FactBatch, FactBatchBuilder};
+use aka_facts::{FactBatch, FactBatchBuilder, FactStats};
 
-use crate::artifact::ArtifactDir;
-use crate::types::{
-    ArtifactStats, ChunkRec, EdgeRec, EngineEvent, Manifest, NodeRec, CONTRACT_VERSION,
-};
-use crate::user_facing_path;
+use crate::types::{ChunkRec, EdgeRec, EngineEvent, NodeRec};
 
 mod build_config_scan;
 mod cache_synth;
@@ -83,16 +66,14 @@ use dependency_synth::{
 #[cfg(feature = "embedded-engine")]
 use embedded::EmbeddedEngineFactProducer;
 use event_synth::{synthesize_events_from_sources, SynthEvent};
-use fact_producer::{
-    EngineFactOptions, EngineFactProducer, ProducedEngineFacts, SidecarEngineFactProducer,
-};
+use fact_producer::{EngineFactOptions, ProducedEngineFacts};
 use graphql_synth::{synthesize_graphql_from_sources, SynthGraphqlOperation};
 use job_synth::{job_entry_hints_from_sources, synthesize_jobs_from_sources, SynthJob};
 use persistence_synth::{synthesize_persistence_from_sources, SynthPersistenceGraph};
 use policy_synth::{synthesize_policies_from_sources, SynthPolicy};
 #[cfg(test)]
-use property_synth::extract_python_class_properties;
-use property_synth::{synthesize_python_properties, SynthProperty};
+use property_synth::synthesize_python_properties;
+use property_synth::{extract_python_class_properties, SynthProperty};
 use resource_synth::{synthesize_resources_from_sources, SynthResource};
 use route_annotated_synth::{
     dedup_route_candidates, extract_annotated_routes, java_interface_routes_by_method,
@@ -120,9 +101,6 @@ use topic_synth::{
 use transaction_synth::{synthesize_transactions_from_sources, SynthTransaction};
 
 const DEFAULT_ENGINE_MODE: &str = "fast";
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const ENGINE_SILENCE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const PROCESS_MAX_STARTS: usize = 200;
 const PROCESS_MIN_COUNT: usize = 20;
 const PROCESS_MAX_COUNT: usize = 300;
@@ -134,24 +112,10 @@ const MIN_TRACE_CONFIDENCE: f64 = 0.5;
 const COMMUNITY_LABEL_PROPAGATION_PASSES: usize = 4;
 const DEFAULT_SYNTH_STAGE_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[cfg(windows)]
-fn hide_child_console(cmd: &mut Command) {
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_child_console(_cmd: &mut Command) {}
-
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error("AKA engine not found: {0} (set --engine-dir, AKA_ENGINE_DIR, or AKA_ENGINE_BIN)")]
+    #[error("embedded AKA engine runtime not found: {0} (set --engine-dir, AKA_ENGINE_DIR, AKA_ENGINE_LIB_DIR, or AKA_ENGINE_DLL)")]
     EngineDirMissing(PathBuf),
-    #[error("failed to spawn engine ({cmd}): {source}")]
-    Spawn {
-        cmd: String,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("engine exited with {code:?}; stderr tail:\n{stderr_tail}")]
     Failed {
         code: Option<i32>,
@@ -159,50 +123,41 @@ pub enum EngineError {
     },
     #[error("engine io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("engine sqlite error: {0}")]
+    #[cfg(test)]
+    #[error("engine sqlite fixture error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("engine json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("engine facts error: {0}")]
     Facts(#[from] aka_facts::FactSourceError),
-    #[error("engine produced no project row in {0}")]
-    MissingProject(PathBuf),
 }
 
 /// Native AKA engine runner.
 pub struct EngineRunner {
     engine_dir: PathBuf,
-    engine_bin: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnalyzeFactsOptions<'a> {
     pub cache_dir: Option<&'a Path>,
-    pub debug_artifact_dir: Option<&'a Path>,
     pub no_chunks: bool,
 }
 
-/// Replayable facts emitted by the engine.
-///
-/// The indexing hot path consumes direct engine facts. The legacy artifact
-/// variant is kept for compatibility/debug callers that still need files on disk.
+/// Replayable facts emitted by the embedded engine.
 pub enum EngineFacts {
     DirectBatch(FactBatch),
-    LegacyArtifact(ArtifactDir),
 }
 
 impl EngineFacts {
-    pub fn stats(&self) -> &ArtifactStats {
+    pub fn stats(&self) -> &FactStats {
         match self {
             Self::DirectBatch(batch) => &batch.stats,
-            Self::LegacyArtifact(artifact) => &artifact.manifest.stats,
         }
     }
 
     pub fn transport_name(&self) -> &'static str {
         match self {
             Self::DirectBatch(_) => "engine-direct-facts",
-            Self::LegacyArtifact(_) => "legacy-artifact",
         }
     }
 }
@@ -220,7 +175,6 @@ impl aka_facts::FactSource for EngineFacts {
     > {
         match self {
             Self::DirectBatch(batch) => aka_facts::FactSource::nodes(batch),
-            Self::LegacyArtifact(artifact) => aka_facts::FactSource::nodes(artifact),
         }
     }
 
@@ -232,7 +186,6 @@ impl aka_facts::FactSource for EngineFacts {
     > {
         match self {
             Self::DirectBatch(batch) => aka_facts::FactSource::edges(batch),
-            Self::LegacyArtifact(artifact) => aka_facts::FactSource::edges(artifact),
         }
     }
 
@@ -244,25 +197,18 @@ impl aka_facts::FactSource for EngineFacts {
     > {
         match self {
             Self::DirectBatch(batch) => aka_facts::FactSource::chunks(batch),
-            Self::LegacyArtifact(artifact) => aka_facts::FactSource::chunks(artifact),
         }
     }
 }
 
-enum EngineLine {
-    Stdout(String),
-    Stderr(String),
-}
-
 impl EngineRunner {
-    const DONE_EXIT_GRACE: Duration = Duration::from_secs(5);
-
-    /// `engine_dir` may be a directory containing `aka-engine`, an AKA engine
-    /// source checkout with `build/c/aka-engine`, or the binary path.
+    /// `engine_dir` may be a directory containing embedded engine resources
+    /// such as `aka_engine.dll` / `libaka_engine.a` / `ENGINE_SHA`.
     pub fn new(engine_dir: impl Into<PathBuf>) -> Result<Self, EngineError> {
         let requested = engine_dir.into();
-        let engine_bin = resolve_engine_binary(&requested)
-            .ok_or_else(|| EngineError::EngineDirMissing(requested.clone()))?;
+        if !embedded_runtime_available(&requested) {
+            return Err(EngineError::EngineDirMissing(requested.clone()));
+        }
         let engine_dir = if requested.is_file() {
             requested
                 .parent()
@@ -271,271 +217,69 @@ impl EngineRunner {
         } else {
             requested
         };
-        Ok(Self {
-            engine_dir,
-            engine_bin,
-        })
+        Ok(Self { engine_dir })
     }
 
     pub fn dir(&self) -> &Path {
         &self.engine_dir
     }
 
-    /// Discover the native AKA engine from explicit path, env, local engine/,
-    /// source checkout, or PATH.
+    /// Discover embedded AKA engine resources from explicit path, env, local
+    /// engine checkout, or fall back to the linked embedded build.
     pub fn discover(explicit: Option<&Path>) -> Result<Self, EngineError> {
         if let Some(dir) = explicit {
             return Self::new(dir);
         }
-        if let Ok(bin) = std::env::var("AKA_ENGINE_BIN") {
-            return Self::new(PathBuf::from(bin));
-        }
         if let Ok(env_dir) = std::env::var("AKA_ENGINE_DIR") {
             return Self::new(PathBuf::from(env_dir));
+        }
+        if let Ok(env_dir) = std::env::var("AKA_ENGINE_LIB_DIR") {
+            return Self::new(PathBuf::from(env_dir));
+        }
+        if let Ok(dll) = std::env::var("AKA_ENGINE_DLL") {
+            return Self::new(PathBuf::from(dll));
         }
 
         let mut candidates: Vec<PathBuf> = vec![
             PathBuf::from("engine"),
+            PathBuf::from("engine/aka-engine-src/build/c"),
             PathBuf::from("/tmp/aka-engine-src"),
+            PathBuf::from("/tmp/aka-engine-src/build/c"),
         ];
         if let Ok(cwd) = std::env::current_dir() {
-            candidates.extend(cwd.ancestors().map(|p| p.join("engine")));
+            for ancestor in cwd.ancestors() {
+                candidates.extend([
+                    ancestor.join("engine"),
+                    ancestor
+                        .join("engine")
+                        .join("aka-engine-src")
+                        .join("build")
+                        .join("c"),
+                ]);
+            }
         }
         if let Ok(exe) = std::env::current_exe() {
             candidates.extend(exe.ancestors().skip(1).map(|p| p.join("engine")));
         }
         for c in &candidates {
-            if resolve_engine_binary(c).is_some() {
+            if embedded_runtime_available(c) {
                 return Self::new(c.clone());
             }
         }
 
-        for name in engine_exe_names() {
-            if let Some(path_bin) = find_in_path(name) {
-                return Self::new(path_bin);
-            }
+        #[cfg(all(feature = "embedded-engine", not(windows)))]
+        {
+            Ok(Self {
+                engine_dir: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
+            })
         }
 
-        Err(EngineError::EngineDirMissing(
-            candidates.last().cloned().unwrap_or_default(),
-        ))
-    }
-
-    /// Run AKA engine, convert its SQLite graph into aka artifacts, and
-    /// stream progress events to callers.
-    pub fn analyze(
-        &self,
-        repo: &Path,
-        out_dir: &Path,
-        cache_dir: Option<&Path>,
-        no_chunks: bool,
-        mut on_event: impl FnMut(&EngineEvent),
-    ) -> Result<ArtifactStats, EngineError> {
-        std::fs::create_dir_all(out_dir)?;
-        let (cache_root, engine_repo) =
-            self.run_engine_index(repo, Some(out_dir), cache_dir, None, &mut on_event)?;
-
-        emit_phase(&mut on_event, "aka-engine:export-artifacts", 0, 0);
-        let (project, db_path) = find_single_project_db(&cache_root, &engine_repo)?;
-        on_event(&EngineEvent::Log {
-            stream: "adapter".into(),
-            line: format!(
-                "using engine db project={project} path={}",
-                db_path.display()
-            ),
-        });
-        let stats = export_artifacts(
-            &engine_repo,
-            out_dir,
-            &db_path,
-            &project,
-            no_chunks,
-            &mut on_event,
-        )?;
-        let done = EngineEvent::Done {
-            stats: stats.clone(),
-        };
-        on_event(&done);
-        Ok(stats)
-    }
-
-    fn run_engine_index(
-        &self,
-        repo: &Path,
-        fallback_out_dir: Option<&Path>,
-        cache_dir: Option<&Path>,
-        facts_output_path: Option<&Path>,
-        on_event: &mut (impl FnMut(&EngineEvent) + ?Sized),
-    ) -> Result<(PathBuf, PathBuf), EngineError> {
-        let cache_root = engine_cache_root(repo, fallback_out_dir, cache_dir);
-        std::fs::create_dir_all(&cache_root)?;
-
-        emit_phase(on_event, "aka-engine:index", 0, 0);
-        let mode = engine_mode();
-        let engine_repo = user_facing_path(repo);
-        let engine_repo = engine_repo
-            .canonicalize()
-            .map(|path| user_facing_path(&path))
-            .unwrap_or(engine_repo);
-        let mut args = json!({
-            "repo_path": engine_repo.display().to_string(),
-            "mode": mode,
-            "persistence": false,
-        });
-        if let Some(path) = facts_output_path {
-            args["facts_output_path"] = Value::String(path.display().to_string());
+        #[cfg(any(not(feature = "embedded-engine"), windows))]
+        {
+            Err(EngineError::EngineDirMissing(
+                candidates.last().cloned().unwrap_or_default(),
+            ))
         }
-        let args = args.to_string();
-
-        let mut cmd = Command::new(&self.engine_bin);
-        cmd.arg("cli")
-            .arg("--progress")
-            .arg("--json")
-            .arg("index_repository")
-            .arg(&args)
-            .env("AKA_ENGINE_CACHE_DIR", &cache_root)
-            .env("CBM_CACHE_DIR", &cache_root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        hide_child_console(&mut cmd);
-        let cmd_display = format!(
-            "{} cli --progress --json index_repository <args>",
-            self.engine_bin.display()
-        );
-        on_event(&EngineEvent::Log {
-            stream: "engine".into(),
-            line: format!(
-                "spawn repo_path={} cache_dir={} mode={} bin={}",
-                engine_repo.display(),
-                cache_root.display(),
-                mode,
-                self.engine_bin.display()
-            ),
-        });
-        let mut child = cmd.spawn().map_err(|source| EngineError::Spawn {
-            cmd: cmd_display,
-            source,
-        })?;
-
-        let (line_tx, line_rx) = mpsc::channel();
-        let stderr = child.stderr.take().expect("piped stderr");
-        let stderr_tx = line_tx.clone();
-        let stderr_handle = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                let _ = stderr_tx.send(EngineLine::Stderr(line));
-            }
-        });
-
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stdout_tx = line_tx.clone();
-        let stdout_handle = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = stdout_tx.send(EngineLine::Stdout(line));
-            }
-        });
-        drop(line_tx);
-
-        let mut stdout_tail: Vec<String> = Vec::new();
-        let mut stderr_tail: Vec<String> = Vec::new();
-        let child_id = child.id();
-        let started = Instant::now();
-        let mut last_line_at = started;
-        let mut last_silence_log_at = started;
-        let status = loop {
-            match line_rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(EngineLine::Stdout(line)) => {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    last_line_at = Instant::now();
-                    push_tail(&mut stdout_tail, line.clone(), 80);
-                    on_event(&EngineEvent::Log {
-                        stream: "stdout".into(),
-                        line: line.clone(),
-                    });
-                    if line.contains("\"status\":\"error\"") || line.contains("Pipeline failed") {
-                        let _ = child.kill();
-                        break child.wait()?;
-                    }
-                }
-                Ok(EngineLine::Stderr(line)) => {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    last_line_at = Instant::now();
-                    if let Some(phase) = parse_engine_progress_phase(&line) {
-                        emit_phase(on_event, phase, 0, 0);
-                    }
-                    push_tail(&mut stderr_tail, line.clone(), 120);
-                    on_event(&EngineEvent::Log {
-                        stream: "stderr".into(),
-                        line,
-                    });
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let now = Instant::now();
-                    if now.duration_since(last_line_at) >= ENGINE_SILENCE_LOG_INTERVAL
-                        && now.duration_since(last_silence_log_at) >= ENGINE_SILENCE_LOG_INTERVAL
-                    {
-                        last_silence_log_at = now;
-                        on_event(&EngineEvent::Log {
-                            stream: "engine".into(),
-                            line: format!(
-                                "waiting for engine output pid={} silent_for_ms={} elapsed_ms={}",
-                                child_id,
-                                now.duration_since(last_line_at).as_millis(),
-                                now.duration_since(started).as_millis()
-                            ),
-                        });
-                    }
-                    if let Some(done) = child.try_wait()? {
-                        break done;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    break wait_for_done_exit(&mut child, Self::DONE_EXIT_GRACE)?;
-                }
-            }
-        };
-        for line in line_rx.try_iter() {
-            match line {
-                EngineLine::Stdout(line) if !line.trim().is_empty() => {
-                    push_tail(&mut stdout_tail, line.clone(), 80);
-                    on_event(&EngineEvent::Log {
-                        stream: "stdout".into(),
-                        line,
-                    });
-                }
-                EngineLine::Stderr(line) if !line.trim().is_empty() => {
-                    if let Some(phase) = parse_engine_progress_phase(&line) {
-                        emit_phase(on_event, phase, 0, 0);
-                    }
-                    push_tail(&mut stderr_tail, line.clone(), 120);
-                    on_event(&EngineEvent::Log {
-                        stream: "stderr".into(),
-                        line,
-                    });
-                }
-                _ => {}
-            }
-        }
-        let _ = stdout_handle.join();
-        let _ = stderr_handle.join();
-        if !status.success() {
-            return Err(EngineError::Failed {
-                code: status.code(),
-                stderr_tail: engine_failure_context(
-                    &engine_repo,
-                    &cache_root,
-                    &self.engine_bin,
-                    &mode,
-                    &stdout_tail,
-                    &stderr_tail,
-                ),
-            });
-        }
-
-        Ok((cache_root, engine_repo))
     }
 
     /// Run the engine and return replayable facts for graph/search indexing.
@@ -549,27 +293,14 @@ impl EngineRunner {
         options: AnalyzeFactsOptions<'_>,
         mut on_event: impl FnMut(&EngineEvent),
     ) -> Result<EngineFacts, EngineError> {
-        let mut sink = FactBatchBuilder::new();
         let fact_options = EngineFactOptions {
             cache_dir: options.cache_dir,
-            debug_artifact_dir: options.debug_artifact_dir,
             no_chunks: options.no_chunks,
         };
-        let produced = self.produce_engine_facts(repo, fact_options, &mut sink, &mut on_event)?;
-        let batch = match produced {
-            ProducedEngineFacts::DirectFacts => sink.finish(),
-            ProducedEngineFacts::EngineDbFallback {
-                engine_repo,
-                project,
-                db_path,
-            } => collect_engine_facts(
-                &engine_repo,
-                &db_path,
-                &project,
-                options.no_chunks,
-                &mut on_event,
-            )?,
-        };
+        let mut sink = FactBatchBuilder::new();
+        let ProducedEngineFacts::DirectFacts =
+            self.produce_engine_facts(repo, fact_options, &mut sink, &mut on_event)?;
+        let batch = sink.finish();
         let done = EngineEvent::Done {
             stats: batch.stats.clone(),
         };
@@ -584,133 +315,99 @@ impl EngineRunner {
         sink: &mut FactBatchBuilder,
         on_event: &mut dyn FnMut(&EngineEvent),
     ) -> Result<ProducedEngineFacts, EngineError> {
-        match embedded_engine_request() {
-            EmbeddedEngineRequest::Disabled => {
-                SidecarEngineFactProducer.produce(self, repo, options, sink, on_event)
-            }
-            EmbeddedEngineRequest::Enabled => {
-                #[cfg(feature = "embedded-engine")]
-                {
-                    let mut embedded_sink = FactBatchBuilder::new();
-                    match EmbeddedEngineFactProducer.produce(
-                        repo,
-                        options,
-                        &mut embedded_sink,
-                        on_event,
-                    ) {
-                        Ok(produced) => {
-                            embedded_sink.finish().replay_into(sink)?;
-                            Ok(produced)
-                        }
-                        Err(error) => {
-                            on_event(&EngineEvent::Log {
-                                stream: "engine".into(),
-                                line: format!(
-                                    "embedded engine failed ({error}); falling back to binary engine"
-                                ),
-                            });
-                            SidecarEngineFactProducer.produce(self, repo, options, sink, on_event)
-                        }
-                    }
-                }
-                #[cfg(not(feature = "embedded-engine"))]
-                {
-                    on_event(&EngineEvent::Log {
-                        stream: "engine".into(),
-                        line: "AKA_ENGINE_EMBEDDED requested but aka-core was built without embedded-engine; falling back to binary engine".into(),
-                    });
-                    SidecarEngineFactProducer.produce(self, repo, options, sink, on_event)
-                }
-            }
-            EmbeddedEngineRequest::Required => {
-                #[cfg(feature = "embedded-engine")]
-                {
-                    EmbeddedEngineFactProducer.produce(repo, options, sink, on_event)
-                }
-                #[cfg(not(feature = "embedded-engine"))]
-                {
-                    Err(EngineError::Facts(aka_facts::FactSourceError::Message(
-                        "AKA_ENGINE_EMBEDDED=require but embedded engine is unavailable for this build"
-                            .into(),
-                    )))
-                }
-            }
+        let _ = self;
+        #[cfg(feature = "embedded-engine")]
+        {
+            EmbeddedEngineFactProducer.produce(repo, options, sink, on_event)
+        }
+        #[cfg(not(feature = "embedded-engine"))]
+        {
+            let _ = (repo, options, sink, on_event);
+            Err(EngineError::Facts(aka_facts::FactSourceError::Message(
+                "embedded engine is required, but this build was compiled without embedded-engine"
+                    .into(),
+            )))
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EmbeddedEngineRequest {
-    Disabled,
-    Enabled,
-    Required,
+pub(super) fn enrich_direct_fact_batch(
+    repo: &Path,
+    batch: &mut FactBatch,
+    on_event: &mut dyn FnMut(&EngineEvent),
+) -> Result<(), EngineError> {
+    emit_phase(on_event, "aka-core:enrichment:direct-facts", 0, 0);
+    let synth = synthesize_graph_from_facts(batch, repo, on_event);
+    let mut known_nodes: HashSet<String> = batch.nodes.iter().map(|node| node.id.clone()).collect();
+    let mut known_edges: HashSet<String> = batch.edges.iter().map(|edge| edge.id.clone()).collect();
+    let mut added_nodes = 0u64;
+    let mut added_edges = 0u64;
+
+    for node in synth.node_recs() {
+        if known_nodes.insert(node.id.clone()) {
+            batch.nodes.push(node);
+            added_nodes += 1;
+        }
+    }
+    for edge in synth.edge_recs() {
+        if known_edges.insert(edge.id.clone()) {
+            batch.edges.push(edge);
+            added_edges += 1;
+        }
+    }
+    batch.stats.files = batch
+        .nodes
+        .iter()
+        .filter(|node| node.label == "File")
+        .count() as u64;
+    batch.stats.nodes = batch.nodes.len() as u64;
+    batch.stats.edges = batch.edges.len() as u64;
+    batch.stats.chunks = batch.chunks.len() as u64;
+    emit_phase(
+        on_event,
+        "aka-core:enrichment:direct-facts",
+        added_nodes + added_edges,
+        added_nodes + added_edges,
+    );
+    Ok(())
 }
 
-fn embedded_engine_request() -> EmbeddedEngineRequest {
-    match std::env::var("AKA_ENGINE_EMBEDDED") {
-        Ok(value) if matches!(value.as_str(), "0" | "off" | "false" | "no") => {
-            EmbeddedEngineRequest::Disabled
+fn engine_cache_root(repo: &Path, cache_dir: Option<&Path>) -> PathBuf {
+    cache_dir
+        .map(|p| p.join("aka-engine"))
+        .unwrap_or_else(|| repo.join(".aka-engine-cache"))
+}
+
+fn embedded_runtime_available(base: &Path) -> bool {
+    #[cfg(feature = "embedded-engine")]
+    {
+        if cfg!(windows) {
+            embedded_windows_dll_candidates(base).any(|path| path.is_file())
+        } else {
+            true
         }
-        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => {
-            EmbeddedEngineRequest::Enabled
-        }
-        Ok(value) if value.eq_ignore_ascii_case("require") => EmbeddedEngineRequest::Required,
-        Ok(_) => EmbeddedEngineRequest::Disabled,
-        Err(_) => default_embedded_engine_request(),
+    }
+    #[cfg(not(feature = "embedded-engine"))]
+    {
+        let _ = base;
+        false
     }
 }
 
 #[cfg(feature = "embedded-engine")]
-fn default_embedded_engine_request() -> EmbeddedEngineRequest {
-    EmbeddedEngineRequest::Enabled
-}
-
-#[cfg(not(feature = "embedded-engine"))]
-fn default_embedded_engine_request() -> EmbeddedEngineRequest {
-    EmbeddedEngineRequest::Disabled
-}
-
-fn engine_cache_root(
-    repo: &Path,
-    fallback_out_dir: Option<&Path>,
-    cache_dir: Option<&Path>,
-) -> PathBuf {
-    cache_dir.map(|p| p.join("aka-engine")).unwrap_or_else(|| {
-        fallback_out_dir
-            .map(|p| p.join(".aka-engine-cache"))
-            .unwrap_or_else(|| repo.join(".aka-engine-cache"))
-    })
-}
-
-fn engine_exe_names() -> &'static [&'static str] {
-    if cfg!(windows) {
-        &["aka-engine.exe"]
-    } else {
-        &["aka-engine"]
-    }
-}
-
-fn resolve_engine_binary(base: &Path) -> Option<PathBuf> {
+fn embedded_windows_dll_candidates(base: &Path) -> impl Iterator<Item = PathBuf> {
     let mut candidates = Vec::new();
     if base.is_file() {
         candidates.push(base.to_path_buf());
     } else {
-        for name in engine_exe_names() {
-            candidates.extend([
-                base.join(name),
-                base.join("bin").join(name),
-                base.join("build/c").join(name),
-            ]);
-        }
+        candidates.extend([
+            base.join("aka_engine.dll"),
+            base.join("engine").join("aka_engine.dll"),
+            base.join("resources").join("engine").join("aka_engine.dll"),
+            base.join("build").join("c").join("aka_engine.dll"),
+        ]);
     }
-    candidates.into_iter().find(|p| p.is_file())
-}
-
-fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+    candidates.into_iter()
 }
 
 fn engine_mode() -> String {
@@ -833,7 +530,7 @@ where
 /// going instead of hanging in the enrichment stage. This is the no-progress
 /// sibling of [`synthesize_with_timeout_and_progress`].
 fn run_synth_stage<T, F>(
-    on_event: &mut impl FnMut(&EngineEvent),
+    on_event: &mut (impl FnMut(&EngineEvent) + ?Sized),
     phase: &str,
     timeout: Duration,
     default: T,
@@ -891,381 +588,7 @@ where
     }
 }
 
-fn push_tail(tail: &mut Vec<String>, line: String, limit: usize) {
-    tail.push(line);
-    if tail.len() > limit {
-        let drop_count = tail.len() - limit;
-        tail.drain(0..drop_count);
-    }
-}
-
-fn engine_failure_context(
-    repo: &Path,
-    cache_root: &Path,
-    engine_bin: &Path,
-    mode: &str,
-    stdout_tail: &[String],
-    stderr_tail: &[String],
-) -> String {
-    let mut out = vec![
-        format!("repo_path={}", repo.display()),
-        format!("cache_dir={}", cache_root.display()),
-        format!("mode={mode}"),
-        format!("engine_bin={}", engine_bin.display()),
-    ];
-    if !stdout_tail.is_empty() {
-        out.push("stdout tail:".into());
-        out.extend(stdout_tail.iter().cloned());
-    }
-    if !stderr_tail.is_empty() {
-        out.push("stderr tail:".into());
-        out.extend(stderr_tail.iter().cloned());
-    }
-    out.join("\n")
-}
-
-fn parse_engine_progress_phase(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed == "Starting incremental index" {
-        return Some("aka-engine:incremental-index".into());
-    }
-    if trimmed == "Starting full index" {
-        return Some("aka-engine:full-index".into());
-    }
-    if trimmed.starts_with('[') {
-        return Some(format!("aka-engine:{trimmed}"));
-    }
-    if trimmed.starts_with("Discovering files") || trimmed.starts_with("Extracting:") {
-        return Some(format!("aka-engine:{trimmed}"));
-    }
-    None
-}
-
-fn find_single_project_db(
-    cache_root: &Path,
-    repo: &Path,
-) -> Result<(String, PathBuf), EngineError> {
-    let mut candidates = Vec::new();
-    for root in project_db_search_roots(cache_root) {
-        collect_engine_db_candidates(&root, &mut candidates)?;
-    }
-    candidates.sort_by(|a, b| {
-        b.modified
-            .cmp(&a.modified)
-            .then_with(|| a.path.cmp(&b.path))
-    });
-
-    let expected_root = normalize_project_root(repo);
-    let mut fallback = None;
-    for candidate in candidates {
-        let conn = match open_engine_db(&candidate.path) {
-            Ok(conn) => conn,
-            Err(_) => continue,
-        };
-        let project = conn.query_row("SELECT name, root_path FROM projects LIMIT 1", [], |row| {
-            Ok(ProjectDbRow {
-                name: row.get(0)?,
-                root_path: row.get(1).ok(),
-            })
-        });
-        match project {
-            Ok(project) => {
-                if project
-                    .root_path
-                    .as_deref()
-                    .map(normalize_root_str)
-                    .as_deref()
-                    == Some(expected_root.as_str())
-                {
-                    return Ok((project.name, candidate.path));
-                }
-                fallback.get_or_insert((project.name, candidate.path));
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
-            Err(err) => return Err(err.into()),
-        }
-    }
-
-    fallback.ok_or_else(|| EngineError::MissingProject(cache_root.to_path_buf()))
-}
-
-fn project_db_search_roots(cache_root: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![cache_root.to_path_buf()];
-    if let Some(home) = home_dir() {
-        roots.push(home.join(".cache").join("aka-engine"));
-        roots.push(home.join(".cache").join("codebase-memory-mcp"));
-    }
-    roots.sort();
-    roots.dedup();
-    roots
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|home| !home.is_empty()))
-        .map(PathBuf::from)
-}
-
-#[derive(Debug)]
-struct ProjectDbCandidate {
-    path: PathBuf,
-    modified: SystemTime,
-}
-
-#[derive(Debug)]
-struct ProjectDbRow {
-    name: String,
-    root_path: Option<String>,
-}
-
-fn collect_engine_db_candidates(
-    dir: &Path,
-    candidates: &mut Vec<ProjectDbCandidate>,
-) -> Result<(), EngineError> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        if metadata.is_dir() {
-            collect_engine_db_candidates(&path, candidates)?;
-        } else if metadata.is_file()
-            && path.extension().and_then(|e| e.to_str()) == Some("db")
-            && !path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.eq_ignore_ascii_case("_config.db"))
-        {
-            candidates.push(ProjectDbCandidate {
-                path,
-                modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn normalize_project_root(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .display()
-        .to_string()
-        .replace('\\', "/")
-}
-
-fn normalize_root_str(path: &str) -> String {
-    path.replace('\\', "/")
-}
-
-fn open_engine_db(path: &Path) -> Result<Connection, rusqlite::Error> {
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_URI,
-    )
-}
-
-fn export_artifacts(
-    repo: &Path,
-    out_dir: &Path,
-    db_path: &Path,
-    project: &str,
-    no_chunks: bool,
-    on_event: &mut impl FnMut(&EngineEvent),
-) -> Result<ArtifactStats, EngineError> {
-    let conn = open_engine_db(db_path)?;
-    emit_phase(on_event, "aka-engine:export-artifacts:inspect-db", 0, 0);
-    let db_counts = ArtifactStats {
-        files: count_files(&conn, project)?,
-        nodes: count_nodes(&conn, project)?,
-        edges: count_edges(&conn, project)?,
-        chunks: count_chunkable_nodes(&conn, project)?,
-    };
-    if let Err(err) = warn_missing_source_extensions(repo, &conn, project, on_event) {
-        on_event(&EngineEvent::Warning {
-            message: format!("source language coverage check failed: {err}"),
-        });
-    }
-
-    emit_phase(
-        on_event,
-        format!(
-            "aka-core:enrichment-graph ({} nodes / {} edges)",
-            db_counts.nodes, db_counts.edges
-        ),
-        0,
-        0,
-    );
-    let synth = synthesize_graph_with_progress(&conn, project, repo, on_event)?;
-
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:nodes",
-        0,
-        db_counts.nodes,
-    );
-    let nodes = export_nodes(
-        &conn,
-        project,
-        &out_dir.join("nodes.ndjson"),
-        &synth,
-        db_counts.nodes,
-        on_event,
-    )?;
-    emit_phase(
-        on_event,
-        "aka-engine:export-artifacts:edges",
-        0,
-        db_counts.edges,
-    );
-    let edges = export_edges(
-        &conn,
-        project,
-        &out_dir.join("edges.ndjson"),
-        &synth,
-        db_counts.edges,
-        on_event,
-    )?;
-    let mut stats = ArtifactStats {
-        files: db_counts.files,
-        nodes,
-        edges,
-        chunks: 0,
-    };
-    if no_chunks {
-        let _ = std::fs::remove_file(out_dir.join("chunks.ndjson"));
-    } else {
-        emit_phase(
-            on_event,
-            "aka-engine:export-artifacts:chunks",
-            0,
-            db_counts.chunks,
-        );
-        stats.chunks = export_chunks(
-            &conn,
-            project,
-            repo,
-            &out_dir.join("chunks.ndjson"),
-            db_counts.chunks,
-            on_event,
-        )?;
-    }
-
-    emit_phase(on_event, "aka-engine:export-artifacts:manifest", 0, 0);
-    let manifest = Manifest {
-        contract_version: CONTRACT_VERSION,
-        engine_version: format!("aka-engine ({})", db_path.display()),
-        repo_path: repo.display().to_string(),
-        commit: git_head(repo),
-        generated_at: Utc::now().to_rfc3339(),
-        stats: stats.clone(),
-    };
-    let manifest_path = out_dir.join("manifest.json");
-    let file = File::create(manifest_path)?;
-    serde_json::to_writer_pretty(BufWriter::new(file), &manifest)?;
-    Ok(stats)
-}
-
-fn collect_engine_facts(
-    repo: &Path,
-    db_path: &Path,
-    project: &str,
-    no_chunks: bool,
-    on_event: &mut impl FnMut(&EngineEvent),
-) -> Result<FactBatch, EngineError> {
-    let conn = open_engine_db(db_path)?;
-    emit_phase(on_event, "aka-engine:facts:inspect-db", 0, 0);
-    let db_counts = ArtifactStats {
-        files: count_files(&conn, project)?,
-        nodes: count_nodes(&conn, project)?,
-        edges: count_edges(&conn, project)?,
-        chunks: count_chunkable_nodes(&conn, project)?,
-    };
-    if let Err(err) = warn_missing_source_extensions(repo, &conn, project, on_event) {
-        on_event(&EngineEvent::Warning {
-            message: format!("source language coverage check failed: {err}"),
-        });
-    }
-
-    emit_phase(
-        on_event,
-        format!(
-            "aka-engine:facts:synthesize-graph ({} nodes / {} edges)",
-            db_counts.nodes, db_counts.edges
-        ),
-        0,
-        0,
-    );
-    let synth = synthesize_graph_with_progress(&conn, project, repo, on_event)?;
-
-    let nodes = collect_nodes(&conn, project, &synth, db_counts.nodes, on_event)?;
-    let edges = collect_edges(&conn, project, &synth, db_counts.edges, on_event)?;
-    let chunks = if no_chunks {
-        Vec::new()
-    } else {
-        collect_chunks(&conn, project, repo, db_counts.chunks, on_event)?
-    };
-    let stats = ArtifactStats {
-        files: db_counts.files,
-        nodes: nodes.len() as u64,
-        edges: edges.len() as u64,
-        chunks: chunks.len() as u64,
-    };
-    Ok(FactBatch::new(stats, nodes, edges, chunks))
-}
-
-fn count_nodes(conn: &Connection, project: &str) -> Result<u64, rusqlite::Error> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM nodes WHERE project = ?1",
-        [project],
-        |row| row.get(0),
-    )
-}
-
-fn count_edges(conn: &Connection, project: &str) -> Result<u64, rusqlite::Error> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM edges WHERE project = ?1",
-        [project],
-        |row| row.get(0),
-    )
-}
-
-fn count_chunkable_nodes(conn: &Connection, project: &str) -> Result<u64, rusqlite::Error> {
-    conn.query_row(
-        "SELECT COUNT(*) \
-         FROM nodes \
-         WHERE project = ?1 AND file_path != '' AND label NOT IN ('File','Folder','Project','Package','Module')",
-        [project],
-        |row| row.get(0),
-    )
-}
-
-fn count_files(conn: &Connection, project: &str) -> Result<u64, rusqlite::Error> {
-    let count: u64 = conn.query_row(
-        "SELECT COUNT(*) FROM file_hashes WHERE project = ?1",
-        [project],
-        |row| row.get(0),
-    )?;
-    if count > 0 {
-        return Ok(count);
-    }
-    conn.query_row(
-        "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE project = ?1 AND file_path != ''",
-        [project],
-        |row| row.get(0),
-    )
-}
-
+#[cfg(test)]
 fn warn_missing_source_extensions(
     repo: &Path,
     conn: &Connection,
@@ -1299,6 +622,7 @@ fn warn_missing_source_extensions(
     Ok(())
 }
 
+#[cfg(test)]
 fn indexed_project_source_extensions(
     conn: &Connection,
     project: &str,
@@ -1335,6 +659,7 @@ fn indexed_project_source_extensions(
     Ok(exts)
 }
 
+#[cfg(test)]
 fn file_hashes_path_column(conn: &Connection) -> Result<Option<&'static str>, EngineError> {
     let mut stmt = conn.prepare("PRAGMA table_info(file_hashes)")?;
     let mut rows = stmt.query([])?;
@@ -1357,6 +682,7 @@ fn file_hashes_path_column(conn: &Connection) -> Result<Option<&'static str>, En
     })
 }
 
+#[cfg(test)]
 fn repo_source_extensions(
     repo: &Path,
     project_sources: &ProjectSourceSet,
@@ -1372,6 +698,7 @@ fn repo_source_extensions(
     Ok(exts)
 }
 
+#[cfg(test)]
 fn collect_repo_source_extensions(
     repo: &Path,
     dir: &Path,
@@ -1401,6 +728,7 @@ fn collect_repo_source_extensions(
     Ok(())
 }
 
+#[cfg(test)]
 fn source_extension(path: &str) -> Option<String> {
     let path = path.replace('\\', "/");
     let ext = Path::new(&path)
@@ -1414,6 +742,7 @@ fn source_extension(path: &str) -> Option<String> {
     .then_some(ext)
 }
 
+#[cfg(test)]
 fn is_source_discovery_skip_dir(name: &str) -> bool {
     matches!(
         name,
@@ -1438,182 +767,7 @@ fn is_source_discovery_skip_dir(name: &str) -> bool {
     )
 }
 
-fn export_nodes(
-    conn: &Connection,
-    project: &str,
-    path: &Path,
-    synth: &SynthGraph,
-    total: u64,
-    on_event: &mut impl FnMut(&EngineEvent),
-) -> Result<u64, EngineError> {
-    let file = File::create(path)?;
-    let mut out = BufWriter::with_capacity(1 << 20, file);
-    let nodes = collect_nodes(conn, project, synth, total, on_event)?;
-    for node in &nodes {
-        serde_json::to_writer(&mut out, node)?;
-        out.write_all(b"\n")?;
-    }
-    Ok(nodes.len() as u64)
-}
-
-fn collect_nodes(
-    conn: &Connection,
-    project: &str,
-    synth: &SynthGraph,
-    total: u64,
-    on_event: &mut impl FnMut(&EngineEvent),
-) -> Result<Vec<NodeRec>, EngineError> {
-    emit_phase(on_event, "aka-engine:facts:nodes:query", 0, total);
-    let mut stmt = conn.prepare(
-        "SELECT id, label, name, qualified_name, file_path, start_line, end_line, properties \
-         FROM nodes WHERE project = ?1 ORDER BY id",
-    )?;
-    let mut rows = stmt.query([project])?;
-    let mut count = 0;
-    let mut nodes = Vec::new();
-    let mut progress = ExportProgress::new("nodes", total);
-    while let Some(row) = rows.next()? {
-        let cbm_id: i64 = row.get(0)?;
-        let label = text_col(row, 1)?;
-        let mut name = text_col(row, 2)?;
-        let qn = text_col(row, 3)?;
-        let file_path = text_col(row, 4)?;
-        let start_line: i64 = row.get(5)?;
-        let end_line: i64 = row.get(6)?;
-        let props_text = text_col(row, 7)?;
-
-        let mut properties = parse_props(&props_text);
-        if label == "Route" {
-            if let Some(route) = route_from_path(&file_path) {
-                name = route;
-                properties.insert("name".into(), Value::String(name.clone()));
-            }
-            sanitize_string_array_prop(&mut properties, "responseKeys");
-            sanitize_string_array_prop(&mut properties, "errorKeys");
-        }
-        insert_if_missing(&mut properties, "name", Value::String(name));
-        insert_if_missing(&mut properties, "qualifiedName", Value::String(qn.clone()));
-        insert_if_missing(&mut properties, "filePath", Value::String(file_path));
-        insert_if_missing(
-            &mut properties,
-            "startLine",
-            Value::from(to_artifact_line(start_line)),
-        );
-        insert_if_missing(
-            &mut properties,
-            "endLine",
-            Value::from(to_artifact_line(end_line)),
-        );
-        properties.insert("cbmId".into(), Value::from(cbm_id));
-
-        let node = NodeRec {
-            id: aka_node_id(cbm_id, &qn),
-            label,
-            properties,
-        };
-        nodes.push(node);
-        count += 1;
-        progress.emit(on_event, count);
-    }
-    emit_phase(on_event, "aka-engine:facts:nodes:synthetic", count, total);
-    for community in &synth.communities {
-        nodes.push(community.node_rec());
-        count += 1;
-    }
-    for process in &synth.processes {
-        nodes.push(process.node_rec());
-        count += 1;
-    }
-    for property in &synth.properties {
-        nodes.push(property.node_rec());
-        count += 1;
-    }
-    for route in synth.routes.iter().filter(|r| r.emit_node) {
-        nodes.push(route.node_rec());
-        count += 1;
-    }
-    for tool in synth.tools.iter().filter(|t| t.emit_node) {
-        nodes.push(tool.node_rec());
-        count += 1;
-    }
-    for node in synth
-        .commands
-        .iter()
-        .filter_map(SynthCommand::handler_node_rec)
-    {
-        nodes.push(node);
-        count += 1;
-    }
-    for command in &synth.commands {
-        nodes.push(command.node_rec());
-        count += 1;
-    }
-    for config in &synth.configs {
-        nodes.push(config.node_rec());
-        count += 1;
-    }
-    for job in &synth.jobs {
-        nodes.push(job.node_rec());
-        count += 1;
-    }
-    for topic in &synth.topics {
-        nodes.push(topic.node_rec());
-        count += 1;
-    }
-    for cache in &synth.caches {
-        nodes.push(cache.node_rec());
-        count += 1;
-    }
-    for event in &synth.events {
-        nodes.push(event.node_rec());
-        count += 1;
-    }
-    for policy in &synth.policies {
-        nodes.push(policy.node_rec());
-        count += 1;
-    }
-    for resource in &synth.resources {
-        nodes.push(resource.node_rec());
-        count += 1;
-    }
-    for operation in &synth.graphql {
-        nodes.push(operation.node_rec());
-        count += 1;
-    }
-    for symbol in &synth.source_symbols {
-        nodes.push(symbol.node_rec());
-        count += 1;
-    }
-    for node in synth.persistence.node_recs() {
-        nodes.push(node);
-        count += 1;
-    }
-    for transaction in &synth.transactions {
-        nodes.push(transaction.node_rec());
-        count += 1;
-    }
-    progress.emit_force(on_event, count);
-    Ok(nodes)
-}
-
-fn export_edges(
-    conn: &Connection,
-    project: &str,
-    path: &Path,
-    synth: &SynthGraph,
-    total: u64,
-    on_event: &mut impl FnMut(&EngineEvent),
-) -> Result<u64, EngineError> {
-    let file = File::create(path)?;
-    let mut out = BufWriter::with_capacity(1 << 20, file);
-    let edges = collect_edges(conn, project, synth, total, on_event)?;
-    for edge in &edges {
-        serde_json::to_writer(&mut out, edge)?;
-        out.write_all(b"\n")?;
-    }
-    Ok(edges.len() as u64)
-}
-
+#[cfg(test)]
 fn collect_edges(
     conn: &Connection,
     project: &str,
@@ -1718,12 +872,14 @@ fn collect_edges(
     Ok(edges)
 }
 
+#[cfg(test)]
 struct ExportProgress {
     name: &'static str,
     total: u64,
     last_emit: Instant,
 }
 
+#[cfg(test)]
 impl ExportProgress {
     fn new(name: &'static str, total: u64) -> Self {
         Self {
@@ -1746,7 +902,7 @@ impl ExportProgress {
         self.last_emit = Instant::now();
         emit_phase(
             on_event,
-            format!("aka-engine:export-artifacts:{}", self.name),
+            format!("aka-engine:facts:{}", self.name),
             count,
             self.total,
         );
@@ -1754,6 +910,7 @@ impl ExportProgress {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg(test)]
 struct SemanticEdgeSynthesizer {
     seen: HashSet<(String, String, String)>,
     out: Vec<EdgeRec>,
@@ -1763,6 +920,7 @@ struct SemanticEdgeSynthesizer {
     implements: Vec<(String, String)>,
 }
 
+#[cfg(test)]
 impl SemanticEdgeSynthesizer {
     fn load(conn: &Connection, project: &str) -> Result<Self, rusqlite::Error> {
         let mut this = Self::default();
@@ -1924,6 +1082,7 @@ impl SemanticEdgeSynthesizer {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 struct SemanticNode {
     id: String,
     label: String,
@@ -1932,12 +1091,14 @@ struct SemanticNode {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(test)]
 struct SemanticEndpoint<'a> {
     id: i64,
     qn: &'a str,
     label: &'a str,
 }
 
+#[cfg(test)]
 impl<'a> SemanticEndpoint<'a> {
     fn new(id: i64, qn: &'a str, label: &'a str) -> Self {
         Self { id, qn, label }
@@ -2300,6 +1461,732 @@ impl SynthProcess {
     }
 }
 
+impl SynthGraph {
+    fn node_recs(&self) -> Vec<NodeRec> {
+        let mut nodes = Vec::new();
+        nodes.extend(self.communities.iter().map(SynthCommunity::node_rec));
+        nodes.extend(self.processes.iter().map(SynthProcess::node_rec));
+        nodes.extend(self.properties.iter().map(SynthProperty::node_rec));
+        nodes.extend(
+            self.routes
+                .iter()
+                .filter(|route| route.emit_node)
+                .map(SynthRoute::node_rec),
+        );
+        nodes.extend(
+            self.tools
+                .iter()
+                .filter(|tool| tool.emit_node)
+                .map(SynthTool::node_rec),
+        );
+        nodes.extend(
+            self.commands
+                .iter()
+                .filter_map(SynthCommand::handler_node_rec),
+        );
+        nodes.extend(self.commands.iter().map(SynthCommand::node_rec));
+        nodes.extend(self.configs.iter().map(SynthConfig::node_rec));
+        nodes.extend(self.jobs.iter().map(SynthJob::node_rec));
+        nodes.extend(self.topics.iter().map(SynthTopic::node_rec));
+        nodes.extend(self.caches.iter().map(SynthCache::node_rec));
+        nodes.extend(self.events.iter().map(SynthEvent::node_rec));
+        nodes.extend(self.policies.iter().map(SynthPolicy::node_rec));
+        nodes.extend(self.resources.iter().map(SynthResource::node_rec));
+        nodes.extend(self.graphql.iter().map(SynthGraphqlOperation::node_rec));
+        nodes.extend(self.source_symbols.iter().map(|symbol| symbol.node_rec()));
+        nodes.extend(self.persistence.node_recs());
+        nodes.extend(self.transactions.iter().map(SynthTransaction::node_rec));
+        nodes
+    }
+
+    fn edge_recs(&self) -> Vec<EdgeRec> {
+        let mut edges = Vec::new();
+        edges.extend(self.properties.iter().map(SynthProperty::edge_rec));
+        edges.extend(self.communities.iter().flat_map(SynthCommunity::edge_recs));
+        edges.extend(self.processes.iter().flat_map(SynthProcess::edge_recs));
+        edges.extend(self.routes.iter().flat_map(SynthRoute::edge_recs));
+        edges.extend(self.tools.iter().flat_map(SynthTool::edge_recs));
+        edges.extend(self.commands.iter().flat_map(SynthCommand::edge_recs));
+        edges.extend(self.configs.iter().flat_map(SynthConfig::edge_recs));
+        edges.extend(self.jobs.iter().flat_map(SynthJob::edge_recs));
+        edges.extend(self.topics.iter().flat_map(SynthTopic::edge_recs));
+        edges.extend(self.caches.iter().flat_map(SynthCache::edge_recs));
+        edges.extend(self.events.iter().flat_map(SynthEvent::edge_recs));
+        edges.extend(self.policies.iter().flat_map(SynthPolicy::edge_recs));
+        edges.extend(self.resources.iter().flat_map(SynthResource::edge_recs));
+        edges.extend(
+            self.graphql
+                .iter()
+                .flat_map(SynthGraphqlOperation::edge_recs),
+        );
+        edges.extend(self.persistence.edge_recs());
+        edges.extend(
+            self.transactions
+                .iter()
+                .flat_map(SynthTransaction::edge_recs),
+        );
+        edges.extend(self.edges.iter().cloned());
+        edges
+    }
+}
+
+fn load_synth_nodes_from_facts(batch: &FactBatch) -> BTreeMap<String, SynthNode> {
+    let mut nodes = BTreeMap::new();
+    for node in &batch.nodes {
+        let file_path = node.file_path().unwrap_or_default().to_string();
+        if !is_semantic_symbol_label(&node.label) || is_noisy_source_path(&file_path) {
+            continue;
+        }
+        let name = node.name().unwrap_or_default().to_string();
+        let qn = node
+            .properties
+            .get("qualifiedName")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| node.id.split_once(':').map(|(_, rest)| rest.to_string()))
+            .unwrap_or_else(|| name.clone());
+        let language = node
+            .properties
+            .get("language")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let route_path = node
+            .properties
+            .get("route_path")
+            .or_else(|| node.properties.get("routePath"))
+            .and_then(Value::as_str)
+            .map(normalize_route_literal);
+        let route_method = node
+            .properties
+            .get("route_method")
+            .or_else(|| node.properties.get("routeMethod"))
+            .and_then(Value::as_str)
+            .map(|v| v.to_ascii_uppercase());
+        let decorators = node
+            .properties
+            .get("decorators")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let parent_class = node
+            .properties
+            .get("parent_class")
+            .or_else(|| node.properties.get("parentClass"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let ast_framework_multiplier = node
+            .properties
+            .get("astFrameworkMultiplier")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        let ast_framework_reason = node
+            .properties
+            .get("astFrameworkReason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let is_exported = node
+            .properties
+            .get("isExported")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                node.properties
+                    .get("visibility")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| v.eq_ignore_ascii_case("public"))
+            });
+        nodes.insert(
+            node.id.clone(),
+            SynthNode {
+                aka_id: node.id.clone(),
+                qn,
+                label: node.label.clone(),
+                name,
+                file_path,
+                start_line: node.start_line().unwrap_or(0) as i64 + 1,
+                end_line: node.end_line().unwrap_or(0) as i64 + 1,
+                language,
+                route_path,
+                route_method,
+                decorators,
+                parent_class,
+                is_exported,
+                ast_framework_multiplier,
+                ast_framework_reason,
+            },
+        );
+    }
+    nodes
+}
+
+fn native_app_nodes_from_facts(batch: &FactBatch, label: &str) -> Vec<NativeAppNode> {
+    batch
+        .nodes
+        .iter()
+        .filter(|node| node.label == label)
+        .map(|node| NativeAppNode {
+            id: node.id.clone(),
+            name: node.name().unwrap_or_default().to_string(),
+            file_path: node.file_path().unwrap_or_default().to_string(),
+        })
+        .collect()
+}
+
+fn native_channel_topic_detections_from_facts(
+    batch: &FactBatch,
+    repo: &Path,
+) -> Vec<NativeTopicDetection> {
+    let nodes_by_id: BTreeMap<&str, &NodeRec> = batch
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    let project_sources = ProjectSourceSet::discover(repo);
+    let mut out = Vec::new();
+    for edge in &batch.edges {
+        let kind = match edge.edge_type.as_str() {
+            "EMITS" => TopicEndpointKind::Producer,
+            "LISTENS_ON" => TopicEndpointKind::Consumer,
+            _ => continue,
+        };
+        let Some(source) = nodes_by_id.get(edge.source_id.as_str()).copied() else {
+            continue;
+        };
+        let Some(channel) = nodes_by_id.get(edge.target_id.as_str()).copied() else {
+            continue;
+        };
+        if channel.label != "Channel" {
+            continue;
+        }
+        let file_path = source.file_path().unwrap_or_default().to_string();
+        if !project_sources.contains_project_file(repo, &file_path) {
+            continue;
+        }
+        let topic = channel
+            .properties
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| channel.name())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default()
+            .to_string();
+        if topic.is_empty() {
+            continue;
+        }
+        let edge_props = edge.evidence.as_ref().and_then(Value::as_object);
+        let broker = channel
+            .properties
+            .get("transport")
+            .or_else(|| edge_props.and_then(|props| props.get("transport")))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+        out.push(NativeTopicDetection {
+            topic,
+            broker,
+            kind,
+            node_id: source.id.clone(),
+            file_path,
+            native_edge_type: edge.edge_type.clone(),
+        });
+    }
+    out
+}
+
+fn existing_call_pairs_from_facts(batch: &FactBatch) -> HashSet<(String, String)> {
+    batch
+        .edges
+        .iter()
+        .filter(|edge| edge.edge_type == "CALLS")
+        .map(|edge| (edge.source_id.clone(), edge.target_id.clone()))
+        .collect()
+}
+
+fn call_graph_from_facts(batch: &FactBatch) -> CallGraph {
+    let nodes_by_id: BTreeMap<&str, &NodeRec> = batch
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    let mut graph = CallGraph::default();
+    for edge in batch.edges.iter().filter(|edge| edge.edge_type == "CALLS") {
+        if edge.confidence < MIN_TRACE_CONFIDENCE {
+            continue;
+        }
+        let Some(source) = nodes_by_id.get(edge.source_id.as_str()).copied() else {
+            continue;
+        };
+        let Some(target) = nodes_by_id.get(edge.target_id.as_str()).copied() else {
+            continue;
+        };
+        if !is_process_step_label(&source.label)
+            || !is_process_step_label(&target.label)
+            || source.file_path().unwrap_or_default().is_empty()
+            || target.file_path().unwrap_or_default().is_empty()
+            || edge.source_id == edge.target_id
+        {
+            continue;
+        }
+        let inserted = graph
+            .adjacency
+            .entry(edge.source_id.clone())
+            .or_default()
+            .insert(edge.target_id.clone());
+        if inserted {
+            *graph.indegree.entry(edge.target_id.clone()).or_default() += 1;
+            graph
+                .edges
+                .push((edge.source_id.clone(), edge.target_id.clone()));
+        }
+    }
+    graph
+}
+
+fn native_community_memberships_from_facts(
+    batch: &FactBatch,
+    nodes: &BTreeMap<String, SynthNode>,
+) -> BTreeMap<String, Vec<CommunityRef>> {
+    let nodes_by_id: BTreeMap<&str, &NodeRec> = batch
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    let mut memberships: BTreeMap<String, BTreeSet<CommunityRef>> = BTreeMap::new();
+    for edge in batch
+        .edges
+        .iter()
+        .filter(|edge| edge.edge_type == "MEMBER_OF")
+    {
+        if !nodes.contains_key(&edge.source_id) {
+            continue;
+        }
+        let Some(community) = nodes_by_id.get(edge.target_id.as_str()).copied() else {
+            continue;
+        };
+        if community.label != "Community" {
+            continue;
+        }
+        let label = community
+            .properties
+            .get("heuristicLabel")
+            .and_then(Value::as_str)
+            .or_else(|| community.properties.get("label").and_then(Value::as_str))
+            .or_else(|| community.name())
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&edge.target_id)
+            .to_string();
+        memberships
+            .entry(edge.source_id.clone())
+            .or_default()
+            .insert(CommunityRef {
+                id: edge.target_id.clone(),
+                label,
+            });
+    }
+    memberships
+        .into_iter()
+        .map(|(id, refs)| (id, refs.into_iter().collect()))
+        .collect()
+}
+
+fn synthesize_python_properties_from_facts(
+    repo: &Path,
+    nodes: &BTreeMap<String, SynthNode>,
+    existing_node_ids: &HashSet<String>,
+) -> Vec<SynthProperty> {
+    let mut sources = SourceCache::new(repo);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for node in nodes.values().filter(|node| {
+        node.label == "Class" && node.file_path.ends_with(".py") && !node.file_path.is_empty()
+    }) {
+        if node.name.is_empty() || node.name.starts_with('[') || node.start_line <= 0 {
+            continue;
+        }
+        let Some(text) = sources.read_file(&node.file_path) else {
+            continue;
+        };
+        for prop in extract_python_class_properties(
+            &text,
+            &node.file_path,
+            &node.aka_id,
+            &node.name,
+            node.start_line as usize,
+            node.end_line.max(node.start_line) as usize,
+        ) {
+            if !existing_node_ids.contains(&prop.id) && seen.insert(prop.id.clone()) {
+                out.push(prop);
+            }
+        }
+    }
+    out
+}
+
+fn synthesize_graph_from_facts(
+    batch: &FactBatch,
+    repo: &Path,
+    on_event: &mut dyn FnMut(&EngineEvent),
+) -> SynthGraph {
+    emit_phase(on_event, "aka-core:enrichment:nodes", 0, 0);
+    let native_communities = batch.nodes.iter().any(|node| node.label == "Community");
+    let native_processes = batch.nodes.iter().any(|node| node.label == "Process");
+    let native_routes = native_app_nodes_from_facts(batch, "Route");
+    let native_tools = native_app_nodes_from_facts(batch, "Tool");
+    let native_topics = native_channel_topic_detections_from_facts(batch, repo);
+    let mut nodes = load_synth_nodes_from_facts(batch);
+    let source_symbols = synthesize_source_symbols_from_sources(repo, &nodes);
+    for symbol in &source_symbols {
+        nodes.insert(symbol.node().aka_id.clone(), symbol.node().clone());
+    }
+    let existing_node_ids: HashSet<String> =
+        batch.nodes.iter().map(|node| node.id.clone()).collect();
+    let properties = synthesize_python_properties_from_facts(repo, &nodes, &existing_node_ids);
+    let native_community_memberships = native_community_memberships_from_facts(batch, &nodes);
+    synthesize_graph_from_parts(
+        repo,
+        nodes,
+        source_symbols,
+        properties,
+        native_communities,
+        native_processes,
+        native_routes,
+        native_tools,
+        native_topics,
+        native_community_memberships,
+        existing_call_pairs_from_facts(batch),
+        call_graph_from_facts(batch),
+        batch
+            .nodes
+            .iter()
+            .filter(|node| node.label != "File")
+            .count(),
+        on_event,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn synthesize_graph_from_parts(
+    repo: &Path,
+    mut nodes: BTreeMap<String, SynthNode>,
+    source_symbols: Vec<SynthSourceSymbol>,
+    properties: Vec<SynthProperty>,
+    native_communities: bool,
+    native_processes: bool,
+    native_routes: Vec<NativeAppNode>,
+    native_tools: Vec<NativeAppNode>,
+    native_topics: Vec<NativeTopicDetection>,
+    native_community_memberships: BTreeMap<String, Vec<CommunityRef>>,
+    existing_call_pairs: HashSet<(String, String)>,
+    native_calls: CallGraph,
+    symbol_count: usize,
+    on_event: &mut dyn FnMut(&EngineEvent),
+) -> SynthGraph {
+    if nodes.is_empty() {
+        let processes = Vec::new();
+        let native_routes = Vec::new();
+        let native_tools = Vec::new();
+        let commands = synthesize_commands_from_sources(repo, &nodes, &processes);
+        let routes = synthesize_routes_from_sources(repo, &nodes, &processes, &native_routes);
+        let tools = synthesize_tools_from_sources(repo, &nodes, &processes, &native_tools);
+        let persistence = synthesize_persistence_from_sources(repo, &nodes);
+        let configs = synthesize_configs_from_sources(repo, &nodes);
+        let jobs = synthesize_jobs_from_sources(repo, &nodes, &processes);
+        let mut topics = synthesize_topics_from_sources(repo, &nodes);
+        merge_native_channel_topics(&mut topics, native_topics);
+        let caches = synthesize_caches_from_sources(repo, &nodes);
+        let events = synthesize_events_from_sources(repo, &nodes);
+        let policies = synthesize_policies_from_sources(repo, &nodes);
+        let resources = synthesize_resources_from_sources(repo, &nodes);
+        let graphql = synthesize_graphql_from_sources(repo, &nodes, &processes);
+        let transactions = synthesize_transactions_from_sources(repo, &nodes);
+        return SynthGraph {
+            processes,
+            routes,
+            tools,
+            commands,
+            properties,
+            persistence,
+            configs,
+            jobs,
+            topics,
+            caches,
+            events,
+            policies,
+            resources,
+            graphql,
+            transactions,
+            source_symbols,
+            ..SynthGraph::default()
+        };
+    }
+
+    emit_phase(
+        on_event,
+        format!(
+            "aka-core:enrichment:calls ({} process-step nodes)",
+            nodes.len()
+        ),
+        0,
+        0,
+    );
+    emit_phase(on_event, "aka-core:enrichment:dependency-edges", 0, 0);
+    let synthetic_edges =
+        synthesize_dependency_edges_from_sources(repo, &nodes, &existing_call_pairs, |progress| {
+            let (phase, current, total) = dependency_progress_phase(progress);
+            emit_phase(on_event, phase, current, total);
+        });
+    let calls = native_calls.with_synthetic_edges(&nodes, &synthetic_edges);
+    let project_sources = ProjectSourceSet::discover(repo);
+    emit_phase(on_event, "aka-core:enrichment:project-subgraph", 0, 0);
+    let process_nodes = project_process_nodes(repo, &nodes, &project_sources);
+    let process_calls = calls.project_subgraph(&process_nodes);
+    let mut command_entry_hints = command_entry_hints_from_sources(repo, &nodes);
+    for (handler_id, strategy) in job_entry_hints_from_sources(repo, &nodes) {
+        command_entry_hints
+            .entry(handler_id)
+            .or_insert(CommandEntryHint { strategy });
+    }
+
+    emit_phase(on_event, "aka-core:enrichment:communities", 0, 0);
+    let communities = if native_communities {
+        Vec::new()
+    } else {
+        synthesize_communities(&process_nodes, &process_calls.edges)
+    };
+    emit_phase(on_event, "aka-core:enrichment:community-memberships", 0, 0);
+    let community_memberships = if native_communities {
+        native_community_memberships
+    } else {
+        community_memberships_from_synth(&communities)
+    };
+    emit_phase(on_event, "aka-core:enrichment:processes", 0, 0);
+    let processes = if native_processes {
+        Vec::new()
+    } else {
+        synthesize_processes_from_calls(
+            &process_nodes,
+            &process_calls.adjacency,
+            &process_calls.indegree,
+            &community_memberships,
+            &command_entry_hints,
+            symbol_count,
+        )
+    };
+    let repo_arc = Arc::new(repo.to_path_buf());
+    let nodes = Arc::new(std::mem::take(&mut nodes));
+    let processes = Arc::new(processes);
+    let stage_timeout = synth_stage_timeout();
+
+    let routes = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        let processes = Arc::clone(&processes);
+        let native_routes = native_routes.clone();
+        synthesize_with_timeout_and_progress(
+            on_event,
+            "aka-core:enrichment:routes",
+            stage_timeout,
+            Vec::new(),
+            move |progress| {
+                synthesize_routes_from_sources_with_progress(
+                    repo.as_path(),
+                    nodes.as_ref(),
+                    processes.as_slice(),
+                    &native_routes,
+                    progress,
+                )
+            },
+        )
+    };
+    let tools = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        let processes = Arc::clone(&processes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:tools",
+            stage_timeout,
+            Vec::new(),
+            move || {
+                synthesize_tools_from_sources(
+                    repo.as_path(),
+                    nodes.as_ref(),
+                    processes.as_slice(),
+                    &native_tools,
+                )
+            },
+        )
+    };
+    let commands = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        let processes = Arc::clone(&processes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:commands",
+            stage_timeout,
+            Vec::new(),
+            move || {
+                synthesize_commands_from_sources(
+                    repo.as_path(),
+                    nodes.as_ref(),
+                    processes.as_slice(),
+                )
+            },
+        )
+    };
+    let configs = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:configs",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_configs_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let jobs = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        let processes = Arc::clone(&processes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:jobs",
+            stage_timeout,
+            Vec::new(),
+            move || {
+                synthesize_jobs_from_sources(repo.as_path(), nodes.as_ref(), processes.as_slice())
+            },
+        )
+    };
+    let mut topics = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:topics",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_topics_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    merge_native_channel_topics(&mut topics, native_topics);
+    let caches = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:caches",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_caches_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let events = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:events",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_events_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let policies = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:policies",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_policies_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let resources = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:resources",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_resources_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let graphql = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        let processes = Arc::clone(&processes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:graphql",
+            stage_timeout,
+            Vec::new(),
+            move || {
+                synthesize_graphql_from_sources(
+                    repo.as_path(),
+                    nodes.as_ref(),
+                    processes.as_slice(),
+                )
+            },
+        )
+    };
+    let persistence = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:persistence",
+            stage_timeout,
+            SynthPersistenceGraph::default(),
+            move || synthesize_persistence_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let transactions = {
+        let repo = Arc::clone(&repo_arc);
+        let nodes = Arc::clone(&nodes);
+        run_synth_stage(
+            on_event,
+            "aka-core:enrichment:transactions",
+            stage_timeout,
+            Vec::new(),
+            move || synthesize_transactions_from_sources(repo.as_path(), nodes.as_ref()),
+        )
+    };
+    let processes = Arc::try_unwrap(processes).unwrap_or_else(|shared| (*shared).clone());
+    SynthGraph {
+        communities,
+        processes,
+        routes,
+        tools,
+        commands,
+        configs,
+        jobs,
+        topics,
+        caches,
+        events,
+        policies,
+        resources,
+        graphql,
+        persistence,
+        transactions,
+        properties,
+        source_symbols,
+        edges: synthetic_edges,
+    }
+}
+
+#[cfg(test)]
 fn synthesize_graph_with_progress(
     conn: &Connection,
     project: &str,
@@ -2720,6 +2607,7 @@ fn synthesize_graph(
     synthesize_graph_with_progress(conn, project, repo, &mut sink)
 }
 
+#[cfg(test)]
 fn has_native_label(conn: &Connection, project: &str, label: &str) -> Result<bool, EngineError> {
     let count: u64 = conn.query_row(
         "SELECT COUNT(*) FROM nodes WHERE project = ?1 AND label = ?2",
@@ -2736,6 +2624,7 @@ struct NativeAppNode {
     file_path: String,
 }
 
+#[cfg(test)]
 fn load_native_app_nodes(
     conn: &Connection,
     project: &str,
@@ -2767,6 +2656,7 @@ fn load_native_app_nodes(
     Ok(out)
 }
 
+#[cfg(test)]
 fn load_native_channel_topic_detections(
     conn: &Connection,
     project: &str,
@@ -2829,6 +2719,7 @@ fn load_native_channel_topic_detections(
     Ok(out)
 }
 
+#[cfg(test)]
 fn load_synth_nodes(
     conn: &Connection,
     project: &str,
@@ -2924,6 +2815,7 @@ fn load_synth_nodes(
     Ok(nodes)
 }
 
+#[cfg(test)]
 fn load_existing_node_ids(
     conn: &Connection,
     project: &str,
@@ -2939,6 +2831,7 @@ fn load_existing_node_ids(
     Ok(ids)
 }
 
+#[cfg(test)]
 fn count_process_symbol_basis(conn: &Connection, project: &str) -> Result<usize, EngineError> {
     let count: u64 = conn.query_row(
         "SELECT COUNT(*) FROM nodes WHERE project = ?1 AND label != 'File'",
@@ -2974,8 +2867,38 @@ impl CallGraph {
         }
         graph
     }
+
+    fn with_synthetic_edges(
+        mut self,
+        nodes: &BTreeMap<String, SynthNode>,
+        synthetic_edges: &[EdgeRec],
+    ) -> Self {
+        for edge in synthetic_edges
+            .iter()
+            .filter(|edge| edge.edge_type == "CALLS")
+        {
+            if !nodes.contains_key(&edge.source_id)
+                || !nodes.contains_key(&edge.target_id)
+                || edge.source_id == edge.target_id
+            {
+                continue;
+            }
+            let inserted = self
+                .adjacency
+                .entry(edge.source_id.clone())
+                .or_default()
+                .insert(edge.target_id.clone());
+            if inserted {
+                *self.indegree.entry(edge.target_id.clone()).or_default() += 1;
+                self.edges
+                    .push((edge.source_id.clone(), edge.target_id.clone()));
+            }
+        }
+        self
+    }
 }
 
+#[cfg(test)]
 fn load_call_graph(
     conn: &Connection,
     project: &str,
@@ -3050,6 +2973,7 @@ fn load_call_graph(
     Ok(graph)
 }
 
+#[cfg(test)]
 fn load_existing_call_pairs(
     conn: &Connection,
     project: &str,
@@ -3076,6 +3000,7 @@ fn load_existing_call_pairs(
     Ok(pairs)
 }
 
+#[cfg(test)]
 fn load_native_community_memberships(
     conn: &Connection,
     project: &str,
@@ -4941,68 +4866,6 @@ fn round3(value: f64) -> f64 {
     (value.clamp(0.0, 1.0) * 1000.0).round() / 1000.0
 }
 
-fn export_chunks(
-    conn: &Connection,
-    project: &str,
-    repo: &Path,
-    path: &Path,
-    total: u64,
-    on_event: &mut impl FnMut(&EngineEvent),
-) -> Result<u64, EngineError> {
-    let file = File::create(path)?;
-    let mut out = BufWriter::with_capacity(1 << 20, file);
-    let chunks = collect_chunks(conn, project, repo, total, on_event)?;
-    for chunk in &chunks {
-        serde_json::to_writer(&mut out, chunk)?;
-        out.write_all(b"\n")?;
-    }
-    Ok(chunks.len() as u64)
-}
-
-fn collect_chunks(
-    conn: &Connection,
-    project: &str,
-    repo: &Path,
-    total: u64,
-    on_event: &mut impl FnMut(&EngineEvent),
-) -> Result<Vec<ChunkRec>, EngineError> {
-    emit_phase(on_event, "aka-engine:facts:chunks:query", 0, total);
-    let mut stmt = conn.prepare(
-        "SELECT id, qualified_name, label, file_path, start_line, end_line \
-         FROM nodes \
-         WHERE project = ?1 AND file_path != '' AND label NOT IN ('File','Folder','Project','Package','Module') \
-         ORDER BY id",
-    )?;
-    let mut rows = stmt.query([project])?;
-    let mut count = 0;
-    let mut chunks = Vec::new();
-    let mut sources = SourceCache::new(repo);
-    let mut progress = ExportProgress::new("chunks", total);
-    while let Some(row) = rows.next()? {
-        let cbm_id: i64 = row.get(0)?;
-        let qn = text_col(row, 1)?;
-        let label = text_col(row, 2)?;
-        let file_path = text_col(row, 3)?;
-        let start_line: i64 = row.get(4)?;
-        let end_line: i64 = row.get(5)?;
-        let text = sources
-            .read_line_span(&file_path, start_line, end_line)
-            .unwrap_or_default();
-        chunks.push(ChunkRec {
-            node_id: aka_node_id(cbm_id, &qn),
-            kind: format!("ast-{}", label.to_ascii_lowercase()),
-            file_path,
-            start_line: to_artifact_line(start_line),
-            end_line: to_artifact_line(end_line),
-            text,
-        });
-        count += 1;
-        progress.emit(on_event, count);
-    }
-    progress.emit_force(on_event, count);
-    Ok(chunks)
-}
-
 struct SourceCache<'a> {
     repo: &'a Path,
     missing: BTreeSet<String>,
@@ -5016,41 +4879,6 @@ impl<'a> SourceCache<'a> {
             missing: BTreeSet::new(),
             files: BTreeMap::new(),
         }
-    }
-
-    fn read_line_span(
-        &mut self,
-        file_path: &str,
-        start_line: i64,
-        end_line: i64,
-    ) -> Option<String> {
-        if self.missing.contains(file_path) {
-            return None;
-        }
-        if !self.files.contains_key(file_path) {
-            let path = self.repo.join(file_path);
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    self.files.insert(
-                        file_path.to_string(),
-                        text.lines().map(str::to_string).collect(),
-                    );
-                }
-                Err(_) => {
-                    self.missing.insert(file_path.to_string());
-                    return None;
-                }
-            }
-        }
-        let lines = self.files.get(file_path)?;
-        let start = start_line.max(1) as usize;
-        let end = end_line.max(start_line).max(1) as usize;
-        let from = start.saturating_sub(1).min(lines.len());
-        let to = end.min(lines.len());
-        if from >= to {
-            return None;
-        }
-        Some(lines[from..to].join("\n"))
     }
 
     fn read_file(&mut self, file_path: &str) -> Option<String> {
@@ -5076,6 +4904,7 @@ impl<'a> SourceCache<'a> {
     }
 }
 
+#[cfg(test)]
 fn parse_props(text: &str) -> Map<String, Value> {
     match serde_json::from_str::<Value>(text) {
         Ok(Value::Object(map)) => map,
@@ -5083,6 +4912,7 @@ fn parse_props(text: &str) -> Map<String, Value> {
     }
 }
 
+#[cfg(test)]
 fn text_col(row: &Row<'_>, idx: usize) -> Result<String, rusqlite::Error> {
     match row.get_ref(idx)? {
         ValueRef::Null => Ok(String::new()),
@@ -5094,38 +4924,12 @@ fn text_col(row: &Row<'_>, idx: usize) -> Result<String, rusqlite::Error> {
     }
 }
 
+#[cfg(test)]
 fn props_value(text: &str) -> Value {
     serde_json::from_str::<Value>(text).unwrap_or(Value::Null)
 }
 
-fn insert_if_missing(props: &mut Map<String, Value>, key: &str, value: Value) {
-    props.entry(key.to_string()).or_insert(value);
-}
-
-fn sanitize_string_array_prop(props: &mut Map<String, Value>, key: &str) {
-    let Some(values) = props.get(key).and_then(Value::as_array) else {
-        return;
-    };
-    let mut out: Vec<Value> = values
-        .iter()
-        .filter_map(Value::as_str)
-        .map(|s| s.trim_matches(['"', '\'']).to_string())
-        .filter(|s| !s.is_empty() && s != "null" && s != "undefined")
-        .map(Value::String)
-        .collect();
-    out.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-    out.dedup();
-    props.insert(key.to_string(), Value::Array(out));
-}
-
-fn to_artifact_line(line_1based: i64) -> u32 {
-    if line_1based <= 0 {
-        0
-    } else {
-        (line_1based - 1) as u32
-    }
-}
-
+#[cfg(test)]
 fn aka_node_id(cbm_id: i64, qn: &str) -> String {
     let mut out = String::with_capacity(qn.len() + 24);
     out.push_str("cbm:");
@@ -5139,35 +4943,6 @@ fn aka_node_id(cbm_id: i64, qn: &str) -> String {
         }
     }
     out
-}
-
-fn git_head(repo: &Path) -> Option<String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo).arg("rev-parse").arg("HEAD");
-    hide_child_console(&mut cmd);
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!sha.is_empty()).then_some(sha)
-}
-
-fn wait_for_done_exit(
-    child: &mut std::process::Child,
-    grace: Duration,
-) -> Result<ExitStatus, std::io::Error> {
-    let deadline = Instant::now() + grace;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            return child.wait();
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 #[cfg(test)]

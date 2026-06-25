@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use crate::types::{EdgeRec, EngineEvent, NodeRec};
 
 use super::fact_producer::normalize_engine_facts;
-use super::{emit_phase, engine_cache_root, engine_mode, EngineError};
+use super::{emit_phase, engine_cache_root, engine_mode, enrich_direct_fact_batch, EngineError};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -148,7 +148,7 @@ impl EmbeddedEngineFactProducer {
         sink: &mut dyn FactSink<Error = FactSourceError>,
         on_event: &mut dyn FnMut(&EngineEvent),
     ) -> Result<super::ProducedEngineFacts, EngineError> {
-        let cache_root = engine_cache_root(repo, options.debug_artifact_dir, options.cache_dir);
+        let cache_root = engine_cache_root(repo, options.cache_dir);
         std::fs::create_dir_all(&cache_root)?;
 
         let engine_repo = crate::user_facing_path(repo);
@@ -173,6 +173,7 @@ impl EmbeddedEngineFactProducer {
         let mut batch = run_embedded_engine_on_large_stack(engine_repo.clone(), cache_root, mode)?;
 
         normalize_engine_facts(&mut batch, &engine_repo, options.no_chunks, on_event);
+        enrich_direct_fact_batch(&engine_repo, &mut batch, on_event)?;
         batch.replay_into(sink)?;
         Ok(super::ProducedEngineFacts::DirectFacts)
     }
@@ -189,7 +190,6 @@ pub(super) fn run_embedded_engine_smoke(
         repo,
         super::EngineFactOptions {
             cache_dir: Some(cache_dir),
-            debug_artifact_dir: None,
             no_chunks: false,
         },
         sink,

@@ -1,21 +1,15 @@
-//! Compatibility exports for the legacy artifact names.
-//!
-//! The stable indexing contract now lives in `aka-facts`. These aliases keep
-//! the existing graph/search/service crates compiling while the hot path moves
-//! from disk artifacts to direct fact sources.
+//! Shared core types for direct facts and engine progress.
 
 use serde::{Deserialize, Serialize};
 
-/// Legacy artifact directory contract. Direct facts use `aka_facts::FACTS_VERSION`.
-pub const CONTRACT_VERSION: u32 = 0;
+pub const CONTRACT_VERSION: u32 = aka_facts::FACTS_VERSION;
 
 pub type NodeRec = aka_facts::NodeFact;
 pub type EdgeRec = aka_facts::EdgeFact;
 pub type ChunkRec = aka_facts::ChunkFact;
-pub type ArtifactStats = aka_facts::FactStats;
-pub type Manifest = aka_facts::FactManifest;
+pub type FactStats = aka_facts::FactStats;
 
-/// engine stdout 的进度事件（NDJSON，每行一个）。
+/// Engine/runtime progress event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "lowercase")]
 pub enum EngineEvent {
@@ -35,6 +29,6 @@ pub enum EngineEvent {
     },
     Done {
         #[serde(default)]
-        stats: ArtifactStats,
+        stats: FactStats,
     },
 }

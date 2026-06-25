@@ -6,8 +6,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
-    Once,
+    Arc, Once,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,12 +22,6 @@ const AKA_HOME_DIR_NAME: &str = "aka-home";
 const APP_DATA_DIR_NAME: &str = "com.aka.desktop";
 const DESKTOP_MCP_ADDR: &str = "127.0.0.1:4112";
 const DESKTOP_LOG_FILE_NAME: &str = "aka-desktop.log";
-
-#[cfg(target_os = "windows")]
-const EMBEDDED_AKA_ENGINE: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/resources/engine/aka-engine.exe"
-));
 
 #[cfg(all(target_os = "windows", feature = "embedded-engine"))]
 const EMBEDDED_AKA_ENGINE_DLL: &[u8] = include_bytes!(concat!(
@@ -112,51 +105,7 @@ fn log_desktop_event(message: impl AsRef<str>) {
     let _ = writeln!(file, "[{ts}] {}", message.as_ref());
 }
 
-fn fallback_resource_dir() -> PathBuf {
-    let Ok(exe) = std::env::current_exe() else {
-        return std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
-    };
-    if let Some(contents) = exe.parent().and_then(|macos| macos.parent()) {
-        let resources = contents.join("Resources");
-        if resources.exists() {
-            return resources;
-        }
-    }
-    if let Some(parent) = exe.parent() {
-        let resources = parent.join("resources");
-        if resources.exists() {
-            return resources;
-        }
-        return parent.to_path_buf();
-    }
-    std::env::temp_dir()
-}
-
-fn bundled_engine_bin_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "aka-engine.exe"
-    } else {
-        "aka-engine"
-    }
-}
-
-fn has_native_engine(dir: &std::path::Path) -> bool {
-    let bin = bundled_engine_bin_name();
-    dir.join(bin).is_file()
-        || dir.join("bin").join(bin).is_file()
-        || dir.join("build/c").join(bin).is_file()
-}
-
-fn bundled_engine_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
-    [
-        resource_dir.join("engine"),
-        resource_dir.join("resources").join("engine"),
-    ]
-    .into_iter()
-    .find(|dir| has_native_engine(dir))
-}
-
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "embedded-engine"))]
 fn materialize_embedded_engine(app_data_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
     let engine_sha = std::str::from_utf8(EMBEDDED_AKA_ENGINE_SHA)
         .unwrap_or("unknown")
@@ -164,42 +113,28 @@ fn materialize_embedded_engine(app_data_dir: &std::path::Path) -> anyhow::Result
     let engine_dir = app_data_dir
         .join("bundled-engine")
         .join(format!("{}-{engine_sha}", env!("CARGO_PKG_VERSION")));
-    let engine_bin = materialize_embedded_resource(
-        &engine_dir,
-        "aka-engine.exe",
-        EMBEDDED_AKA_ENGINE,
-        "desktop embedded engine",
-    )?;
     materialize_embedded_resource(
         &engine_dir,
         "ENGINE_SHA",
         EMBEDDED_AKA_ENGINE_SHA,
         "desktop embedded engine sha",
     )?;
-
-    #[cfg(feature = "embedded-engine")]
-    {
-        let engine_dll = materialize_embedded_resource(
-            &engine_dir,
-            "aka_engine.dll",
-            EMBEDDED_AKA_ENGINE_DLL,
-            "desktop embedded engine dll",
-        )?;
-        std::env::set_var("AKA_ENGINE_DLL", &engine_dll);
-        std::env::set_var("AKA_ENGINE_LIB_DIR", &engine_dir);
-        if std::env::var_os("AKA_ENGINE_EMBEDDED").is_none() {
-            std::env::set_var("AKA_ENGINE_EMBEDDED", "1");
-        }
-        log_desktop_event(format!(
-            "desktop engine dll={} source=embedded-dll fallback_bin={}",
-            engine_dll.display(),
-            engine_bin.display()
-        ));
-    }
+    let engine_dll = materialize_embedded_resource(
+        &engine_dir,
+        "aka_engine.dll",
+        EMBEDDED_AKA_ENGINE_DLL,
+        "desktop embedded engine dll",
+    )?;
+    std::env::set_var("AKA_ENGINE_DLL", &engine_dll);
+    std::env::set_var("AKA_ENGINE_LIB_DIR", &engine_dir);
+    log_desktop_event(format!(
+        "desktop engine dll={} source=embedded-dll",
+        engine_dll.display()
+    ));
     Ok(engine_dir)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "embedded-engine"))]
 fn materialize_embedded_resource(
     engine_dir: &std::path::Path,
     file_name: &str,
@@ -318,91 +253,55 @@ pub fn configure_cli_runtime() -> anyhow::Result<()> {
     configure_cli_engine_runtime(&app_data_dir)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "embedded-engine"))]
 fn configure_backend(
-    app: &tauri::App,
+    _app: &tauri::App,
     app_data_dir: &std::path::Path,
 ) -> anyhow::Result<AkaBackend> {
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .unwrap_or_else(|_| fallback_resource_dir());
-    log_desktop_event(format!("desktop resource dir={}", resource_dir.display()));
-    let backend = match materialize_embedded_engine(app_data_dir) {
-        Ok(engine_dir) => {
-            log_desktop_event(format!(
-                "desktop engine dir={} source=embedded-resource",
-                engine_dir.display()
-            ));
-            std::env::set_var("AKA_ENGINE_DIR", &engine_dir);
-            AkaBackend::with_engine_dir(engine_dir)
-        }
-        Err(err) => {
-            if embedded_engine_required() {
-                return Err(anyhow::anyhow!(
-                    "AKA_ENGINE_EMBEDDED=require but desktop embedded engine materialization failed: {err:#}"
-                ));
-            }
-            log_desktop_event(format!("desktop embedded engine unavailable: {err:#}"));
-            if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
-                log_desktop_event(format!("desktop engine dir={}", engine_dir.display()));
-                AkaBackend::with_engine_dir(engine_dir)
-            } else {
-                log_desktop_event(format!(
-                    "desktop engine dir unavailable under {}; falling back to runtime discovery",
-                    resource_dir.display()
-                ));
-                AkaBackend::new()
-            }
-        }
-    };
+    let engine_dir = materialize_embedded_engine(app_data_dir).map_err(|err| {
+        anyhow::anyhow!("desktop embedded engine DLL materialization failed: {err:#}")
+    })?;
+    log_desktop_event(format!(
+        "desktop engine dir={} source=embedded-resource",
+        engine_dir.display()
+    ));
+    let backend = AkaBackend::new();
     Ok(backend
         .with_job_event_sink(|message| log_desktop_event(format!("backend job: {message}")))
         .with_workspace_auto_index())
 }
 
-#[cfg(target_os = "windows")]
-fn embedded_engine_required() -> bool {
-    std::env::var("AKA_ENGINE_EMBEDDED")
-        .map(|value| value.eq_ignore_ascii_case("require"))
-        .unwrap_or(false)
+#[cfg(all(target_os = "windows", not(feature = "embedded-engine")))]
+fn configure_backend(
+    _app: &tauri::App,
+    _app_data_dir: &std::path::Path,
+) -> anyhow::Result<AkaBackend> {
+    Err(anyhow::anyhow!(
+        "Windows desktop runtime requires the embedded-engine feature and aka_engine.dll resource"
+    ))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "embedded-engine"))]
 fn configure_cli_engine_runtime(app_data_dir: &std::path::Path) -> anyhow::Result<()> {
-    let should_materialize_embedded_dll =
-        cfg!(feature = "embedded-engine") && std::env::var_os("AKA_ENGINE_DLL").is_none();
-    let should_materialize_fallback =
-        std::env::var_os("AKA_ENGINE_DIR").is_none() && std::env::var_os("AKA_ENGINE_BIN").is_none();
-    if should_materialize_embedded_dll || should_materialize_fallback {
-        let engine_dir = materialize_embedded_engine(app_data_dir)?;
-        if should_materialize_fallback {
-            std::env::set_var("AKA_ENGINE_DIR", engine_dir);
-        }
+    if std::env::var_os("AKA_ENGINE_DLL").is_none() {
+        materialize_embedded_engine(app_data_dir)?;
     }
     Ok(())
 }
 
+#[cfg(all(target_os = "windows", not(feature = "embedded-engine")))]
+fn configure_cli_engine_runtime(_app_data_dir: &std::path::Path) -> anyhow::Result<()> {
+    Err(anyhow::anyhow!(
+        "Windows runtime requires the embedded-engine feature and aka_engine.dll resource"
+    ))
+}
+
 #[cfg(not(target_os = "windows"))]
 fn configure_backend(
-    app: &tauri::App,
+    _app: &tauri::App,
     _app_data_dir: &std::path::Path,
 ) -> anyhow::Result<AkaBackend> {
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .unwrap_or_else(|_| fallback_resource_dir());
-    log_desktop_event(format!("desktop resource dir={}", resource_dir.display()));
-    let backend = if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
-        log_desktop_event(format!("desktop engine dir={}", engine_dir.display()));
-        AkaBackend::with_engine_dir(engine_dir)
-    } else {
-        log_desktop_event(format!(
-            "desktop engine dir unavailable under {}; falling back to runtime discovery",
-            resource_dir.display()
-        ));
-        AkaBackend::new()
-    };
+    let backend = AkaBackend::new();
     Ok(backend
         .with_job_event_sink(|message| log_desktop_event(format!("backend job: {message}")))
         .with_workspace_auto_index())
@@ -410,14 +309,6 @@ fn configure_backend(
 
 #[cfg(not(target_os = "windows"))]
 fn configure_cli_engine_runtime(_app_data_dir: &std::path::Path) -> anyhow::Result<()> {
-    if std::env::var_os("AKA_ENGINE_DIR").is_none()
-        && std::env::var_os("AKA_ENGINE_BIN").is_none()
-    {
-        let resource_dir = fallback_resource_dir();
-        if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
-            std::env::set_var("AKA_ENGINE_DIR", engine_dir);
-        }
-    }
     Ok(())
 }
 
@@ -813,7 +704,9 @@ pub fn run() {
         .run(tauri::generate_context!());
 
     if let Err(e) = result {
-        log_desktop_event(format!("fatal: error while running tauri application: {e:#}"));
+        log_desktop_event(format!(
+            "fatal: error while running tauri application: {e:#}"
+        ));
         panic!("error while running tauri application: {e:#}");
     }
 }

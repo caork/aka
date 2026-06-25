@@ -15,8 +15,7 @@ use sha2::{Digest, Sha256};
 
 use aka_facts::{FactSource, FactSourceError};
 
-use crate::artifact::ArtifactDir;
-use crate::types::ArtifactStats;
+use crate::types::FactStats;
 use crate::types::CONTRACT_VERSION;
 
 const INDEX_STATE_VERSION: u32 = 1;
@@ -105,7 +104,7 @@ impl IndexDelta {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FileArtifactStats {
+pub struct FileFactStats {
     pub hash: String,
     pub size: u64,
     #[serde(default)]
@@ -125,11 +124,11 @@ pub struct ParseCacheManifest {
     pub engine_sha: Option<String>,
     pub no_chunks: bool,
     #[serde(default)]
-    pub totals: ArtifactStats,
+    pub totals: FactStats,
     #[serde(default)]
     pub last_delta: IndexDelta,
     #[serde(default)]
-    pub files: BTreeMap<String, FileArtifactStats>,
+    pub files: BTreeMap<String, FileFactStats>,
 }
 
 impl IndexState {
@@ -218,27 +217,18 @@ pub fn save_parse_cache_manifest(
     Ok(())
 }
 
-pub fn build_parse_cache_manifest(
-    artifact: &ArtifactDir,
-    current: &IndexState,
-    delta: IndexDelta,
-) -> Result<ParseCacheManifest, crate::artifact::ArtifactError> {
-    build_parse_cache_manifest_from_facts(artifact, current, delta)
-        .map_err(crate::artifact::ArtifactError::from)
-}
-
 pub fn build_parse_cache_manifest_from_facts(
     source: &impl FactSource,
     current: &IndexState,
     delta: IndexDelta,
 ) -> Result<ParseCacheManifest, FactSourceError> {
-    let mut files: BTreeMap<String, FileArtifactStats> = current
+    let mut files: BTreeMap<String, FileFactStats> = current
         .files
         .iter()
         .map(|(path, fp)| {
             (
                 path.clone(),
-                FileArtifactStats {
+                FileFactStats {
                     hash: fp.hash.clone(),
                     size: fp.size,
                     nodes: 0,
@@ -389,6 +379,7 @@ fn tmp_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ChunkRec, EdgeRec, FactBatch, NodeRec};
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir =
@@ -476,48 +467,92 @@ mod tests {
         std::fs::write(repo.join("b.ts"), "export function b() {}\n").unwrap();
         let state = IndexState::compute(&repo, Some("engine".into()), false).unwrap();
 
-        let artifact_dir = temp_dir("manifest-artifact");
-        std::fs::write(
-            artifact_dir.join("nodes.ndjson"),
-            concat!(
-                r#"{"id":"file:a","label":"File","properties":{"name":"a.ts","filePath":"a.ts"}}"#,
-                "\n",
-                r#"{"id":"fn:a","label":"Function","properties":{"name":"a","filePath":"a.ts","startLine":0,"endLine":0}}"#,
-                "\n",
-                r#"{"id":"fn:b","label":"Function","properties":{"name":"b","filePath":"b.ts","startLine":0,"endLine":0}}"#,
-                "\n",
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            artifact_dir.join("edges.ndjson"),
-            concat!(
-                r#"{"id":"e1","sourceId":"fn:a","targetId":"fn:b","type":"CALLS","confidence":0.9,"reason":"test"}"#,
-                "\n",
-                r#"{"id":"e2","sourceId":"fn:a","targetId":"missing","type":"CALLS","confidence":0.5,"reason":"dangling"}"#,
-                "\n",
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            artifact_dir.join("chunks.ndjson"),
-            concat!(
-                r#"{"nodeId":"fn:a","kind":"ast-function","filePath":"a.ts","startLine":0,"endLine":0,"text":"a"}"#,
-                "\n",
-                r#"{"nodeId":"fn:b","kind":"ast-function","filePath":"b.ts","startLine":0,"endLine":0,"text":"b"}"#,
-                "\n",
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            artifact_dir.join("manifest.json"),
-            r#"{"contractVersion":0,"engineVersion":"test","repoPath":"/r","generatedAt":"2026-06-10T00:00:00Z","stats":{"files":2,"nodes":3,"edges":2,"chunks":2}}"#,
-        )
-        .unwrap();
-
-        let artifact = ArtifactDir::open(&artifact_dir).unwrap();
+        let facts = FactBatch::new(
+            FactStats {
+                files: 2,
+                nodes: 3,
+                edges: 2,
+                chunks: 2,
+            },
+            vec![
+                NodeRec {
+                    id: "file:a".into(),
+                    label: "File".into(),
+                    properties: serde_json::json!({"name":"a.ts","filePath":"a.ts"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                },
+                NodeRec {
+                    id: "fn:a".into(),
+                    label: "Function".into(),
+                    properties: serde_json::json!({
+                        "name": "a",
+                        "filePath": "a.ts",
+                        "startLine": 0,
+                        "endLine": 0
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                },
+                NodeRec {
+                    id: "fn:b".into(),
+                    label: "Function".into(),
+                    properties: serde_json::json!({
+                        "name": "b",
+                        "filePath": "b.ts",
+                        "startLine": 0,
+                        "endLine": 0
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                },
+            ],
+            vec![
+                EdgeRec {
+                    id: "e1".into(),
+                    source_id: "fn:a".into(),
+                    target_id: "fn:b".into(),
+                    edge_type: "CALLS".into(),
+                    confidence: 0.9,
+                    reason: "test".into(),
+                    step: None,
+                    evidence: None,
+                },
+                EdgeRec {
+                    id: "e2".into(),
+                    source_id: "fn:a".into(),
+                    target_id: "missing".into(),
+                    edge_type: "CALLS".into(),
+                    confidence: 0.5,
+                    reason: "dangling".into(),
+                    step: None,
+                    evidence: None,
+                },
+            ],
+            vec![
+                ChunkRec {
+                    node_id: "fn:a".into(),
+                    kind: "ast-function".into(),
+                    file_path: "a.ts".into(),
+                    start_line: 0,
+                    end_line: 0,
+                    text: "a".into(),
+                },
+                ChunkRec {
+                    node_id: "fn:b".into(),
+                    kind: "ast-function".into(),
+                    file_path: "b.ts".into(),
+                    start_line: 0,
+                    end_line: 0,
+                    text: "b".into(),
+                },
+            ],
+        );
         let manifest =
-            build_parse_cache_manifest(&artifact, &state, state.delta_from(None)).unwrap();
+            build_parse_cache_manifest_from_facts(&facts, &state, state.delta_from(None)).unwrap();
 
         assert_eq!(manifest.engine_sha.as_deref(), Some("engine"));
         assert_eq!(manifest.last_delta.summary(), "+2 ~0 -0 =0");
@@ -529,7 +564,7 @@ mod tests {
         assert_eq!(manifest.files["b.ts"].edges, 1);
         assert_eq!(manifest.files["b.ts"].chunks, 1);
 
-        let path = artifact_dir.join("parse-cache-manifest.json");
+        let path = repo.join("parse-cache-manifest.json");
         save_parse_cache_manifest(&path, &manifest).unwrap();
         assert_eq!(load_parse_cache_manifest(&path).unwrap(), Some(manifest));
     }

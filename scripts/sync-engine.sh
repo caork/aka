@@ -20,10 +20,6 @@ UPSTREAM_URL="${AKA_ENGINE_UPSTREAM_URL:-https://github.com/DeusData/codebase-me
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DST="${ROOT}/engine"
 CHECKOUT="${AKA_ENGINE_SRC:-${DST}/aka-engine-src}"
-BIN_NAME="aka-engine"
-if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
-  BIN_NAME="aka-engine.exe"
-fi
 
 mkdir -p "${DST}"
 
@@ -66,19 +62,22 @@ if [[ -z "${SHA}" ]]; then
   SHA="$(git -C "${CHECKOUT}" rev-parse HEAD)"
 fi
 
-make -C "${CHECKOUT}" -f Makefile.cbm cbm
+make -C "${CHECKOUT}" -f Makefile.cbm libaka-engine
 if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
   make -C "${CHECKOUT}" -f Makefile.cbm aka-engine-dll
 fi
 
-BUILT="${CHECKOUT}/build/c/${BIN_NAME}"
-if [[ ! -x "${BUILT}" ]]; then
-  echo "error: build did not produce ${BUILT}" >&2
+LIB_BUILT="${CHECKOUT}/build/c/libaka_engine.a"
+if [[ ! -f "${LIB_BUILT}" ]]; then
+  echo "error: build did not produce ${LIB_BUILT}" >&2
   exit 1
 fi
 
-cp "${BUILT}" "${DST}/${BIN_NAME}"
-chmod +x "${DST}/${BIN_NAME}"
+rm -f \
+  "${DST}/aka-engine" \
+  "${DST}/aka-engine.exe" \
+  "${DST}/codebase-memory-mcp" \
+  "${DST}/codebase-memory-mcp.exe"
 if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
   DLL_BUILT="${CHECKOUT}/build/c/aka_engine.dll"
   if [[ ! -f "${DLL_BUILT}" ]]; then
@@ -90,7 +89,7 @@ fi
 printf '%s\n' "${SHA}" > "${DST}/ENGINE_SHA"
 
 echo "engine checkout: ${CHECKOUT}"
-echo "engine binary: ${DST}/${BIN_NAME}"
+echo "engine embedded lib: ${LIB_BUILT}"
 if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
   echo "engine dll: ${DST}/aka_engine.dll"
 fi

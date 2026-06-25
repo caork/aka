@@ -92,23 +92,6 @@ platform_from_triple() {
   esac
 }
 
-host_resource_platform() {
-  case "$(uname -s):$(uname -m)" in
-    Darwin:arm64|Darwin:aarch64) echo "darwin-arm64" ;;
-    Darwin:x86_64) echo "darwin-x64" ;;
-    MINGW*:x86_64|MSYS*:x86_64|CYGWIN*:x86_64) echo "win-x64" ;;
-    *) echo "unknown" ;;
-  esac
-}
-
-engine_exe_for_platform() {
-  case "$1" in
-    darwin-arm64|darwin-x64) echo "aka-engine" ;;
-    win-x64) echo "aka-engine.exe" ;;
-    *) echo "error: 不支持的 AKA engine 平台 $1" >&2; return 1 ;;
-  esac
-}
-
 engine_dll_for_platform() {
   case "$1" in
     win-x64) echo "aka_engine.dll" ;;
@@ -116,10 +99,10 @@ engine_dll_for_platform() {
   esac
 }
 
-legacy_engine_exe_for_platform() {
+legacy_engine_resource_names() {
   case "$1" in
-    darwin-arm64|darwin-x64) echo "codebase-memory-mcp" ;;
-    win-x64) echo "codebase-memory-mcp.exe" ;;
+    darwin-arm64|darwin-x64) printf '%s\n' "aka-engine" "codebase-memory-mcp" ;;
+    win-x64) printf '%s\n' "aka-engine.exe" "codebase-memory-mcp.exe" ;;
     *) echo "error: 不支持的 AKA engine 平台 $1" >&2; return 1 ;;
   esac
 }
@@ -234,25 +217,6 @@ create_zip_archive() {
   return 1
 }
 
-find_engine_binary() {
-  local platform exe legacy_exe platform_env
-  platform="$1"
-  exe="$(engine_exe_for_platform "${platform}")"
-  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
-  platform_env="AKA_ENGINE_BIN_$(env_var_for_platform "${platform}")"
-
-  first_existing_file \
-    "${!platform_env:-}" \
-    "${AKA_ENGINE_BIN:-}" \
-    "${REPO_ROOT}/engine/${exe}" \
-    "${REPO_ROOT}/engine/${legacy_exe}" \
-    "${REPO_ROOT}/engine/aka-engine-src/build/c/${exe}" \
-    "${REPO_ROOT}/engine/aka-engine-src/build/c/${legacy_exe}" \
-    "/tmp/aka-engine-src/build/c/${exe}" \
-    "/tmp/aka-engine-src/build/c/${legacy_exe}" \
-    "$(command -v "${exe}" 2>/dev/null || true)"
-}
-
 find_engine_source_dir() {
   first_existing_dir \
     "${AKA_ENGINE_SRC:-}" \
@@ -260,30 +224,21 @@ find_engine_source_dir() {
     "/tmp/aka-engine-src"
 }
 
-copy_engine_resource() {
-  local platform exe bin dll dll_bin dst host_platform
+copy_engine_resource_metadata() {
+  local platform dll dll_bin dst
   platform="$1"
-  exe="$(engine_exe_for_platform "${platform}")"
   dst="${TAURI_RESOURCES_DIR}/engine"
 
-  bin="$(find_engine_binary "${platform}" || true)"
-  host_platform="$(host_resource_platform)"
-  if [[ -z "${bin}" && "${platform}" = "${host_platform}" ]]; then
-    echo "==> 本地未找到 AKA engine，运行 scripts/sync-engine.sh 构建 (${platform})"
-    "${REPO_ROOT}/scripts/sync-engine.sh"
-    bin="$(find_engine_binary "${platform}" || true)"
+  if [[ -d "${dst}" ]]; then
+    assert_no_legacy_engine_resource_binaries "${platform}" "${dst}"
   fi
-
-  if [[ -z "${bin}" ]]; then
-    echo "error: 找不到 ${platform} 的 AKA engine 二进制。" >&2
-    echo "       请先运行 scripts/sync-engine.sh，或设置 AKA_ENGINE_BIN / AKA_ENGINE_BIN_$(env_var_for_platform "${platform}")。" >&2
-    return 1
-  fi
-
   rm -rf "${dst}"
   mkdir -p "${dst}"
-  cp "${bin}" "${dst}/${exe}"
-  chmod +x "${dst}/${exe}" 2>/dev/null || true
+  if [[ ! -f "${REPO_ROOT}/engine/ENGINE_SHA" ]]; then
+    echo "error: 缺少 engine/ENGINE_SHA，无法锚定内置 engine 版本。" >&2
+    return 1
+  fi
+  cp "${REPO_ROOT}/engine/ENGINE_SHA" "${dst}/ENGINE_SHA"
   if [[ "${platform}" = "win-x64" ]]; then
     dll="$(engine_dll_for_platform "${platform}")"
     dll_bin="$(find_engine_dll "${platform}" || true)"
@@ -295,10 +250,7 @@ copy_engine_resource() {
     cp "${dll_bin}" "${dst}/${dll}"
     echo "==> 内置 AKA engine DLL: ${dll_bin} -> ${dst}/${dll}"
   fi
-  if [[ -f "${REPO_ROOT}/engine/ENGINE_SHA" ]]; then
-    cp "${REPO_ROOT}/engine/ENGINE_SHA" "${dst}/ENGINE_SHA"
-  fi
-  echo "==> 内置 AKA engine: ${bin} -> ${dst}/${exe}"
+  echo "==> 内置 AKA engine metadata: ${REPO_ROOT}/engine/ENGINE_SHA -> ${dst}/ENGINE_SHA"
   assert_engine_resource_dir "${platform}" "${dst}"
 }
 
@@ -372,98 +324,90 @@ assert_windows_exe_embeds_engine() {
   if (( exe_size < min_size )); then
     echo "error: Windows AKA.exe 未包含内置 AKA engine。" >&2
     echo "       exe_size=${exe_size} embedded_engine_size=${embedded_size} expected_at_least=${min_size}" >&2
-    echo "       portable 用户形态是单文件 AKA.exe，不能依赖外置 engine\\aka-engine.exe 或 aka_engine.dll。" >&2
+    echo "       portable 用户形态是单文件 AKA.exe，不能依赖外置 engine\\aka-engine.exe；DLL 只允许由 AKA.exe 自己解包到内部数据目录。" >&2
     return 1
   fi
   echo "==> 校验 Windows AKA.exe 已内置 engine 资源: exe=${exe_size} embedded_engine=${embedded_size}"
 }
 
-find_engine_resource_bin() {
-  local platform dir exe
+assert_no_legacy_engine_resource_binaries() {
+  local platform dir legacy_name legacy_path
   platform="$1"
   dir="$2"
-  exe="$(engine_exe_for_platform "${platform}")"
-  first_existing_file \
-    "${dir}/${exe}" \
-    "${dir}/bin/${exe}" \
-    "${dir}/build/c/${exe}"
+  while IFS= read -r legacy_name; do
+    legacy_path="$(find "${dir}" -type f -name "${legacy_name}" -print -quit)"
+    if [[ -n "${legacy_path}" ]]; then
+      echo "error: 桌面 engine 资源含遗留二进制: ${legacy_path}" >&2
+      echo "       embedded/direct-facts 是唯一运行路径，不再打包 aka-engine/aka-engine.exe fallback。" >&2
+      return 1
+    fi
+  done < <(legacy_engine_resource_names "${platform}")
 }
 
 assert_engine_resource_dir() {
-  local platform dir engine_bin legacy_exe dll
+  local platform dir dll
   platform="$1"
   dir="$2"
-  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
-  if [[ -f "${dir}/${legacy_exe}" || -f "${dir}/bin/${legacy_exe}" || -f "${dir}/build/c/${legacy_exe}" ]]; then
-    echo "error: 桌面 engine 资源含旧名二进制: ${dir}/${legacy_exe}" >&2
-    echo "       请统一复制为 $(engine_exe_for_platform "${platform}")。" >&2
-    return 1
-  fi
-  engine_bin="$(find_engine_resource_bin "${platform}" "${dir}" || true)"
-  if [[ -z "${engine_bin}" ]]; then
-    echo "error: 桌面 engine 资源缺少 native AKA engine 二进制: ${dir}" >&2
-    echo "       需要 $(engine_exe_for_platform "${platform}")，不要打入旧的 JS/node engine 目录。" >&2
-    return 1
-  fi
-  if [[ "${platform}" != "win-x64" && ! -x "${engine_bin}" ]]; then
-    echo "error: 桌面 engine 资源不可执行: ${engine_bin}" >&2
-    return 1
-  fi
-  assert_engine_file_nonempty "${engine_bin}"
+  [[ -d "${dir}" ]] || { echo "error: 桌面 engine 资源目录不存在: ${dir}" >&2; return 1; }
+  assert_no_legacy_engine_resource_binaries "${platform}" "${dir}"
+  assert_engine_file_nonempty "${dir}/ENGINE_SHA"
   if [[ "${platform}" = "win-x64" ]]; then
     dll="$(engine_dll_for_platform "${platform}")"
     assert_engine_file_nonempty "${dir}/${dll}"
     echo "==> 校验桌面 engine DLL 资源: ${dir}/${dll}"
   fi
-  echo "==> 校验桌面 engine 资源: ${engine_bin}"
+  echo "==> 校验桌面 engine metadata: ${dir}/ENGINE_SHA"
 }
 
-assert_app_bundle_engine() {
-  local app_path platform resources dir engine_bin
+assert_app_bundle_engine_resources() {
+  local app_path platform resources dir
   app_path="$1"
   platform="$2"
   resources="${app_path}/Contents/Resources"
   [[ -d "${resources}" ]] || { echo "error: app 缺少 Resources 目录: ${resources}" >&2; return 1; }
   for dir in "${resources}/engine" "${resources}/resources/engine"; do
-    engine_bin="$(find_engine_resource_bin "${platform}" "${dir}" || true)"
-    if [[ -n "${engine_bin}" ]]; then
-      if [[ "${platform}" != "win-x64" && ! -x "${engine_bin}" ]]; then
-        echo "error: app 包内 engine 不可执行: ${engine_bin}" >&2
-        return 1
-      fi
-      echo "==> 校验 app 包内 engine: ${engine_bin}"
+    if [[ -f "${dir}/ENGINE_SHA" ]]; then
+      assert_engine_resource_dir "${platform}" "${dir}"
+      echo "==> 校验 app 包内 engine metadata: ${dir}/ENGINE_SHA"
       return 0
     fi
   done
-  echo "error: app 包内缺少 native AKA engine: ${resources}/{engine,resources/engine}" >&2
+  echo "error: app 包内缺少 engine metadata: ${resources}/{engine,resources/engine}/ENGINE_SHA" >&2
   return 1
 }
 
-assert_zip_has_engine() {
-  local zip_path platform prefix exe legacy_exe listing base entry legacy_entry
+assert_zip_engine_resources() {
+  local zip_path platform prefix listing base entry legacy_name legacy_entry dll
   zip_path="$1"
   platform="$2"
   prefix="$3"
-  exe="$(engine_exe_for_platform "${platform}")"
-  legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
   [[ -f "${zip_path}" ]] || { echo "error: 找不到 zip: ${zip_path}" >&2; return 1; }
   listing="$(unzip -Z1 "${zip_path}")"
   for base in "engine" "resources/engine" "engine/bin" "resources/engine/bin" "engine/build/c" "resources/engine/build/c"; do
-    legacy_entry="${prefix:+${prefix}/}${base}/${legacy_exe}"
-    if grep -qxF "${legacy_entry}" <<< "${listing}"; then
-      echo "error: zip 包内含旧名 engine 二进制: ${legacy_entry}" >&2
-      echo "       Windows/macOS 包必须统一携带 $(engine_exe_for_platform "${platform}")。" >&2
-      return 1
-    fi
+    while IFS= read -r legacy_name; do
+      legacy_entry="${prefix:+${prefix}/}${base}/${legacy_name}"
+      if grep -qxF "${legacy_entry}" <<< "${listing}"; then
+        echo "error: zip 包内含遗留 engine 二进制: ${legacy_entry}" >&2
+        echo "       embedded/direct-facts 是唯一运行路径，不再打包 aka-engine/aka-engine.exe fallback。" >&2
+        return 1
+      fi
+    done < <(legacy_engine_resource_names "${platform}")
   done
-  for base in "engine" "resources/engine" "engine/bin" "resources/engine/bin" "engine/build/c" "resources/engine/build/c"; do
-    entry="${prefix:+${prefix}/}${base}/${exe}"
+  for base in "engine" "resources/engine"; do
+    entry="${prefix:+${prefix}/}${base}/ENGINE_SHA"
     if grep -qxF "${entry}" <<< "${listing}"; then
-      echo "==> 校验 zip 包内 engine: ${entry}"
+      if [[ "${platform}" = "win-x64" ]]; then
+        dll="$(engine_dll_for_platform "${platform}")"
+        if ! grep -qxF "${prefix:+${prefix}/}${base}/${dll}" <<< "${listing}"; then
+          echo "error: zip 包内缺少 Windows engine DLL 资源: ${prefix:+${prefix}/}${base}/${dll}" >&2
+          return 1
+        fi
+      fi
+      echo "==> 校验 zip 包内 engine metadata: ${entry}"
       return 0
     fi
   done
-  echo "error: zip 包内缺少 native AKA engine: ${zip_path}" >&2
+  echo "error: zip 包内缺少 engine metadata: ${zip_path}" >&2
   return 1
 }
 
@@ -472,13 +416,12 @@ prepare_desktop_resources() {
   triple="$1"
   platform="$(platform_from_triple "${triple}")"
   echo "==> 准备桌面内置资源 (${platform})"
-  if [[ "${platform}" = "win-x64" && -z "$(find_engine_dll "${platform}" || true)" ]]; then
-    prepare_windows_embedded_engine_dll
-  fi
-  copy_engine_resource "${platform}"
   if [[ "${platform}" != "win-x64" ]]; then
     prepare_embedded_engine_lib
+  elif [[ -z "$(find_engine_dll "${platform}" || true)" ]]; then
+    prepare_windows_embedded_engine_dll
   fi
+  copy_engine_resource_metadata "${platform}"
 }
 
 macos_notarization_credentials_present() {
@@ -786,7 +729,7 @@ package_desktop() {
 
       app_path="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/macos/AKA.app"
       [[ -d "${app_path}" ]] || { echo "error: 找不到 ${app_path}（先去掉 --skip-build 构建一次）" >&2; return 1; }
-      assert_app_bundle_engine "${app_path}" "${desktop_platform}"
+      assert_app_bundle_engine_resources "${app_path}" "${desktop_platform}"
       if [[ "${signed_release}" -eq 0 ]]; then
         codesign_ad_hoc_app "${app_path}"
       fi
@@ -806,7 +749,7 @@ package_desktop() {
       desktop_zip="${DIST_DIR}/aka-desktop-${VERSION}-${desktop_triple}.app.zip"
       rm -f "${desktop_zip}"
       COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "${app_path}" "${desktop_zip}"
-      assert_zip_has_engine "${desktop_zip}" "${desktop_platform}" "AKA.app/Contents/Resources"
+      assert_zip_engine_resources "${desktop_zip}" "${desktop_platform}" "AKA.app/Contents/Resources"
       echo "==> ${desktop_zip}"
 
       tauri_macos_bundle_dir="${REPO_ROOT}/apps/desktop/src-tauri/target/release/bundle/macos"
@@ -876,7 +819,7 @@ package_windows_desktop() {
   [[ -f "${exe_path}" ]] || { echo "error: 找不到 Windows GUI exe（先去掉 --skip-build 构建一次）" >&2; return 1; }
   assert_windows_exe_embeds_engine \
     "${exe_path}" \
-    "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe" \
+    "${TAURI_RESOURCES_DIR}/engine/ENGINE_SHA" \
     "${TAURI_RESOURCES_DIR}/engine/aka_engine.dll"
 
   setup_src="$(find "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/bundle/nsis" -maxdepth 1 -type f -name "*${VERSION}*setup.exe" | sort | tail -n 1 || true)"

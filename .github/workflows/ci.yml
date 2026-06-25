@@ -96,11 +96,8 @@ jobs:
           ENGINE_REF="$(cat engine/ENGINE_SHA)"
           git clone https://github.com/caork/aka-engine.git engine/aka-engine-src
           git -C engine/aka-engine-src checkout "$ENGINE_REF"
-          make -C engine/aka-engine-src -f Makefile.cbm cbm
           make -C engine/aka-engine-src -f Makefile.cbm aka-engine-dll
-          ENGINE_BIN="${PWD}/engine/aka-engine-src/build/c/aka-engine.exe"
           ENGINE_DLL="${PWD}/engine/aka-engine-src/build/c/aka_engine.dll"
-          test -x "${ENGINE_BIN}"
           test -f "${ENGINE_DLL}"
           echo "dll=$(cygpath -m "${ENGINE_DLL}")" >> "$GITHUB_OUTPUT"
 
@@ -108,7 +105,6 @@ jobs:
         shell: bash
         env:
           AKA_ENGINE_DLL: ${{ steps.engine.outputs.dll }}
-          AKA_ENGINE_EMBEDDED: require
         run: |
           cargo test -p aka-core --features embedded-engine
           cargo test -p aka-core --features embedded-engine \

@@ -4,8 +4,7 @@
 //! ~/.aka/
 //!   registry.json            # 仓库注册表
 //!   repos/<slug>-<hash8>/    # 每仓库数据
-//!     artifact/              # legacy debug/compat facts export
-//!     engine-cache/           # AKA engine SQLite/cache 工作目录
+//!     engine-cache/           # embedded AKA engine cache 工作目录
 //!     index-state.json        # 文件哈希/engine/合同版本快照，用于安全复用索引
 //!     parse-cache/            # 内容寻址 parse/fact ownership cache
 //!     graph.db               # aka-graph SQLite
@@ -104,10 +103,6 @@ impl RepoPaths {
         Self {
             root: aka_home().join("repos").join(repo_dir_name(repo_path)),
         }
-    }
-
-    pub fn artifact_dir(&self) -> PathBuf {
-        self.root.join("artifact")
     }
 
     pub fn engine_cache_dir(&self) -> PathBuf {

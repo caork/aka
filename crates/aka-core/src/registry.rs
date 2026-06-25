@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::paths::aka_home;
-use crate::types::ArtifactStats;
+use crate::types::FactStats;
 
 /// 渲染节点数的架构硬上限 — WebGL 渲染器实测 50 万节点 60fps，这是设计红线。
 /// 所有入口（HTTP lod 参数、per-repo 设置写入）都必须 clamp 到这个上限。
@@ -37,7 +37,7 @@ pub struct RepoEntry {
     #[serde(default)]
     pub engine_sha: Option<String>,
     #[serde(default)]
-    pub stats: ArtifactStats,
+    pub stats: FactStats,
     /// 语义检索开关（默认关——用户拍板：embedding 须手动开启）。
     #[serde(default)]
     pub embeddings_enabled: bool,
@@ -184,7 +184,7 @@ mod tests {
             data_dir: "/tmp/data".into(),
             indexed_at: Some(now_unix()),
             engine_sha: None,
-            stats: ArtifactStats::default(),
+            stats: FactStats::default(),
             embeddings_enabled: false,
             source_kind: "git".into(),
             source_url: Some("https://example.com/fixture.git".into()),
@@ -204,7 +204,7 @@ mod tests {
             data_dir: "/tmp/data".into(),
             indexed_at: None,
             engine_sha: None,
-            stats: ArtifactStats::default(),
+            stats: FactStats::default(),
             embeddings_enabled: false,
             source_kind: "local".into(),
             source_url: None,

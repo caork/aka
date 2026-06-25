@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use crate::{run_analyze, run_index, AkaBackend};
+use crate::{run_analyze, AkaBackend};
 use aka_core::{Registry, RepoPaths};
 use aka_mcp::Backend;
 
@@ -31,8 +31,6 @@ enum Cmd {
         #[arg(long)]
         no_chunks: bool,
     },
-    /// Rebuild indexes from legacy artifacts without rerunning the engine.
-    Index { path: PathBuf },
     /// List registered repositories.
     Repos,
     /// Full-text search.
@@ -102,7 +100,6 @@ where
             eprintln!("{summary}");
             Ok(())
         }
-        Cmd::Index { path } => run_index(path),
         Cmd::Repos => run_repos(),
         Cmd::Search { query, repo, limit } => run_search(query, repo, limit),
         Cmd::SearchCode {

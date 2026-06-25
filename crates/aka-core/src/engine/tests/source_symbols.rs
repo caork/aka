@@ -71,11 +71,15 @@ class OrderService {
 
     let conn = test_conn();
     let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
-    let out = repo.join("nodes.ndjson");
-    let exported = export_nodes(&conn, "demo", &out, &synth, 0, &mut |_| {}).unwrap();
-    let text = std::fs::read_to_string(out).unwrap();
+    let nodes = synth.node_recs();
+    let text = nodes
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
 
-    assert!(exported >= 2);
+    assert!(nodes.len() >= 2);
     assert!(text.contains("\"source\":\"aka-source-scan\""));
     assert!(text.contains("com.example.orders.OrderService"));
     assert!(text.contains("hydrateOrders"));
@@ -457,11 +461,15 @@ fn exports_python_source_symbol_nodes_for_search_indexing() {
 
     let conn = test_conn();
     let synth = synthesize_graph_quiet(&conn, &repo).unwrap();
-    let out = repo.join("nodes.ndjson");
-    let exported = export_nodes(&conn, "demo", &out, &synth, 0, &mut |_| {}).unwrap();
-    let text = std::fs::read_to_string(out).unwrap();
+    let nodes = synth.node_recs();
+    let text = nodes
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
 
-    assert!(exported >= 2);
+    assert!(nodes.len() >= 2);
     assert!(text.contains("\"strategy\":\"python-source-symbol-fallback\""));
     assert!(text.contains("orders.service.OrderService"));
     assert!(text.contains("hydrate_orders"));

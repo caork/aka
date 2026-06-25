@@ -1,10 +1,15 @@
+#[cfg(test)]
 use std::collections::HashSet;
+#[cfg(test)]
 use std::path::Path;
 
+#[cfg(test)]
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 
-use super::{aka_node_id, stable_hash, text_col, EdgeRec, EngineError, NodeRec, SourceCache};
+#[cfg(test)]
+use super::{aka_node_id, text_col, EngineError, SourceCache};
+use super::{stable_hash, EdgeRec, NodeRec};
 
 #[derive(Debug, Clone)]
 pub(super) struct SynthProperty {
@@ -60,6 +65,7 @@ impl SynthProperty {
     }
 }
 
+#[cfg(test)]
 pub(super) fn synthesize_python_properties(
     conn: &Connection,
     project: &str,

@@ -1,8 +1,8 @@
 //! Producer interfaces for in-process semantic facts.
 //!
 //! Native parsers, SCIP importers, stack-graphs adapters, and live LSP
-//! fallbacks all feed the same sink. This keeps transports such as JSONL
-//! sidecars as optional debug output instead of part of the indexing contract.
+//! fallbacks all feed the same sink, so indexing depends on facts instead of a
+//! filesystem transport.
 
 use std::path::Path;
 

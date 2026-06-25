@@ -2,10 +2,10 @@
 # aka — 感知所有代码的知识引擎。
 #
 # 多阶段：
-#   engine-builder — 构建 AKA engine 原生二进制 + embedded 静态库
+#   engine-builder — 构建 AKA engine embedded 静态库
 #   rust-builder   — cargo release 构建内置 embedded-engine 的内部 runtime
-#   rust-cross     — （可选，--target rust-cross 单独构建）交叉编译 x86_64 linux runtime（binary fallback）
-#   runtime        — git + aka + native engine fallback；非 root，数据卷 /data
+#   rust-cross     — （可选，--target rust-cross 单独构建）交叉编译 x86_64 linux runtime
+#   runtime        — git + aka；非 root，数据卷 /data
 #
 # 构建 / 运行：
 #   docker build -t aka:0.1.0 .
@@ -23,7 +23,7 @@ WORKDIR /src
 RUN git clone "${AKA_ENGINE_REPO}" aka-engine && \
     cd aka-engine && \
     git checkout "${AKA_ENGINE_REF}" && \
-    make -f Makefile.cbm cbm libaka-engine
+    make -f Makefile.cbm libaka-engine
 
 # ---------- Stage 2: Rust builder ----------
 FROM rust:1.93-bookworm AS rust-builder
@@ -48,7 +48,7 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
     CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc \
     CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++ \
     AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
-RUN cargo build --release -p aka-cli --target x86_64-unknown-linux-gnu && \
+RUN cargo build --release -p aka-cli --features embedded-engine --target x86_64-unknown-linux-gnu && \
     x86_64-linux-gnu-strip target/x86_64-unknown-linux-gnu/release/aka
 
 # ---------- Stage 3: runtime ----------
@@ -65,7 +65,6 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-builder /src/target/release/aka /usr/local/bin/aka
-COPY --from=engine-builder /src/aka-engine/build/c/aka-engine /opt/aka/engine/aka-engine
 # 冒烟样本：docker exec <ctr> aka analyze /opt/aka/fixtures-demo
 COPY fixtures/demo-ts /opt/aka/fixtures-demo
 
@@ -73,8 +72,7 @@ RUN useradd --create-home --uid 10001 aka && \
     mkdir -p /data && \
     chown -R aka:aka /data /opt/aka
 
-ENV AKA_HOME=/data \
-    AKA_ENGINE_DIR=/opt/aka/engine
+ENV AKA_HOME=/data
 
 USER aka
 VOLUME /data
