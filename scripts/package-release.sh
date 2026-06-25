@@ -109,12 +109,34 @@ engine_exe_for_platform() {
   esac
 }
 
+engine_dll_for_platform() {
+  case "$1" in
+    win-x64) echo "aka_engine.dll" ;;
+    *) return 1 ;;
+  esac
+}
+
 legacy_engine_exe_for_platform() {
   case "$1" in
     darwin-arm64|darwin-x64) echo "codebase-memory-mcp" ;;
     win-x64) echo "codebase-memory-mcp.exe" ;;
     *) echo "error: 不支持的 AKA engine 平台 $1" >&2; return 1 ;;
   esac
+}
+
+find_engine_dll() {
+  local platform dll platform_env
+  platform="$1"
+  dll="$(engine_dll_for_platform "${platform}")"
+  platform_env="AKA_ENGINE_DLL_$(env_var_for_platform "${platform}")"
+
+  first_existing_file \
+    "${!platform_env:-}" \
+    "${AKA_ENGINE_DLL:-}" \
+    "${AKA_ENGINE_LIB_DIR:+${AKA_ENGINE_LIB_DIR}/${dll}}" \
+    "${REPO_ROOT}/engine/${dll}" \
+    "${REPO_ROOT}/engine/aka-engine-src/build/c/${dll}" \
+    "/tmp/aka-engine-src/build/c/${dll}"
 }
 
 env_var_for_platform() {
@@ -239,7 +261,7 @@ find_engine_source_dir() {
 }
 
 copy_engine_resource() {
-  local platform exe bin dst host_platform
+  local platform exe bin dll dll_bin dst host_platform
   platform="$1"
   exe="$(engine_exe_for_platform "${platform}")"
   dst="${TAURI_RESOURCES_DIR}/engine"
@@ -262,6 +284,17 @@ copy_engine_resource() {
   mkdir -p "${dst}"
   cp "${bin}" "${dst}/${exe}"
   chmod +x "${dst}/${exe}" 2>/dev/null || true
+  if [[ "${platform}" = "win-x64" ]]; then
+    dll="$(engine_dll_for_platform "${platform}")"
+    dll_bin="$(find_engine_dll "${platform}" || true)"
+    if [[ -z "${dll_bin}" ]]; then
+      echo "error: 找不到 ${platform} 的 AKA embedded engine DLL。" >&2
+      echo "       Windows direct-facts 默认路径需要 ${dll}；请设置 AKA_ENGINE_DLL / AKA_ENGINE_DLL_$(env_var_for_platform "${platform}") / AKA_ENGINE_LIB_DIR。" >&2
+      return 1
+    fi
+    cp "${dll_bin}" "${dst}/${dll}"
+    echo "==> 内置 AKA engine DLL: ${dll_bin} -> ${dst}/${dll}"
+  fi
   if [[ -f "${REPO_ROOT}/engine/ENGINE_SHA" ]]; then
     cp "${REPO_ROOT}/engine/ENGINE_SHA" "${dst}/ENGINE_SHA"
   fi
@@ -288,6 +321,35 @@ prepare_embedded_engine_lib() {
   export AKA_ENGINE_LIB_DIR="${src}/build/c"
 }
 
+prepare_windows_embedded_engine_dll() {
+  local src dll make_args
+  src="$(find_engine_source_dir || true)"
+  if [[ -z "${src}" ]]; then
+    echo "==> 本地未找到 AKA engine 源码，运行 scripts/sync-engine.sh 构建 Windows embedded DLL"
+    "${REPO_ROOT}/scripts/sync-engine.sh"
+    src="$(find_engine_source_dir || true)"
+  fi
+  [[ -n "${src}" ]] || { echo "error: 找不到 AKA engine 源码目录，无法构建 Windows embedded DLL" >&2; return 1; }
+  dll="${src}/build/c/aka_engine.dll"
+  if [[ ! -f "${dll}" ]]; then
+    echo "==> 构建 AKA engine Windows embedded DLL: ${dll}"
+    make_args=(-C "${src}" -f Makefile.cbm)
+    if [[ "$(uname -s)" = "Darwin" ]]; then
+      if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || ! command -v x86_64-w64-mingw32-g++ >/dev/null 2>&1; then
+        echo "error: macOS 本地构建 Windows embedded DLL 需要 x86_64-w64-mingw32-gcc/g++。" >&2
+        echo "       请安装 mingw-w64，或设置 AKA_ENGINE_DLL / AKA_ENGINE_DLL_WIN_X64 指向已有 aka_engine.dll。" >&2
+        return 1
+      fi
+      make_args+=(CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++)
+    fi
+    make "${make_args[@]}" aka-engine-dll
+  fi
+  [[ -f "${dll}" ]] || { echo "error: AKA engine Windows embedded DLL 缺失: ${dll}" >&2; return 1; }
+  export AKA_ENGINE_LIB_DIR="${src}/build/c"
+  export AKA_ENGINE_DLL="${dll}"
+  echo "==> 校验 AKA engine Windows embedded DLL: ${dll}"
+}
+
 assert_engine_file_nonempty() {
   local engine_bin="$1"
   [[ -f "${engine_bin}" ]] || { echo "error: engine 文件不存在: ${engine_bin}" >&2; return 1; }
@@ -295,21 +357,25 @@ assert_engine_file_nonempty() {
 }
 
 assert_windows_exe_embeds_engine() {
-  local exe_path engine_bin exe_size engine_size min_size
+  local exe_path exe_size embedded_size min_size resource resource_size
   exe_path="$1"
-  engine_bin="$2"
+  shift
   assert_engine_file_nonempty "${exe_path}"
-  assert_engine_file_nonempty "${engine_bin}"
   exe_size="$(wc -c < "${exe_path}" | tr -d '[:space:]')"
-  engine_size="$(wc -c < "${engine_bin}" | tr -d '[:space:]')"
-  min_size=$((engine_size + 1024 * 1024))
+  embedded_size=0
+  for resource in "$@"; do
+    assert_engine_file_nonempty "${resource}"
+    resource_size="$(wc -c < "${resource}" | tr -d '[:space:]')"
+    embedded_size=$((embedded_size + resource_size))
+  done
+  min_size=$((embedded_size + 1024 * 1024))
   if (( exe_size < min_size )); then
     echo "error: Windows AKA.exe 未包含内置 AKA engine。" >&2
-    echo "       exe_size=${exe_size} engine_size=${engine_size} expected_at_least=${min_size}" >&2
-    echo "       portable 用户形态是单文件 AKA.exe，不能依赖外置 engine\\aka-engine.exe。" >&2
+    echo "       exe_size=${exe_size} embedded_engine_size=${embedded_size} expected_at_least=${min_size}" >&2
+    echo "       portable 用户形态是单文件 AKA.exe，不能依赖外置 engine\\aka-engine.exe 或 aka_engine.dll。" >&2
     return 1
   fi
-  echo "==> 校验 Windows AKA.exe 已内置 engine: exe=${exe_size} engine=${engine_size}"
+  echo "==> 校验 Windows AKA.exe 已内置 engine 资源: exe=${exe_size} embedded_engine=${embedded_size}"
 }
 
 find_engine_resource_bin() {
@@ -324,7 +390,7 @@ find_engine_resource_bin() {
 }
 
 assert_engine_resource_dir() {
-  local platform dir engine_bin legacy_exe
+  local platform dir engine_bin legacy_exe dll
   platform="$1"
   dir="$2"
   legacy_exe="$(legacy_engine_exe_for_platform "${platform}")"
@@ -344,6 +410,11 @@ assert_engine_resource_dir() {
     return 1
   fi
   assert_engine_file_nonempty "${engine_bin}"
+  if [[ "${platform}" = "win-x64" ]]; then
+    dll="$(engine_dll_for_platform "${platform}")"
+    assert_engine_file_nonempty "${dir}/${dll}"
+    echo "==> 校验桌面 engine DLL 资源: ${dir}/${dll}"
+  fi
   echo "==> 校验桌面 engine 资源: ${engine_bin}"
 }
 
@@ -401,6 +472,9 @@ prepare_desktop_resources() {
   triple="$1"
   platform="$(platform_from_triple "${triple}")"
   echo "==> 准备桌面内置资源 (${platform})"
+  if [[ "${platform}" = "win-x64" && -z "$(find_engine_dll "${platform}" || true)" ]]; then
+    prepare_windows_embedded_engine_dll
+  fi
   copy_engine_resource "${platform}"
   if [[ "${platform}" != "win-x64" ]]; then
     prepare_embedded_engine_lib
@@ -774,9 +848,9 @@ package_windows_desktop() {
   prepare_desktop_resources "${win_triple}"
   if [[ "${SKIP_BUILD}" -eq 0 ]]; then
     rm -rf "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/engine"
-    local tauri_args=(build --target "${win_triple}" --bundles nsis --ci)
+    local tauri_args=(build --target "${win_triple}" --bundles nsis --features embedded-engine --ci)
     if command -v cargo-xwin >/dev/null 2>&1 && [[ "$(uname -s)" = "Darwin" ]]; then
-      tauri_args=(build --runner cargo-xwin --target "${win_triple}" --bundles nsis --ci)
+      tauri_args=(build --runner cargo-xwin --target "${win_triple}" --bundles nsis --features embedded-engine --ci)
     fi
     local updater_config_args
     local native_updater_env=()
@@ -800,7 +874,10 @@ package_windows_desktop() {
     exe_path="${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/aka-desktop.exe"
   fi
   [[ -f "${exe_path}" ]] || { echo "error: 找不到 Windows GUI exe（先去掉 --skip-build 构建一次）" >&2; return 1; }
-  assert_windows_exe_embeds_engine "${exe_path}" "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe"
+  assert_windows_exe_embeds_engine \
+    "${exe_path}" \
+    "${TAURI_RESOURCES_DIR}/engine/aka-engine.exe" \
+    "${TAURI_RESOURCES_DIR}/engine/aka_engine.dll"
 
   setup_src="$(find "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/bundle/nsis" -maxdepth 1 -type f -name "*${VERSION}*setup.exe" | sort | tail -n 1 || true)"
   if [[ -z "${setup_src}" ]]; then

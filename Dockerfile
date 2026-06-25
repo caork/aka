@@ -15,7 +15,7 @@
 # ---------- Stage 1: native AKA engine ----------
 FROM debian:bookworm AS engine-builder
 ARG AKA_ENGINE_REPO=https://github.com/caork/aka-engine.git
-ARG AKA_ENGINE_REF=f77d34f853ca1252cde573ff4e49443f95d7efed
+ARG AKA_ENGINE_REF=1f700cf2f9c8d74d6d5684992cbd9f9f817a5257
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates git build-essential pkg-config zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*

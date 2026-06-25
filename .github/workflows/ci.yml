@@ -68,6 +68,52 @@ jobs:
         working-directory: apps/desktop
         run: npm run build
 
+  windows-embedded-engine:
+    name: Windows embedded engine
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-zlib
+
+      - name: Build Windows embedded engine DLL
+        id: engine
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          ENGINE_REF="$(cat engine/ENGINE_SHA)"
+          git clone https://github.com/caork/aka-engine.git engine/aka-engine-src
+          git -C engine/aka-engine-src checkout "$ENGINE_REF"
+          make -C engine/aka-engine-src -f Makefile.cbm cbm
+          make -C engine/aka-engine-src -f Makefile.cbm aka-engine-dll
+          ENGINE_BIN="${PWD}/engine/aka-engine-src/build/c/aka-engine.exe"
+          ENGINE_DLL="${PWD}/engine/aka-engine-src/build/c/aka_engine.dll"
+          test -x "${ENGINE_BIN}"
+          test -f "${ENGINE_DLL}"
+          echo "dll=$(cygpath -m "${ENGINE_DLL}")" >> "$GITHUB_OUTPUT"
+
+      - name: Run Windows embedded-engine tests
+        shell: bash
+        env:
+          AKA_ENGINE_DLL: ${{ steps.engine.outputs.dll }}
+          AKA_ENGINE_EMBEDDED: require
+        run: |
+          cargo test -p aka-core --features embedded-engine
+          cargo test -p aka-core --features embedded-engine \
+            embedded_engine_indexes_tiny_repo_without_sqlite_dump -- --ignored
+
   client-packages:
     name: Client package smoke
     runs-on: ubuntu-latest

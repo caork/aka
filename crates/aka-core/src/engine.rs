@@ -38,7 +38,7 @@ mod cache_synth;
 mod command_synth;
 mod config_synth;
 mod dependency_synth;
-#[cfg(all(feature = "embedded-engine", not(windows)))]
+#[cfg(feature = "embedded-engine")]
 mod embedded;
 mod event_synth;
 mod fact_producer;
@@ -80,7 +80,7 @@ use config_synth::{synthesize_configs_from_sources, SynthConfig};
 use dependency_synth::{
     synthesize_dependency_edges_from_sources, DependencyProgress, DependencyProgressPhase,
 };
-#[cfg(all(feature = "embedded-engine", not(windows)))]
+#[cfg(feature = "embedded-engine")]
 use embedded::EmbeddedEngineFactProducer;
 use event_synth::{synthesize_events_from_sources, SynthEvent};
 use fact_producer::{
@@ -589,11 +589,31 @@ impl EngineRunner {
                 SidecarEngineFactProducer.produce(self, repo, options, sink, on_event)
             }
             EmbeddedEngineRequest::Enabled => {
-                #[cfg(all(feature = "embedded-engine", not(windows)))]
+                #[cfg(feature = "embedded-engine")]
                 {
-                    EmbeddedEngineFactProducer.produce(repo, options, sink, on_event)
+                    let mut embedded_sink = FactBatchBuilder::new();
+                    match EmbeddedEngineFactProducer.produce(
+                        repo,
+                        options,
+                        &mut embedded_sink,
+                        on_event,
+                    ) {
+                        Ok(produced) => {
+                            embedded_sink.finish().replay_into(sink)?;
+                            Ok(produced)
+                        }
+                        Err(error) => {
+                            on_event(&EngineEvent::Log {
+                                stream: "engine".into(),
+                                line: format!(
+                                    "embedded engine failed ({error}); falling back to binary engine"
+                                ),
+                            });
+                            SidecarEngineFactProducer.produce(self, repo, options, sink, on_event)
+                        }
+                    }
                 }
-                #[cfg(any(not(feature = "embedded-engine"), windows))]
+                #[cfg(not(feature = "embedded-engine"))]
                 {
                     on_event(&EngineEvent::Log {
                         stream: "engine".into(),
@@ -603,11 +623,11 @@ impl EngineRunner {
                 }
             }
             EmbeddedEngineRequest::Required => {
-                #[cfg(all(feature = "embedded-engine", not(windows)))]
+                #[cfg(feature = "embedded-engine")]
                 {
                     EmbeddedEngineFactProducer.produce(repo, options, sink, on_event)
                 }
-                #[cfg(any(not(feature = "embedded-engine"), windows))]
+                #[cfg(not(feature = "embedded-engine"))]
                 {
                     Err(EngineError::Facts(aka_facts::FactSourceError::Message(
                         "AKA_ENGINE_EMBEDDED=require but embedded engine is unavailable for this build"
@@ -640,12 +660,12 @@ fn embedded_engine_request() -> EmbeddedEngineRequest {
     }
 }
 
-#[cfg(all(feature = "embedded-engine", not(windows)))]
+#[cfg(feature = "embedded-engine")]
 fn default_embedded_engine_request() -> EmbeddedEngineRequest {
     EmbeddedEngineRequest::Enabled
 }
 
-#[cfg(any(not(feature = "embedded-engine"), windows))]
+#[cfg(not(feature = "embedded-engine"))]
 fn default_embedded_engine_request() -> EmbeddedEngineRequest {
     EmbeddedEngineRequest::Disabled
 }

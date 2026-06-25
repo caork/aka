@@ -23,7 +23,7 @@ permissions:
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/aka
   AKA_ENGINE_REPO: https://github.com/caork/aka-engine.git
-  AKA_ENGINE_REF: f77d34f853ca1252cde573ff4e49443f95d7efed
+  AKA_ENGINE_REF: 1f700cf2f9c8d74d6d5684992cbd9f9f817a5257
 
 jobs:
   macos-desktop:
@@ -135,15 +135,20 @@ jobs:
           git clone "${AKA_ENGINE_REPO}" aka-engine-win-src
           git -C aka-engine-win-src checkout "${AKA_ENGINE_REF}"
           make -C aka-engine-win-src -f Makefile.cbm cbm
+          make -C aka-engine-win-src -f Makefile.cbm aka-engine-dll
           ENGINE_BIN="${PWD}/aka-engine-win-src/build/c/aka-engine.exe"
+          ENGINE_DLL="${PWD}/aka-engine-win-src/build/c/aka_engine.dll"
           test -x "${ENGINE_BIN}"
+          test -f "${ENGINE_DLL}"
           echo "bin=$(cygpath -m "${ENGINE_BIN}")" >> "$GITHUB_OUTPUT"
+          echo "dll=$(cygpath -m "${ENGINE_DLL}")" >> "$GITHUB_OUTPUT"
 
       - name: Build Windows desktop GUI
         id: pkg
         shell: bash
         env:
           AKA_ENGINE_BIN_WIN_X64: ${{ steps.engine.outputs.bin }}
+          AKA_ENGINE_DLL_WIN_X64: ${{ steps.engine.outputs.dll }}
           AKA_TAURI_UPDATER: auto
           AKA_UPDATER_ENDPOINT: https://github.com/caork/aka/releases/latest/download/latest.json
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
@@ -155,6 +160,7 @@ jobs:
           [ "${GITHUB_REF_TYPE}" = "tag" ] || VERSION="dev-${GITHUB_SHA::8}"
 
           test -f "${AKA_ENGINE_BIN_WIN_X64}"
+          test -f "${AKA_ENGINE_DLL_WIN_X64}"
           scripts/package-release.sh --version "${VERSION}" --desktop-windows
 
           echo "setup_name=aka-desktop-${VERSION}-x86_64-pc-windows-msvc-setup.exe" >> "$GITHUB_OUTPUT"

@@ -11,7 +11,7 @@ Rust workspace 承担存储、搜索、服务、UI。新的热路径合同是 `a
 ## 解析引擎层（engine/，AKA engine native C）
 
 - 来源：AKA engine 是第一方组件，含 MIT 派生代码；维护仓库为 `caork/aka-engine`，不追求和官方仓兼容。
-- 产物：目标产物是 embedded/direct fact API（static/shared library + header）和兼容 `engine/aka-engine` binary（Windows 为 `aka-engine.exe`）。源码 checkout/build 目录为忽略文件，不随 aka 主仓库入 git。
+- 产物：目标产物是 embedded/direct fact API（macOS/Linux static library、Windows `aka_engine.dll` + header）和兼容 `engine/aka-engine` binary（Windows 为 `aka-engine.exe`）。源码 checkout/build 目录为忽略文件，不随 aka 主仓库入 git。
 - 调用：新主线由 Rust 调度并行文件任务，engine/library 回调或返回 `aka-facts`；兼容路径仍可调用 `aka-engine cli --progress --json index_repository <json>`。
 - Adapter：`ArtifactDir` 实现 `FactSource`，只用于 legacy artifact 目录重建、调试导出和迁移窗口。新索引入口是 `index_facts*`，不要求 `nodes.ndjson` / `edges.ndjson` 落盘。
 - 同步：日常直接在 `engine/aka-engine-src/` 修改 C 源码并提交到维护 fork，`scripts/sync-engine.sh` 默认构建当前 checkout；月度/显式上游评估才用 `scripts/sync-engine.sh --refresh-upstream` 或手工 merge/rebase/cherry-pick 选择性吸收有价值 feature。fact ABI/API 版本不变则 Rust 搜索/图/服务层零改动。
@@ -25,7 +25,7 @@ Rust workspace 承担存储、搜索、服务、UI。新的热路径合同是 `a
 - 混排 RRF（K=60）：移植上游 mergeWithRRF 逻辑。
 - 图存储：SQLite（rusqlite）持久 + 启动构建内存 CSR 邻接；callers/callees/impact 走内存遍历。aka 服务面不暴露 Cypher 查询语义，仍走 Rust 邻接 API。
 - 元数据 SQLite：repo 注册表、文件哈希、parse cache 索引。
-- embedding：**本地优先（fastembed ONNX）且默认关闭**（已拍板）。默认纯 BM25；设置中手动开启 → 下载模型 → 回填向量 → 启用混合检索；关闭则回退 BM25，向量索引保留。Jensen LiteLLM 远程为高级选项。
+- embedding：**暂不作为当前重点，默认关闭**（已拍板）。默认纯 BM25；未来只有用户在设置中手动开启后才下载模型、回填向量、启用混合检索；关闭则回退 BM25，向量索引保留。
 
 ## 服务层（Rust）
 
@@ -62,4 +62,4 @@ Rust workspace 承担存储、搜索、服务、UI。新的热路径合同是 `a
 
 - License：AKA engine 含 MIT 派生代码，aka 按 MIT 口径打包；embedded/direct API 会减少进程边界隔离，因此 engine 侧内存 ownership、错误传播和 panic/abort 策略必须由 FFI 合同约束。兼容 binary path 保留到 direct API 稳定。
 - 上游漂移：facts 字段只增不改；上游 feature 只选择性吸收，先通过 fact/golden 冒烟确认。engine SQLite schema 不再是 aka-core 主合同。
-- 跨平台打包：macOS/Linux 直接内置 `aka-engine`，Windows 内置 `aka-engine.exe`；Tauri 与 Docker 的解析链路都不再依赖 JS runtime。
+- 跨平台打包：macOS/Linux 内置 `aka-engine` binary + embedded static lib，Windows 单文件 `AKA.exe` 内置 `aka_engine.dll` 作为默认 direct-facts 路径，并内置 `aka-engine.exe` 作为 fallback/debug；Tauri 与 Docker 的解析链路都不再依赖 JS runtime。

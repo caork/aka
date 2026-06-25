@@ -10,7 +10,7 @@ Goal: remove the `artifact/` / sidecar / engine SQLite path from the hot indexin
 
 The fused facts runtime path is now implemented and verified for macOS/Linux product builds. The native AKA engine emits facts through callbacks, Rust can link the embedded engine static library, and the internal runtime used by the desktop shell/plugin host can index through `aka_engine_index_with_sink` without writing engine SQLite or NDJSON artifacts.
 
-Windows intentionally remains on the bundled `aka-engine.exe` fallback path until an MSVC-compatible embedded static library is solved. Legacy sidecar/binary fallback also remains available on all platforms via `AKA_ENGINE_EMBEDDED=0|off|false|no` and for non-embedded builds.
+Windows now uses a runtime-loaded `aka_engine.dll` for the embedded/direct facts path instead of waiting on an MSVC static library. The portable user shape remains a single visible `AKA.exe`: Tauri embeds both `aka_engine.dll` and the legacy `aka-engine.exe`, then materializes them into app data at startup. Legacy sidecar/binary fallback also remains available on all platforms via `AKA_ENGINE_EMBEDDED=0|off|false|no`, for non-embedded builds, and automatically when the default embedded path fails. `AKA_ENGINE_EMBEDDED=require` is the hard-fail debug mode.
 
 Latest relevant main repo commits:
 
@@ -89,20 +89,20 @@ The wrapper:
 Runtime selection:
 
 - macOS/Linux builds compiled with `embedded-engine` default to embedded facts when `AKA_ENGINE_EMBEDDED` is unset.
+- Windows builds compiled with `embedded-engine` default to embedded facts by loading `aka_engine.dll` from `AKA_ENGINE_DLL`, `AKA_ENGINE_LIB_DIR`, app data resources, or nearby build resource paths.
 - `AKA_ENGINE_EMBEDDED=0|off|false|no` forces binary/sidecar fallback.
-- `AKA_ENGINE_EMBEDDED=1|true` opts in explicitly.
+- `AKA_ENGINE_EMBEDDED=1|true` opts in explicitly but still falls back to binary/sidecar if embedded loading or indexing fails.
 - `AKA_ENGINE_EMBEDDED=require` fails if embedded is unavailable.
-- Windows defaults to bundled binary fallback and does not compile the embedded module.
 
 ### Product build wiring
 
 - `apps/cli` exposes `embedded-engine = ["aka-core/embedded-engine"]`.
 - `apps/desktop/src-tauri` exposes `embedded-engine = ["aka-cli/embedded-engine"]`.
 - macOS desktop packaging passes `--features embedded-engine`.
+- Windows desktop packaging passes `--features embedded-engine`, embeds `aka_engine.dll` for the direct-facts path, and keeps `aka-engine.exe` embedded as fallback/debug.
 - `scripts/package-release.sh` now ensures `libaka_engine.a` exists and exports `AKA_ENGINE_LIB_DIR` before macOS Tauri builds.
-- Windows desktop packaging does not pass `embedded-engine` and keeps the single-file `AKA.exe` + embedded `aka-engine.exe` resource behavior.
 - Docker builds the engine binary and static library before the Rust runtime, then builds the Linux runtime with `--features embedded-engine`; `/opt/aka/engine/aka-engine` remains in the image as explicit fallback.
-- CI keeps the default no-feature workspace test/clippy gates and adds an embedded Linux gate that clones the pinned engine ref, builds `libaka_engine.a`, then runs `cargo test -p aka-core --features embedded-engine` and `cargo test -p aka-cli --features embedded-engine`.
+- CI keeps the default no-feature workspace test/clippy gates, adds an embedded Linux gate that clones the pinned engine ref and builds `libaka_engine.a`, and adds a Windows embedded gate that builds `aka_engine.dll` and runs aka-core embedded tests with `AKA_ENGINE_EMBEDDED=require`.
 
 ### Semantic producer seam
 
@@ -186,7 +186,7 @@ This could not be run locally because the Docker daemon was not running (`Cannot
 
 These are not blockers for the fused hot path but remain useful next work:
 
-- Implement an MSVC-compatible Windows embedded static library if we want Windows to use in-process engine callbacks instead of the current bundled binary fallback.
+- Keep the Windows DLL direct-facts path under release smoke coverage; revisit MSVC static linking only if a future packaging/signing constraint makes the DLL resource path unsuitable.
 - Replace replayable `FactBatch` with a true one-pass graph/search writer after the writer no longer needs to reread nodes.
 - Add real SCIP / stack-graphs / LSP adapters on top of `aka-facts::SemanticFactProducer`; the seam and fake producer tests already exist.
 - Improve the C embedded API to take cache dir through pipeline state instead of process-global `AKA_ENGINE_CACHE_DIR`.

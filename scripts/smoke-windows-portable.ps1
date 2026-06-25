@@ -224,7 +224,10 @@ function Wait-McpRepoReady {
 }
 
 Get-Process AKA -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+$desktopLogPath = Join-Path $env:APPDATA "com.aka.desktop\logs\aka-desktop.log"
+Remove-Item -Force $desktopLogPath -ErrorAction SilentlyContinue
 $env:AKA_HOME = $akaHome
+$env:AKA_ENGINE_EMBEDDED = "require"
 Write-Host "aka smoke: starting AKA.exe"
 $desktop = Start-Process -FilePath $akaExe -PassThru
 try {
@@ -260,6 +263,16 @@ try {
     Write-Host "aka smoke: analyze repo=$repoName status=$($analyzeOut.status)"
     Write-Host "aka smoke: waiting MCP repo readiness"
     $readyRepo = Wait-McpRepoReady -ExpectedRepo $repoName
+    $progressText = ""
+    if ($readyRepo.progress -and $readyRepo.progress.logs) {
+        $progressText = ($readyRepo.progress.logs | Out-String)
+    }
+    if ($progressText -notmatch "aka-engine:index:embedded") {
+        throw "repo progress did not show actual embedded engine indexing`nProgress:`n$progressText`nDesktop log:`n$(Get-DesktopLogTail)"
+    }
+    if ($progressText -match "falling back to binary engine") {
+        throw "repo progress shows embedded engine fallback despite require mode`nProgress:`n$progressText"
+    }
 
     Write-Host "aka smoke: MCP list/search/context"
     $listRepos = Invoke-McpTool -Id 4 -Name "list_repos" -Arguments @{}
@@ -291,11 +304,17 @@ try {
     if ($logTail -notmatch "desktop MCP server started") {
         throw "desktop log did not include MCP startup marker"
     }
+    if ($logTail -notmatch "source=embedded-dll") {
+        throw "desktop log did not show Windows direct-facts embedded DLL path"
+    }
+    if ($logTail -match "falling back to binary engine") {
+        throw "desktop log shows embedded engine fallback despite require mode"
+    }
 
     [PSCustomObject]@{
         ok = $true
         portableDir = $portable
-        productShape = "single AKA.exe"
+        productShape = "single AKA.exe with materialized embedded engine DLL"
         repo = $repoName
         repoPath = $repo
         akaHome = $akaHome

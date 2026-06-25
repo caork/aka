@@ -66,11 +66,75 @@ struct AkaEngineFactSink {
     done: Option<DoneCallback>,
 }
 
+#[cfg(not(windows))]
 extern "C" {
     fn aka_engine_index_with_sink(
         options: *const AkaEngineIndexOptions,
         sink: *const AkaEngineFactSink,
     ) -> c_int;
+}
+
+#[cfg(windows)]
+type AkaEngineIndexWithSink =
+    unsafe extern "C" fn(*const AkaEngineIndexOptions, *const AkaEngineFactSink) -> c_int;
+
+#[cfg(not(windows))]
+struct EmbeddedEngineApi;
+
+#[cfg(not(windows))]
+impl EmbeddedEngineApi {
+    fn load() -> Result<Self, EngineError> {
+        Ok(Self)
+    }
+
+    unsafe fn index_with_sink(
+        &self,
+        options: *const AkaEngineIndexOptions,
+        sink: *const AkaEngineFactSink,
+    ) -> c_int {
+        aka_engine_index_with_sink(options, sink)
+    }
+}
+
+#[cfg(windows)]
+struct EmbeddedEngineApi {
+    _library: libloading::Library,
+    index_with_sink: AkaEngineIndexWithSink,
+}
+
+#[cfg(windows)]
+impl EmbeddedEngineApi {
+    fn load() -> Result<Self, EngineError> {
+        let dll = resolve_windows_engine_dll()?;
+        let library = unsafe { libloading::Library::new(&dll) }.map_err(|error| {
+            EngineError::Facts(FactSourceError::Message(format!(
+                "load embedded engine dll {} failed: {error}",
+                dll.display()
+            )))
+        })?;
+        let index_with_sink = unsafe {
+            *library
+                .get::<AkaEngineIndexWithSink>(b"aka_engine_index_with_sink\0")
+                .map_err(|error| {
+                    EngineError::Facts(FactSourceError::Message(format!(
+                        "load aka_engine_index_with_sink from {} failed: {error}",
+                        dll.display()
+                    )))
+                })?
+        };
+        Ok(Self {
+            _library: library,
+            index_with_sink,
+        })
+    }
+
+    unsafe fn index_with_sink(
+        &self,
+        options: *const AkaEngineIndexOptions,
+        sink: *const AkaEngineFactSink,
+    ) -> c_int {
+        (self.index_with_sink)(options, sink)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -159,6 +223,7 @@ fn run_embedded_engine_inner(
     cache_root: &Path,
     mode: AkaEngineMode,
 ) -> Result<aka_facts::FactBatch, EngineError> {
+    let api = EmbeddedEngineApi::load()?;
     let repo_c = cstring_path(engine_repo)?;
     let cache_c = cstring_path(cache_root)?;
     let mut batch = FactBatchBuilder::new();
@@ -180,7 +245,7 @@ fn run_embedded_engine_inner(
         direct_facts_only: true,
     };
 
-    let rc = unsafe { aka_engine_index_with_sink(&ffi_options, &ffi_sink) };
+    let rc = unsafe { api.index_with_sink(&ffi_options, &ffi_sink) };
     if let Some(error) = bridge.error {
         return Err(error);
     }
@@ -191,6 +256,58 @@ fn run_embedded_engine_inner(
         });
     }
     Ok(batch.finish())
+}
+
+#[cfg(windows)]
+fn resolve_windows_engine_dll() -> Result<PathBuf, EngineError> {
+    if let Some(path) = std::env::var_os("AKA_ENGINE_DLL").map(PathBuf::from) {
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(EngineError::Facts(FactSourceError::Message(format!(
+            "AKA_ENGINE_DLL does not exist: {}",
+            path.display()
+        ))));
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(dir) = std::env::var_os("AKA_ENGINE_LIB_DIR").map(PathBuf::from) {
+        candidates.push(dir.join("aka_engine.dll"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().skip(1) {
+            candidates.extend([
+                ancestor.join("aka_engine.dll"),
+                ancestor.join("engine").join("aka_engine.dll"),
+                ancestor
+                    .join("resources")
+                    .join("engine")
+                    .join("aka_engine.dll"),
+            ]);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for ancestor in cwd.ancestors() {
+            candidates.extend([
+                ancestor.join("engine").join("aka_engine.dll"),
+                ancestor
+                    .join("engine")
+                    .join("aka-engine-src")
+                    .join("build")
+                    .join("c")
+                    .join("aka_engine.dll"),
+            ]);
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            EngineError::Facts(FactSourceError::Message(
+                "embedded engine dll not found; set AKA_ENGINE_DLL or AKA_ENGINE_LIB_DIR".into(),
+            ))
+        })
 }
 
 struct SinkBridge<'a> {

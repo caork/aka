@@ -30,6 +30,18 @@ const EMBEDDED_AKA_ENGINE: &[u8] = include_bytes!(concat!(
     "/resources/engine/aka-engine.exe"
 ));
 
+#[cfg(all(target_os = "windows", feature = "embedded-engine"))]
+const EMBEDDED_AKA_ENGINE_DLL: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/resources/engine/aka_engine.dll"
+));
+
+#[cfg(target_os = "windows")]
+const EMBEDDED_AKA_ENGINE_SHA: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/resources/engine/ENGINE_SHA"
+));
+
 struct DesktopMcpRuntime {
     _rt: tokio::runtime::Runtime,
 }
@@ -146,35 +158,78 @@ fn bundled_engine_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
 
 #[cfg(target_os = "windows")]
 fn materialize_embedded_engine(app_data_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+    let engine_sha = std::str::from_utf8(EMBEDDED_AKA_ENGINE_SHA)
+        .unwrap_or("unknown")
+        .trim();
     let engine_dir = app_data_dir
         .join("bundled-engine")
-        .join(env!("CARGO_PKG_VERSION"));
-    let engine_bin = engine_dir.join("aka-engine.exe");
-    let needs_write = std::fs::metadata(&engine_bin)
-        .map(|meta| meta.len() != EMBEDDED_AKA_ENGINE.len() as u64)
-        .unwrap_or(true);
+        .join(format!("{}-{engine_sha}", env!("CARGO_PKG_VERSION")));
+    let engine_bin = materialize_embedded_resource(
+        &engine_dir,
+        "aka-engine.exe",
+        EMBEDDED_AKA_ENGINE,
+        "desktop embedded engine",
+    )?;
+    materialize_embedded_resource(
+        &engine_dir,
+        "ENGINE_SHA",
+        EMBEDDED_AKA_ENGINE_SHA,
+        "desktop embedded engine sha",
+    )?;
 
-    if needs_write {
-        std::fs::create_dir_all(&engine_dir)?;
-        let tmp = engine_dir.join(format!("aka-engine.exe.tmp-{}", std::process::id()));
-        std::fs::write(&tmp, EMBEDDED_AKA_ENGINE)?;
-        std::fs::rename(&tmp, &engine_bin).or_else(|rename_err| {
-            let _ = std::fs::remove_file(&engine_bin);
-            std::fs::rename(&tmp, &engine_bin).map_err(|_| rename_err)
-        })?;
+    #[cfg(feature = "embedded-engine")]
+    {
+        let engine_dll = materialize_embedded_resource(
+            &engine_dir,
+            "aka_engine.dll",
+            EMBEDDED_AKA_ENGINE_DLL,
+            "desktop embedded engine dll",
+        )?;
+        std::env::set_var("AKA_ENGINE_DLL", &engine_dll);
+        std::env::set_var("AKA_ENGINE_LIB_DIR", &engine_dir);
+        if std::env::var_os("AKA_ENGINE_EMBEDDED").is_none() {
+            std::env::set_var("AKA_ENGINE_EMBEDDED", "1");
+        }
         log_desktop_event(format!(
-            "desktop embedded engine materialized path={} bytes={}",
-            engine_bin.display(),
-            EMBEDDED_AKA_ENGINE.len()
-        ));
-    } else {
-        log_desktop_event(format!(
-            "desktop embedded engine already present path={}",
+            "desktop engine dll={} source=embedded-dll fallback_bin={}",
+            engine_dll.display(),
             engine_bin.display()
         ));
     }
-
     Ok(engine_dir)
+}
+
+#[cfg(target_os = "windows")]
+fn materialize_embedded_resource(
+    engine_dir: &std::path::Path,
+    file_name: &str,
+    bytes: &[u8],
+    label: &str,
+) -> anyhow::Result<PathBuf> {
+    let path = engine_dir.join(file_name);
+    let needs_write = match std::fs::read(&path) {
+        Ok(existing) => existing != bytes,
+        Err(_) => true,
+    };
+
+    if needs_write {
+        std::fs::create_dir_all(engine_dir)?;
+        let tmp = engine_dir.join(format!("{file_name}.tmp-{}", std::process::id()));
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path).or_else(|rename_err| {
+            let _ = std::fs::remove_file(&path);
+            std::fs::rename(&tmp, &path).map_err(|_| rename_err)
+        })?;
+        log_desktop_event(format!(
+            "{label} materialized path={} bytes={}",
+            path.display(),
+            bytes.len()
+        ));
+    } else {
+        log_desktop_event(format!("{label} already present path={}", path.display()));
+    }
+
+    Ok(path)
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,12 +331,18 @@ fn configure_backend(
     let backend = match materialize_embedded_engine(app_data_dir) {
         Ok(engine_dir) => {
             log_desktop_event(format!(
-                "desktop engine dir={} source=embedded",
+                "desktop engine dir={} source=embedded-resource",
                 engine_dir.display()
             ));
+            std::env::set_var("AKA_ENGINE_DIR", &engine_dir);
             AkaBackend::with_engine_dir(engine_dir)
         }
         Err(err) => {
+            if embedded_engine_required() {
+                return Err(anyhow::anyhow!(
+                    "AKA_ENGINE_EMBEDDED=require but desktop embedded engine materialization failed: {err:#}"
+                ));
+            }
             log_desktop_event(format!("desktop embedded engine unavailable: {err:#}"));
             if let Some(engine_dir) = bundled_engine_dir(&resource_dir) {
                 log_desktop_event(format!("desktop engine dir={}", engine_dir.display()));
@@ -301,12 +362,23 @@ fn configure_backend(
 }
 
 #[cfg(target_os = "windows")]
+fn embedded_engine_required() -> bool {
+    std::env::var("AKA_ENGINE_EMBEDDED")
+        .map(|value| value.eq_ignore_ascii_case("require"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
 fn configure_cli_engine_runtime(app_data_dir: &std::path::Path) -> anyhow::Result<()> {
-    if std::env::var_os("AKA_ENGINE_DIR").is_none()
-        && std::env::var_os("AKA_ENGINE_BIN").is_none()
-    {
+    let should_materialize_embedded_dll =
+        cfg!(feature = "embedded-engine") && std::env::var_os("AKA_ENGINE_DLL").is_none();
+    let should_materialize_fallback =
+        std::env::var_os("AKA_ENGINE_DIR").is_none() && std::env::var_os("AKA_ENGINE_BIN").is_none();
+    if should_materialize_embedded_dll || should_materialize_fallback {
         let engine_dir = materialize_embedded_engine(app_data_dir)?;
-        std::env::set_var("AKA_ENGINE_DIR", engine_dir);
+        if should_materialize_fallback {
+            std::env::set_var("AKA_ENGINE_DIR", engine_dir);
+        }
     }
     Ok(())
 }

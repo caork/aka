@@ -16,7 +16,8 @@ scripts/sync-engine.sh
 脚本默认使用 aka 维护的第一方仓库 `caork/aka-engine`，并构建被 git 忽略的
 `engine/aka-engine-src/` 当前 checkout，复制可执行文件到
 `engine/aka-engine`，并把当前 engine commit 写入 `engine/ENGINE_SHA`。
-后续 direct API 稳定后，脚本还应同步构建 `libaka_engine` 和公开 header。
+Windows/MSYS 构建还会复制 `aka_engine.dll`，供桌面 `AKA.exe` 内置后作为
+direct-facts 默认路径；`aka-engine.exe` 继续保留为 fallback/debug。
 随后运行 `scripts/pin-engine-ref.sh`，把 Dockerfile 和 release workflow 的 `AKA_ENGINE_REF`
 同步到同一个 commit，保证 Docker/Windows/macOS 分发用的都是我们维护并验证过的 engine。
 

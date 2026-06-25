@@ -25,7 +25,7 @@ Rust core       aka-search (tantivy BM25 + usearch 向量 + RRF)
 - License：AKA engine 含 MIT 派生代码，aka 以 MIT 口径分发；解析引擎通过 native C binary 进程边界接入。
 - aka 服务面不暴露解析引擎内部查询语义：图查询走 Rust 内存邻接 API，不引嵌入式图数据库 FFI。
 - 图谱可视化 Cosmograph + 分层 LOD：数据层按十亿级设计（磁盘索引、流式摄取），渲染层只画聚合视图（社区 → 文件 → 符号下钻），单视口控制在 GPU 舒适区。
-- embedding 本地优先（fastembed ONNX）且默认关闭：默认搜索纯 BM25；设置中手动开启后才下载模型、回填向量、启用混合检索；Jensen 远程 embedding 为高级选项。
+- embedding 暂不作为当前重点且默认关闭：默认搜索纯 BM25；未来设置中手动开启后才下载模型、回填向量、启用混合检索。
 
 ## 里程碑
 
@@ -34,7 +34,7 @@ Rust core       aka-search (tantivy BM25 + usearch 向量 + RRF)
 - **M2** ✅ MCP 工具面（rmcp stdio/HTTP，含 `search_code` 行级源码搜索、影响分析和仓库管理工具）+ axum HTTP；桌面端内置 HTTP MCP，stdio 仅作 fallback
 - **M3** ✅ 桌面 MVP：液态玻璃三视图全接真实数据；WebGL2 渲染器 500K 节点/1M 边 60fps
 - **M4** ◐ `aka serve` headless 可用；Docker 化 + Jensen 部署 + 远程模式待做
-- 待办：embedding 开关落地（本地 fastembed，默认关）、增量索引接 fileHashes、Tauri 打包携带 AKA engine native binary、wiki/group 按需补齐
+- 待办：增量索引接 fileHashes、Windows 发布 smoke 自动化、wiki/group 按需补齐；embedding 保持默认关闭，后续按需再做。
 
 ## 源码开发
 

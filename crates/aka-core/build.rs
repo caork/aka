@@ -11,7 +11,8 @@ fn main() {
 
     let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target == "windows" {
-        println!("cargo:warning=aka-core embedded-engine is not linked on Windows yet; use the binary engine fallback");
+        println!("cargo:rerun-if-env-changed=AKA_ENGINE_DLL");
+        println!("cargo:warning=aka-core embedded-engine on Windows loads aka_engine.dll at runtime; set AKA_ENGINE_DLL or AKA_ENGINE_LIB_DIR");
         return;
     }
 

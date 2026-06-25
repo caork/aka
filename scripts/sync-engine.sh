@@ -67,6 +67,9 @@ if [[ -z "${SHA}" ]]; then
 fi
 
 make -C "${CHECKOUT}" -f Makefile.cbm cbm
+if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
+  make -C "${CHECKOUT}" -f Makefile.cbm aka-engine-dll
+fi
 
 BUILT="${CHECKOUT}/build/c/${BIN_NAME}"
 if [[ ! -x "${BUILT}" ]]; then
@@ -76,8 +79,19 @@ fi
 
 cp "${BUILT}" "${DST}/${BIN_NAME}"
 chmod +x "${DST}/${BIN_NAME}"
+if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
+  DLL_BUILT="${CHECKOUT}/build/c/aka_engine.dll"
+  if [[ ! -f "${DLL_BUILT}" ]]; then
+    echo "error: build did not produce ${DLL_BUILT}" >&2
+    exit 1
+  fi
+  cp "${DLL_BUILT}" "${DST}/aka_engine.dll"
+fi
 printf '%s\n' "${SHA}" > "${DST}/ENGINE_SHA"
 
 echo "engine checkout: ${CHECKOUT}"
 echo "engine binary: ${DST}/${BIN_NAME}"
+if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
+  echo "engine dll: ${DST}/aka_engine.dll"
+fi
 echo "ENGINE_SHA=${SHA}"
