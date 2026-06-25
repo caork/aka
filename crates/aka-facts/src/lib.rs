@@ -680,6 +680,40 @@ pub struct FactBatch {
     pub chunks: Vec<ChunkFact>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OssAnalyzerFactBundle {
+    pub analyzer: OssAnalyzerBundleMetadata,
+    #[serde(default)]
+    pub stats: FactStats,
+    #[serde(default)]
+    pub nodes: Vec<NodeFact>,
+    #[serde(default)]
+    pub edges: Vec<EdgeFact>,
+    #[serde(default)]
+    pub chunks: Vec<ChunkFact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OssAnalyzerBundleMetadata {
+    pub analyzer_id: String,
+    pub tool_version: String,
+}
+
+impl OssAnalyzerFactBundle {
+    pub fn into_batch(self) -> FactBatch {
+        let stats = if self.stats == FactStats::default()
+            && (!self.nodes.is_empty() || !self.edges.is_empty() || !self.chunks.is_empty())
+        {
+            compute_fact_stats(&self.nodes, &self.edges, &self.chunks)
+        } else {
+            self.stats
+        };
+        FactBatch::new(stats, self.nodes, self.edges, self.chunks)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct FactBatchBuilder {
     manifest: Option<FactManifest>,
@@ -715,21 +749,24 @@ impl FactBatchBuilder {
     }
 
     pub fn finish(self) -> FactBatch {
-        let computed = FactStats {
-            files: self
-                .nodes
-                .iter()
-                .filter(|node| node.label == SymbolKind::File.label())
-                .count() as u64,
-            nodes: self.nodes.len() as u64,
-            edges: self.edges.len() as u64,
-            chunks: self.chunks.len() as u64,
-        };
+        let computed = compute_fact_stats(&self.nodes, &self.edges, &self.chunks);
         let stats = self
             .done_stats
             .or_else(|| self.manifest.map(|manifest| manifest.stats))
             .unwrap_or(computed);
         FactBatch::new(stats, self.nodes, self.edges, self.chunks)
+    }
+}
+
+fn compute_fact_stats(nodes: &[NodeFact], edges: &[EdgeFact], chunks: &[ChunkFact]) -> FactStats {
+    FactStats {
+        files: nodes
+            .iter()
+            .filter(|node| node.label == SymbolKind::File.label())
+            .count() as u64,
+        nodes: nodes.len() as u64,
+        edges: edges.len() as u64,
+        chunks: chunks.len() as u64,
     }
 }
 
@@ -771,6 +808,12 @@ impl FactBatch {
     }
 
     pub fn from_json_file(path: &Path) -> Result<Self, FactBatchFileError> {
+        Self::from_oss_analyzer_json_file(path).map(|bundle| bundle.batch)
+    }
+
+    pub fn from_oss_analyzer_json_file(
+        path: &Path,
+    ) -> Result<LoadedOssAnalyzerFacts, FactBatchFileError> {
         let bytes = fs::read(path).map_err(|source| FactBatchFileError::Io {
             path: path.to_path_buf(),
             source,
@@ -782,23 +825,50 @@ impl FactBatch {
             });
         }
         if trimmed[0] == b'[' {
-            read_record_array(path, trimmed)
+            read_record_array(path, trimmed).map(LoadedOssAnalyzerFacts::batch)
         } else if trimmed[0] == b'{' {
             match serde_json::from_slice(trimmed) {
-                Ok(batch) => Ok(batch),
-                Err(bundle_error) => read_jsonl_records(path, trimmed).map_err(|line_error| {
-                    if matches!(line_error, FactBatchFileError::JsonLine { .. }) {
-                        line_error
-                    } else {
-                        FactBatchFileError::Json {
-                            path: path.to_path_buf(),
-                            source: bundle_error,
-                        }
-                    }
-                }),
+                Ok(bundle) => Ok(LoadedOssAnalyzerFacts::bundle(bundle)),
+                Err(_bundle_error) => match serde_json::from_slice(trimmed) {
+                    Ok(batch) => Ok(LoadedOssAnalyzerFacts::batch(batch)),
+                    Err(batch_error) => read_jsonl_records(path, trimmed)
+                        .map(LoadedOssAnalyzerFacts::batch)
+                        .map_err(|line_error| {
+                            if matches!(line_error, FactBatchFileError::JsonLine { .. }) {
+                                line_error
+                            } else {
+                                FactBatchFileError::Json {
+                                    path: path.to_path_buf(),
+                                    source: batch_error,
+                                }
+                            }
+                        }),
+                },
             }
         } else {
-            read_jsonl_records(path, trimmed)
+            read_jsonl_records(path, trimmed).map(LoadedOssAnalyzerFacts::batch)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedOssAnalyzerFacts {
+    pub analyzer: Option<OssAnalyzerBundleMetadata>,
+    pub batch: FactBatch,
+}
+
+impl LoadedOssAnalyzerFacts {
+    fn batch(batch: FactBatch) -> Self {
+        Self {
+            analyzer: None,
+            batch,
+        }
+    }
+
+    fn bundle(bundle: OssAnalyzerFactBundle) -> Self {
+        Self {
+            analyzer: Some(bundle.analyzer.clone()),
+            batch: bundle.into_batch(),
         }
     }
 }
@@ -1067,6 +1137,88 @@ mod tests {
 
         assert_eq!(batch.stats.nodes, 1);
         assert_eq!(batch.nodes[0].id, "sym:handler");
+    }
+
+    #[test]
+    fn fact_batch_reads_oss_analyzer_bundle_metadata() {
+        let dir = std::env::temp_dir().join("aka-facts-oss-analyzer-bundle-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("facts.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "analyzer": {
+                    "analyzerId": "pyright",
+                    "toolVersion": "1.1.400"
+                },
+                "stats": {"files": 0, "nodes": 1, "edges": 0, "chunks": 0},
+                "nodes": [{
+                    "id": "pyright:symbol:handler",
+                    "label": "Function",
+                    "properties": {"name": "handler"}
+                }],
+                "edges": [],
+                "chunks": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = FactBatch::from_oss_analyzer_json_file(&path).unwrap();
+
+        let analyzer = loaded.analyzer.expect("analyzer metadata");
+        assert_eq!(analyzer.analyzer_id, "pyright");
+        assert_eq!(analyzer.tool_version, "1.1.400");
+        assert_eq!(loaded.batch.stats.nodes, 1);
+        assert_eq!(loaded.batch.nodes[0].id, "pyright:symbol:handler");
+        let plain_batch = FactBatch::from_json_file(&path).unwrap();
+        assert_eq!(plain_batch.nodes[0].id, "pyright:symbol:handler");
+    }
+
+    #[test]
+    fn oss_analyzer_bundle_computes_stats_when_omitted() {
+        let dir = std::env::temp_dir().join("aka-facts-oss-analyzer-computed-stats-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("facts.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "analyzer": {
+                    "analyzerId": "pyright",
+                    "toolVersion": "1.1.400"
+                },
+                "nodes": [{
+                    "id": "file:src/app.py",
+                    "label": "File",
+                    "properties": {"name": "src/app.py"}
+                }],
+                "edges": [{
+                    "id": "edge:1",
+                    "sourceId": "file:src/app.py",
+                    "targetId": "file:src/app.py",
+                    "type": "SELF"
+                }],
+                "chunks": [{
+                    "nodeId": "file:src/app.py",
+                    "kind": "char",
+                    "filePath": "src/app.py",
+                    "startLine": 0,
+                    "endLine": 0,
+                    "text": "print('ok')"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = FactBatch::from_oss_analyzer_json_file(&path).unwrap();
+
+        assert_eq!(loaded.batch.stats.files, 1);
+        assert_eq!(loaded.batch.stats.nodes, 1);
+        assert_eq!(loaded.batch.stats.edges, 1);
+        assert_eq!(loaded.batch.stats.chunks, 1);
     }
 
     #[test]

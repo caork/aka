@@ -9,7 +9,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::{run_analyze, AkaBackend};
-use aka_core::{validate_enrichment_batch_provenance, FactBatch, Registry, RepoPaths};
+use aka_core::{
+    stamp_enrichment_batch, validate_enrichment_batch_provenance, AnalyzerRunMetadata, FactBatch,
+    Registry, RepoPaths,
+};
 use aka_mcp::Backend;
 
 #[derive(Parser)]
@@ -182,8 +185,15 @@ fn run_repos() -> Result<()> {
 }
 
 fn run_validate_facts(path: PathBuf) -> Result<()> {
-    let batch =
-        FactBatch::from_json_file(&path).with_context(|| format!("read {}", path.display()))?;
+    let loaded = FactBatch::from_oss_analyzer_json_file(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let mut batch = loaded.batch;
+    if let Some(analyzer) = loaded.analyzer {
+        let metadata = AnalyzerRunMetadata::new(analyzer.analyzer_id, analyzer.tool_version)
+            .with_context(|| format!("read OSS analyzer metadata in {}", path.display()))?;
+        stamp_enrichment_batch(&mut batch, &metadata)
+            .with_context(|| format!("stamp OSS analyzer provenance in {}", path.display()))?;
+    }
     validate_enrichment_batch_provenance(&batch)
         .with_context(|| format!("validate OSS analyzer provenance in {}", path.display()))?;
     println!(
@@ -341,6 +351,33 @@ mod tests {
                             "oss": true
                         }
                     }
+                }],
+                "edges": [],
+                "chunks": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        run_from(["aka", "validate-facts", path.to_str().unwrap()]).unwrap();
+    }
+
+    #[test]
+    fn validate_facts_accepts_top_level_oss_analyzer_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("facts.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "analyzer": {
+                    "analyzerId": "pyright",
+                    "toolVersion": "1.1.400"
+                },
+                "stats": {"files": 0, "nodes": 1, "edges": 0, "chunks": 0},
+                "nodes": [{
+                    "id": "pyright:symbol:service",
+                    "label": "Function",
+                    "properties": {"name": "service"}
                 }],
                 "edges": [],
                 "chunks": []

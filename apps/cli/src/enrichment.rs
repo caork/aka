@@ -270,9 +270,16 @@ impl OptionalEnrichmentProvider for FactsFileProvider {
         if !path.is_file() {
             return Ok(None);
         }
-        aka_core::FactBatch::from_json_file(&path)
-            .map(Some)
-            .map_err(|err| FactSourceError::Message(err.to_string()))
+        let loaded = aka_core::FactBatch::from_oss_analyzer_json_file(&path)
+            .map_err(|err| FactSourceError::Message(err.to_string()))?;
+        let mut batch = loaded.batch;
+        if let Some(analyzer) = loaded.analyzer {
+            let provenance = AnalyzerRunMetadata::new(analyzer.analyzer_id, analyzer.tool_version)
+                .map_err(|err| FactSourceError::Message(err.to_string()))?;
+            aka_core::stamp_enrichment_batch(&mut batch, &provenance)
+                .map_err(|err| FactSourceError::Message(err.to_string()))?;
+        }
+        Ok(Some(batch))
     }
 }
 
@@ -359,6 +366,18 @@ mod tests {
     use super::*;
     use crate::indexer::index_facts;
 
+    fn scip_provenance() -> serde_json::Value {
+        serde_json::json!({
+            "source": "scip",
+            "analyzerId": "scip",
+            "analyzerKind": "scip",
+            "tool": "SCIP",
+            "toolVersion": "1.0",
+            "adapterVersion": "test",
+            "oss": true
+        })
+    }
+
     struct BatchProvider {
         batch: FactBatch,
     }
@@ -427,7 +446,7 @@ mod tests {
                     properties: serde_json::json!({
                         "name": "Service",
                         "source": "scip",
-                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                        "provenance": scip_provenance()
                     })
                     .as_object()
                     .unwrap()
@@ -443,7 +462,7 @@ mod tests {
                     step: None,
                     evidence: Some(serde_json::json!({
                         "source": "scip",
-                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                        "provenance": scip_provenance()
                     })),
                 }],
                 vec![ChunkFact {
@@ -568,7 +587,7 @@ mod tests {
                     properties: serde_json::json!({
                         "name": "Service",
                         "source": "scip",
-                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                        "provenance": scip_provenance()
                     })
                     .as_object()
                     .unwrap()
@@ -724,7 +743,7 @@ mod tests {
                     properties: serde_json::json!({
                         "name": "Service",
                         "source": "scip",
-                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                        "provenance": scip_provenance()
                     })
                     .as_object()
                     .unwrap()
@@ -740,7 +759,7 @@ mod tests {
                     step: None,
                     evidence: Some(serde_json::json!({
                         "source": "scip",
-                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                        "provenance": scip_provenance()
                     })),
                 }],
                 Vec::new(),
@@ -760,7 +779,7 @@ mod tests {
                     properties: serde_json::json!({
                         "name": "Repo",
                         "source": "scip",
-                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                        "provenance": scip_provenance()
                     })
                     .as_object()
                     .unwrap()
@@ -776,7 +795,7 @@ mod tests {
                     step: None,
                     evidence: Some(serde_json::json!({
                         "source": "scip",
-                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                        "provenance": scip_provenance()
                     })),
                 }],
                 Vec::new(),
@@ -916,6 +935,178 @@ mod tests {
         assert_eq!(graph.edge_count().unwrap(), 1);
     }
 
+    #[test]
+    fn facts_file_provider_stamps_top_level_oss_analyzer_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 0,
+                chunks: 0,
+            },
+            vec![NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({"name": "handler"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        index_facts(&baseline, &paths).unwrap();
+        let facts_path = repo.join("oss-analyzer-facts.json");
+        std::fs::write(
+            &facts_path,
+            serde_json::json!({
+                "analyzer": {
+                    "analyzerId": "pyright",
+                    "toolVersion": "1.1.400"
+                },
+                "stats": {"files": 0, "nodes": 1, "edges": 1, "chunks": 0},
+                "nodes": [{
+                    "id": "pyright:symbol:service",
+                    "label": "Function",
+                    "properties": {"name": "service"}
+                }],
+                "edges": [{
+                    "id": "pyright:edge:handler-service",
+                    "sourceId": "sym:handler",
+                    "targetId": "pyright:symbol:service",
+                    "type": "CALLS",
+                    "confidence": 1.0,
+                    "reason": "pyright call hierarchy",
+                    "evidence": {"rule": "callHierarchy"}
+                }],
+                "chunks": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let provider = FactsFileProvider::new(Some(facts_path));
+
+        let outcome = run_optional_enrichment_with_providers(
+            &repo,
+            &paths,
+            OssAnalyzerEnrichmentPolicy {
+                enabled: true,
+                max_duration: Duration::from_secs(5),
+            },
+            &[&provider],
+            &mut |_| {},
+        );
+
+        let OptionalEnrichmentOutcome::Merged {
+            summary,
+            attempted,
+            failed,
+        } = outcome
+        else {
+            panic!("expected stamped facts file merge, got {outcome:?}");
+        };
+        assert_eq!(attempted, 1);
+        assert_eq!(failed, 0);
+        assert_eq!(summary.new_nodes, 1);
+        assert_eq!(summary.new_edges, 1);
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        let node = graph.node_by_id("pyright:symbol:service").unwrap().unwrap();
+        assert_eq!(
+            node.props
+                .get("provenance")
+                .and_then(|value| value.get("analyzerId")),
+            Some(&serde_json::json!("pyright"))
+        );
+        assert_eq!(graph.edge_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn facts_file_provider_rejects_non_allowlisted_top_level_analyzer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 0,
+                chunks: 0,
+            },
+            vec![NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({"name": "handler"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        index_facts(&baseline, &paths).unwrap();
+        let facts_path = repo.join("oss-analyzer-facts.json");
+        std::fs::write(
+            &facts_path,
+            serde_json::json!({
+                "analyzer": {
+                    "analyzerId": "custom-rust-heuristic",
+                    "toolVersion": "1.0"
+                },
+                "stats": {"files": 0, "nodes": 1, "edges": 0, "chunks": 0},
+                "nodes": [{
+                    "id": "custom:symbol:service",
+                    "label": "Function",
+                    "properties": {"name": "service"}
+                }],
+                "edges": [],
+                "chunks": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let provider = FactsFileProvider::new(Some(facts_path));
+        let events = RefCell::new(Vec::new());
+
+        let outcome = run_optional_enrichment_with_providers(
+            &repo,
+            &paths,
+            OssAnalyzerEnrichmentPolicy {
+                enabled: true,
+                max_duration: Duration::from_secs(5),
+            },
+            &[&provider],
+            &mut |event| events.borrow_mut().push(event.clone()),
+        );
+
+        assert!(matches!(
+            outcome,
+            OptionalEnrichmentOutcome::Skipped {
+                attempted: 1,
+                failed: 1
+            }
+        ));
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        assert_eq!(graph.node_count().unwrap(), 1);
+        assert!(events.borrow().iter().any(|event| matches!(
+            event,
+            EngineEvent::Log { stream, line }
+                if stream == "oss-analyzer-enrichment"
+                    && line.contains("provider=aka-facts-file failed")
+                    && line.contains("unsupported enrichment analyzer")
+        )));
+    }
+
     struct UnsupportedProvider;
 
     impl OptionalEnrichmentProvider for UnsupportedProvider {
@@ -1025,5 +1216,77 @@ mod tests {
                 .and_then(|value| value.get("toolVersion")),
             Some(&serde_json::json!("0.3.0"))
         );
+    }
+
+    #[cfg(feature = "scip-import")]
+    #[test]
+    fn scip_provider_timeout_is_reported_as_skipped_outcome() {
+        use protobuf::Message;
+        use scip::types::{Index, Metadata, ToolInfo};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 0,
+                chunks: 0,
+            },
+            vec![NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({"name": "handler"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        index_facts(&baseline, &paths).unwrap();
+
+        let mut index = Index::new();
+        let mut metadata = Metadata::new();
+        let mut tool_info = ToolInfo::new();
+        tool_info.name = "scip-java".into();
+        tool_info.version = "0.3.0".into();
+        metadata.tool_info = Some(tool_info).into();
+        index.metadata = Some(metadata).into();
+        std::fs::write(repo.join("index.scip"), index.write_to_bytes().unwrap()).unwrap();
+        let provider = ScipIndexProvider::new(None, Duration::from_secs(0));
+        let events = RefCell::new(Vec::new());
+
+        let outcome = run_optional_enrichment_with_providers(
+            &repo,
+            &paths,
+            OssAnalyzerEnrichmentPolicy {
+                enabled: true,
+                max_duration: Duration::from_secs(0),
+            },
+            &[&provider],
+            &mut |event| events.borrow_mut().push(event.clone()),
+        );
+
+        assert!(matches!(
+            outcome,
+            OptionalEnrichmentOutcome::Skipped {
+                attempted: 0,
+                failed: 1
+            }
+        ));
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        assert_eq!(graph.node_count().unwrap(), 1);
+        assert!(events.borrow().iter().any(|event| matches!(
+            event,
+            EngineEvent::Log { stream, line }
+                if stream == "oss-analyzer-enrichment"
+                    && line.contains("reason=timeout")
+        )));
     }
 }
