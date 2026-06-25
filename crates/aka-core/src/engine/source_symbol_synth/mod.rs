@@ -9,7 +9,13 @@ mod python;
 use java::java_source_symbols;
 use python::python_source_symbols;
 
-use super::{read_repo_text, stable_hash, NodeRec, ProjectSourceSet, SynthNode};
+use super::{read_repo_text, stable_hash, IndexingDeadline, NodeRec, ProjectSourceSet, SynthNode};
+
+struct SourceSymbolLanguage {
+    extensions: &'static [&'static str],
+    strategy: &'static str,
+    synthesize: fn(&str, &str) -> Vec<SynthNode>,
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct SynthSourceSymbol {
@@ -74,31 +80,34 @@ impl SynthSourceSymbol {
     }
 }
 
-pub(super) fn synthesize_source_symbols_from_sources(
+pub(super) fn synthesize_source_symbols_from_sources_with_deadline(
     repo: &Path,
     existing: &BTreeMap<String, SynthNode>,
+    deadline: Option<IndexingDeadline>,
 ) -> Vec<SynthSourceSymbol> {
-    let project_sources = ProjectSourceSet::discover(repo);
+    let project_sources = ProjectSourceSet::discover_with_deadline(repo, deadline);
     let mut existing_keys = existing_symbol_keys(existing);
     let mut out = Vec::new();
-    for (extensions, strategy, synthesize) in [
-        (
-            &["java"][..],
-            "java-source-symbol-fallback",
-            java_source_symbols as fn(&str, &str) -> Vec<SynthNode>,
-        ),
-        (
-            &["py"][..],
-            "python-source-symbol-fallback",
-            python_source_symbols as fn(&str, &str) -> Vec<SynthNode>,
-        ),
+    for language in [
+        SourceSymbolLanguage {
+            extensions: &["java"],
+            strategy: "java-source-symbol-fallback",
+            synthesize: java_source_symbols,
+        },
+        SourceSymbolLanguage {
+            extensions: &["py"],
+            strategy: "python-source-symbol-fallback",
+            synthesize: python_source_symbols,
+        },
     ] {
+        if deadline.is_some_and(|deadline| deadline.is_expired()) {
+            break;
+        }
         synthesize_source_symbols_for_language(
             repo,
             &project_sources,
-            extensions,
-            strategy,
-            synthesize,
+            &language,
+            deadline,
             &mut existing_keys,
             &mut out,
         );
@@ -116,20 +125,25 @@ pub(super) fn synthesize_source_symbols_from_sources(
 fn synthesize_source_symbols_for_language(
     repo: &Path,
     project_sources: &ProjectSourceSet,
-    extensions: &[&str],
-    strategy: &'static str,
-    synthesize: fn(&str, &str) -> Vec<SynthNode>,
+    language: &SourceSymbolLanguage,
+    deadline: Option<IndexingDeadline>,
     existing_keys: &mut BTreeSet<String>,
     out: &mut Vec<SynthSourceSymbol>,
 ) {
-    for file_path in project_sources.project_files_with_extensions(repo, extensions) {
+    for file_path in project_sources.project_files_with_extensions(repo, language.extensions) {
+        if deadline.is_some_and(|deadline| deadline.is_expired()) {
+            return;
+        }
         let Some(text) = read_repo_text(repo, file_path) else {
             continue;
         };
-        for node in synthesize(file_path, &text) {
+        for node in (language.synthesize)(file_path, &text) {
             let key = symbol_key(&node);
             if existing_keys.insert(key) {
-                out.push(SynthSourceSymbol { node, strategy });
+                out.push(SynthSourceSymbol {
+                    node,
+                    strategy: language.strategy,
+                });
             }
         }
     }

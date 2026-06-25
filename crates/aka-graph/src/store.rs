@@ -206,6 +206,15 @@ impl GraphStore {
         nodes: impl Iterator<Item = NodeRec>,
         edges: impl Iterator<Item = EdgeRec>,
     ) -> Result<IngestStats> {
+        self.ingest_with_cancel(nodes, edges, || false)
+    }
+
+    pub fn ingest_with_cancel(
+        &mut self,
+        nodes: impl Iterator<Item = NodeRec>,
+        edges: impl Iterator<Item = EdgeRec>,
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Result<IngestStats> {
         let mut stats = IngestStats::default();
         let tx = self.conn.transaction()?;
         // 本批次 id -> rowid 映射；增量摄取时旧节点查库回填。
@@ -218,6 +227,9 @@ impl GraphStore {
             let mut sel_node = tx.prepare_cached("SELECT rowid FROM nodes WHERE id = ?1")?;
 
             for n in nodes {
+                if is_cancelled() {
+                    return Err(GraphError::Cancelled("graph node ingest".into()));
+                }
                 let props = serde_json::to_string(&n.properties)?;
                 let changed = ins_node.execute(params![
                     n.id,
@@ -278,6 +290,9 @@ impl GraphStore {
             };
 
             for e in edges {
+                if is_cancelled() {
+                    return Err(GraphError::Cancelled("graph edge ingest".into()));
+                }
                 let src = resolve(&e.source_id, &mut id_map)?;
                 let dst = resolve(&e.target_id, &mut id_map)?;
                 let (Some(src), Some(dst)) = (src, dst) else {

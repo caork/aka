@@ -372,7 +372,7 @@ def get_order():
     );
     let mut events = Vec::new();
 
-    enrich_direct_fact_batch(&repo, &mut batch, &mut |event| {
+    enrich_direct_fact_batch(&repo, &mut batch, None, &mut |event| {
         if let EngineEvent::Phase { phase, .. } = event {
             events.push(phase.clone());
         }

@@ -27,7 +27,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::rename;
 use aka_core::{
     aka_home, clamp_render_nodes, load_index_state, repo_dir_name, user_facing_path, EngineEvent,
-    FactStats, IndexState, Registry, RepoEntry, RepoPaths, DEFAULT_RENDER_MAX_NODES,
+    FactStats, IndexState, PipelineProgress, PipelineStage, Registry, RepoEntry, RepoPaths,
+    DEFAULT_RENDER_MAX_NODES,
 };
 use aka_graph::{Adjacency, GraphStore, NodeRow};
 use aka_mcp::{
@@ -490,6 +491,9 @@ impl JobInfo {
                     self.push_log(format!("engine: {phase}"));
                 }
             }
+            EngineEvent::Progress { progress } => {
+                self.apply_pipeline_progress(progress);
+            }
             EngineEvent::Warning { message } => {
                 self.push_log(format!("warning: {message}"));
             }
@@ -506,6 +510,37 @@ impl JobInfo {
                     stats.files, stats.nodes, stats.edges, stats.chunks
                 ));
             }
+        }
+    }
+
+    fn apply_pipeline_progress(&mut self, progress: &PipelineProgress) {
+        let stage = progress.stage.as_str();
+        self.progress.stage = stage.to_string();
+        self.progress.message = progress.message.clone();
+        self.progress.current =
+            (progress.total > 0 || progress.current > 0).then_some(progress.current);
+        self.progress.total = (progress.total > 0).then_some(progress.total);
+        self.progress.percent =
+            structured_percent(&progress.stage, progress.current, progress.total)
+                .max(self.progress.percent)
+                .min(if progress.stage == PipelineStage::Done {
+                    100.0
+                } else {
+                    99.0
+                });
+        if progress.files > 0 || progress.nodes > 0 || progress.edges > 0 || progress.chunks > 0 {
+            self.progress.files = progress.files;
+            self.progress.nodes = progress.nodes;
+            self.progress.edges = progress.edges;
+            self.progress.chunks = progress.chunks;
+        }
+        if progress.total > 0 {
+            self.push_log(format!(
+                "{stage}: {} ({}/{})",
+                progress.message, progress.current, progress.total
+            ));
+        } else {
+            self.push_log(format!("{stage}: {}", progress.message));
         }
     }
 
@@ -616,6 +651,44 @@ fn engine_percent(phase: &str, current: u64, total: u64) -> f32 {
         70.0
     } else {
         34.0
+    }
+}
+
+fn structured_percent(stage: &PipelineStage, current: u64, total: u64) -> f32 {
+    match stage {
+        PipelineStage::Prepare => 4.0,
+        PipelineStage::EngineDiscover => progress_between(current, total, 8.0, 18.0),
+        PipelineStage::EngineParse => progress_between(current, total, 18.0, 70.0),
+        PipelineStage::EngineEmit => progress_between(current, total, 70.0, 78.0),
+        PipelineStage::FactsNormalize => progress_between(current, total, 78.0, 80.0),
+        PipelineStage::EnrichmentNodes => 80.0,
+        PipelineStage::EnrichmentDependencyEdges => progress_between(current, total, 80.0, 86.0),
+        PipelineStage::EnrichmentProjectGraph
+        | PipelineStage::EnrichmentCommunities
+        | PipelineStage::EnrichmentProcesses => 87.0,
+        PipelineStage::EnrichmentRoutes => progress_between(current, total, 87.0, 89.0),
+        PipelineStage::EnrichmentTools
+        | PipelineStage::EnrichmentCommands
+        | PipelineStage::EnrichmentPersistence
+        | PipelineStage::EnrichmentConfigs
+        | PipelineStage::EnrichmentJobs
+        | PipelineStage::EnrichmentTopics
+        | PipelineStage::EnrichmentCaches
+        | PipelineStage::EnrichmentEvents
+        | PipelineStage::EnrichmentPolicies
+        | PipelineStage::EnrichmentResources
+        | PipelineStage::EnrichmentGraphql
+        | PipelineStage::EnrichmentTransactions => 90.0,
+        PipelineStage::GraphNodes => progress_between(current, total, 90.0, 92.0),
+        PipelineStage::GraphEdges => progress_between(current, total, 92.0, 94.0),
+        PipelineStage::GraphLayout => 95.0,
+        PipelineStage::SearchNodes => progress_between(current, total, 95.0, 96.0),
+        PipelineStage::SearchChunks => progress_between(current, total, 96.0, 97.5),
+        PipelineStage::SearchCommit => 98.0,
+        PipelineStage::ParseCache => 98.5,
+        PipelineStage::Register => 99.0,
+        PipelineStage::Done => 100.0,
+        PipelineStage::Timeout => 99.0,
     }
 }
 
@@ -2075,8 +2148,13 @@ impl AkaBackend {
                     if let Some(job) = jobs.lock().expect("jobs lock").get_mut(&name) {
                         job.status = "failed".into();
                         job.detail = Some(detail.clone());
-                        job.progress.stage = "failed".into();
-                        job.progress.message = "Indexing failed".into();
+                        if detail.contains("indexing timed out") {
+                            job.progress.stage = "timeout".into();
+                            job.progress.message = "Indexing timed out".into();
+                        } else {
+                            job.progress.stage = "failed".into();
+                            job.progress.message = "Indexing failed".into();
+                        }
                         job.push_log(format!("failed: {detail}"));
                     }
                     emit_job_event(

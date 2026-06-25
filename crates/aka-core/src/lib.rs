@@ -14,7 +14,9 @@ pub use aka_facts::{
     SemanticFactProducer, SemanticFactSink, SymbolFact, SymbolId, SymbolKind, TextRange,
     FACTS_VERSION,
 };
-pub use engine::{AnalyzeFactsOptions, EngineError, EngineRunner};
+pub use engine::{
+    index_max_duration, AnalyzeFactsOptions, EngineError, EngineRunner, IndexingDeadline,
+};
 pub use incremental::{
     build_parse_cache_manifest_from_facts, load_index_state, load_parse_cache_manifest,
     save_index_state, save_parse_cache_manifest, FileFactStats, FileFingerprint, IndexDelta,

@@ -12,6 +12,8 @@ pub enum GraphError {
     Json(#[from] serde_json::Error),
     #[error("invalid state: {0}")]
     Invalid(String),
+    #[error("operation cancelled: {0}")]
+    Cancelled(String),
 }
 
 pub type Result<T> = std::result::Result<T, GraphError>;

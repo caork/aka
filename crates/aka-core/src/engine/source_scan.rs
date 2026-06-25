@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command as GitCommand;
+use std::process::Stdio;
+use std::time::Duration;
 
 use super::build_config_scan::discover_project_test_roots;
+use super::IndexingDeadline;
 use super::SynthNode;
 
 pub(super) const JVM_SOURCE_EXTENSIONS: &[&str] = &["java", "kt", "kts", "scala", "groovy"];
@@ -21,7 +24,11 @@ pub(super) struct ProjectSourceSet {
 
 impl ProjectSourceSet {
     pub(super) fn discover(repo: &Path) -> Self {
-        let git_files = git_project_files(repo);
+        Self::discover_with_deadline(repo, None)
+    }
+
+    pub(super) fn discover_with_deadline(repo: &Path, deadline: Option<IndexingDeadline>) -> Self {
+        let git_files = git_project_files(repo, deadline);
         let has_git_listing = git_files.is_some();
         let (files, tracked_files, untracked_files) = if let Some(git_files) = git_files {
             let files = git_files
@@ -30,8 +37,14 @@ impl ProjectSourceSet {
                 .cloned()
                 .collect();
             (files, git_files.tracked, git_files.untracked)
+        } else if deadline_expired(deadline) {
+            (BTreeSet::new(), BTreeSet::new(), BTreeSet::new())
         } else {
-            (discover_repo_files(repo), BTreeSet::new(), BTreeSet::new())
+            (
+                discover_repo_files_with_deadline(repo, deadline),
+                BTreeSet::new(),
+                BTreeSet::new(),
+            )
         };
         let test_roots = discover_project_test_roots(repo, &files);
         Self {
@@ -125,29 +138,70 @@ struct GitProjectFiles {
     untracked: BTreeSet<String>,
 }
 
-fn git_project_files(repo: &Path) -> Option<GitProjectFiles> {
+fn git_project_files(repo: &Path, deadline: Option<IndexingDeadline>) -> Option<GitProjectFiles> {
     Some(GitProjectFiles {
-        tracked: git_ls_files(repo, &["--cached"])?,
-        untracked: git_ls_files(repo, &["--others", "--exclude-standard"])?,
+        tracked: git_ls_files(repo, &["--cached"], deadline)?,
+        untracked: git_ls_files(repo, &["--others", "--exclude-standard"], deadline)?,
     })
 }
 
-fn git_ls_files(repo: &Path, args: &[&str]) -> Option<BTreeSet<String>> {
-    let Ok(output) = GitCommand::new("git")
+fn git_ls_files(
+    repo: &Path,
+    args: &[&str],
+    deadline: Option<IndexingDeadline>,
+) -> Option<BTreeSet<String>> {
+    if deadline_expired(deadline) {
+        return None;
+    }
+    if deadline.is_none() {
+        let Ok(output) = GitCommand::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("ls-files")
+            .arg("-z")
+            .args(args)
+            .output()
+        else {
+            return None;
+        };
+        return git_ls_files_output(output.status.success(), &output.stdout);
+    }
+
+    let Ok(mut child) = GitCommand::new("git")
         .arg("-C")
         .arg(repo)
         .arg("ls-files")
         .arg("-z")
         .args(args)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
     else {
         return None;
     };
-    if !output.status.success() {
+    loop {
+        if deadline_expired(deadline) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child.wait_with_output().ok()?;
+                return git_ls_files_output(output.status.success(), &output.stdout);
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => return None,
+        }
+    }
+}
+
+fn git_ls_files_output(success: bool, stdout: &[u8]) -> Option<BTreeSet<String>> {
+    if !success {
         return None;
     }
     Some(
-        String::from_utf8_lossy(&output.stdout)
+        String::from_utf8_lossy(stdout)
             .split('\0')
             .map(normalize_repo_path)
             .filter(|path| !path.is_empty())
@@ -155,17 +209,31 @@ fn git_ls_files(repo: &Path, args: &[&str]) -> Option<BTreeSet<String>> {
     )
 }
 
-fn discover_repo_files(repo: &Path) -> BTreeSet<String> {
+fn discover_repo_files_with_deadline(
+    repo: &Path,
+    deadline: Option<IndexingDeadline>,
+) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    collect_repo_files(repo, repo, &mut out);
+    collect_repo_files(repo, repo, &mut out, deadline);
     out
 }
 
-fn collect_repo_files(repo: &Path, dir: &Path, out: &mut BTreeSet<String>) {
+fn collect_repo_files(
+    repo: &Path,
+    dir: &Path,
+    out: &mut BTreeSet<String>,
+    deadline: Option<IndexingDeadline>,
+) {
+    if deadline_expired(deadline) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
+        if deadline_expired(deadline) {
+            return;
+        }
         let path = entry.path();
         let rel = path
             .strip_prefix(repo)
@@ -182,11 +250,15 @@ fn collect_repo_files(repo: &Path, dir: &Path, out: &mut BTreeSet<String>) {
             continue;
         };
         if file_type.is_dir() {
-            collect_repo_files(repo, &path, out);
+            collect_repo_files(repo, &path, out, deadline);
         } else if file_type.is_file() {
             out.insert(rel);
         }
     }
+}
+
+fn deadline_expired(deadline: Option<IndexingDeadline>) -> bool {
+    deadline.is_some_and(|deadline| deadline.is_expired())
 }
 
 fn path_is_within_dir(path: &str, dir: &str) -> bool {

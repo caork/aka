@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use super::{
-    project_code_nodes_by_file, read_repo_text, stable_hash, EdgeRec, ProjectSourceSet, SynthNode,
+    project_code_nodes_by_file, read_repo_text, stable_hash, EdgeRec, IndexingDeadline,
+    ProjectSourceSet, SynthNode,
 };
 
 mod java;
@@ -103,13 +104,14 @@ pub(super) enum DependencyProgressPhase {
     },
 }
 
-pub(super) fn synthesize_dependency_edges_from_sources(
+pub(super) fn synthesize_dependency_edges_from_sources_with_deadline(
     repo: &Path,
     nodes: &BTreeMap<String, SynthNode>,
     existing_call_pairs: &HashSet<(String, String)>,
+    deadline: Option<IndexingDeadline>,
     mut on_progress: impl FnMut(DependencyProgress),
 ) -> Vec<EdgeRec> {
-    let project_sources = ProjectSourceSet::discover(repo);
+    let project_sources = ProjectSourceSet::discover_with_deadline(repo, deadline);
     let by_file = project_code_nodes_by_file(repo, nodes, &project_sources);
     let total = by_file.len() as u64;
     let lookup = NodeLookup::new(by_file.values().flatten().copied());
@@ -121,6 +123,9 @@ pub(super) fn synthesize_dependency_edges_from_sources(
         phase: DependencyProgressPhase::Start,
     });
     for (file_index, (file_path, file_nodes)) in by_file.into_iter().enumerate() {
+        if deadline.is_some_and(|deadline| deadline.is_expired()) {
+            break;
+        }
         let processed = file_index as u64 + 1;
         let file_start = Instant::now();
         on_progress(DependencyProgress {

@@ -224,7 +224,18 @@ impl SearchIndexWriter {
     ///
     /// 写入后需调用 [`commit`](Self::commit) 才对检索可见。
     pub fn add_nodes(&mut self, nodes: impl Iterator<Item = NodeRec>) -> Result<()> {
+        self.add_nodes_with_cancel(nodes, || false)
+    }
+
+    pub fn add_nodes_with_cancel(
+        &mut self,
+        nodes: impl Iterator<Item = NodeRec>,
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Result<()> {
         for node in nodes {
+            if is_cancelled() {
+                return Err(crate::SearchError::Cancelled("search node add".into()));
+            }
             let mut doc = TantivyDocument::new();
             doc.add_text(self.fields.node_id, &node.id);
             if let Some(name) = node.name() {
@@ -268,7 +279,18 @@ impl SearchIndexWriter {
     ///
     /// 写入后需调用 [`commit`](Self::commit) 才对检索可见。
     pub fn add_chunks(&mut self, chunks: impl Iterator<Item = ChunkRec>) -> Result<()> {
+        self.add_chunks_with_cancel(chunks, || false)
+    }
+
+    pub fn add_chunks_with_cancel(
+        &mut self,
+        chunks: impl Iterator<Item = ChunkRec>,
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Result<()> {
         for chunk in chunks {
+            if is_cancelled() {
+                return Err(crate::SearchError::Cancelled("search chunk add".into()));
+            }
             let mut doc = TantivyDocument::new();
             doc.add_text(self.fields.node_id, &chunk.node_id);
             doc.add_text(

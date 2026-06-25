@@ -5,7 +5,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use aka_core::{ChunkRec, EdgeRec, FactSource, IndexDelta, IndexState, NodeRec, RepoPaths};
+use aka_core::{
+    ChunkRec, EdgeRec, FactSource, IndexDelta, IndexState, IndexingDeadline, NodeRec, RepoPaths,
+};
 use aka_graph::{compute_layout, Adjacency, GraphStore};
 use aka_search::SearchIndexWriter;
 
@@ -62,6 +64,24 @@ pub fn index_facts(source: &impl FactSource, paths: &RepoPaths) -> Result<IndexS
 pub fn index_facts_with_progress(
     source: &impl FactSource,
     paths: &RepoPaths,
+    progress: Option<&mut IndexProgress<'_>>,
+) -> Result<IndexSummary> {
+    index_facts_inner(source, paths, None, progress)
+}
+
+pub fn index_facts_with_deadline_progress(
+    source: &impl FactSource,
+    paths: &RepoPaths,
+    deadline: IndexingDeadline,
+    progress: Option<&mut IndexProgress<'_>>,
+) -> Result<IndexSummary> {
+    index_facts_inner(source, paths, Some(deadline), progress)
+}
+
+fn index_facts_inner(
+    source: &impl FactSource,
+    paths: &RepoPaths,
+    deadline: Option<IndexingDeadline>,
     mut progress: Option<&mut IndexProgress<'_>>,
 ) -> Result<IndexSummary> {
     let mut bad_lines = 0u64;
@@ -95,7 +115,13 @@ pub fn index_facts_with_progress(
         }
     });
     // 借用检查：nodes/edges 两个迭代器都要捕获 bad_lines，分两次摄取。
-    store.ingest(nodes, std::iter::empty())?;
+    if let Some(deadline) = deadline {
+        deadline.check("graph:nodes")?;
+    }
+    store.ingest_with_cancel(nodes, std::iter::empty(), || {
+        deadline.is_some_and(|deadline| deadline.is_expired())
+    })?;
+    check_deadline(deadline, "graph:nodes")?;
     emit_index_progress(
         progress.as_deref_mut(),
         "graph:nodes",
@@ -119,7 +145,13 @@ pub fn index_facts_with_progress(
             None
         }
     });
-    let stats_edges = store.ingest(std::iter::empty(), edges)?;
+    if let Some(deadline) = deadline {
+        deadline.check("graph:edges")?;
+    }
+    let stats_edges = store.ingest_with_cancel(std::iter::empty(), edges, || {
+        deadline.is_some_and(|deadline| deadline.is_expired())
+    })?;
+    check_deadline(deadline, "graph:edges")?;
     bad_lines += bad_edge_lines;
     emit_index_progress(
         progress.as_deref_mut(),
@@ -140,7 +172,13 @@ pub fn index_facts_with_progress(
         None,
         None,
     );
+    if let Some(deadline) = deadline {
+        deadline.check("graph:layout")?;
+    }
     let adj = Adjacency::build(&store)?;
+    if let Some(deadline) = deadline {
+        deadline.check("graph:layout")?;
+    }
     compute_layout(&store, &adj)?;
     emit_index_progress(
         progress.as_deref_mut(),
@@ -175,7 +213,13 @@ pub fn index_facts_with_progress(
             Some(0),
             Some(stats.nodes),
         );
-        search.add_nodes(source.nodes()?.filter_map(|r| r.ok()))?;
+        if let Some(deadline) = deadline {
+            deadline.check("search:nodes")?;
+        }
+        search.add_nodes_with_cancel(source.nodes()?.filter_map(|r| r.ok()), || {
+            deadline.is_some_and(|deadline| deadline.is_expired())
+        })?;
+        check_deadline(deadline, "search:nodes")?;
         emit_index_progress(
             progress.as_deref_mut(),
             "search:nodes",
@@ -192,7 +236,14 @@ pub fn index_facts_with_progress(
                 Some(0),
                 Some(stats.chunks),
             );
-            search.add_chunks(chunks.filter_map(|r| r.ok()).inspect(|_| chunk_count += 1))?;
+            if let Some(deadline) = deadline {
+                deadline.check("search:chunks")?;
+            }
+            search.add_chunks_with_cancel(
+                chunks.filter_map(|r| r.ok()).inspect(|_| chunk_count += 1),
+                || deadline.is_some_and(|deadline| deadline.is_expired()),
+            )?;
+            check_deadline(deadline, "search:chunks")?;
             emit_index_progress(
                 progress.as_deref_mut(),
                 "search:chunks",
@@ -216,6 +267,9 @@ pub fn index_facts_with_progress(
             None,
             None,
         );
+        if let Some(deadline) = deadline {
+            deadline.check("search:commit")?;
+        }
         search.commit()?;
         emit_index_progress(
             progress,
@@ -260,6 +314,46 @@ pub fn index_facts_incremental_with_progress(
     delta: &IndexDelta,
     previous_state: &IndexState,
     current_state: &IndexState,
+    progress: Option<&mut IndexProgress<'_>>,
+) -> Result<IncrementalIndexOutcome> {
+    index_facts_incremental_inner(
+        source,
+        paths,
+        delta,
+        previous_state,
+        current_state,
+        None,
+        progress,
+    )
+}
+
+pub fn index_facts_incremental_with_deadline_progress(
+    source: &impl FactSource,
+    paths: &RepoPaths,
+    delta: &IndexDelta,
+    previous_state: &IndexState,
+    current_state: &IndexState,
+    deadline: IndexingDeadline,
+    progress: Option<&mut IndexProgress<'_>>,
+) -> Result<IncrementalIndexOutcome> {
+    index_facts_incremental_inner(
+        source,
+        paths,
+        delta,
+        previous_state,
+        current_state,
+        Some(deadline),
+        progress,
+    )
+}
+
+fn index_facts_incremental_inner(
+    source: &impl FactSource,
+    paths: &RepoPaths,
+    delta: &IndexDelta,
+    previous_state: &IndexState,
+    current_state: &IndexState,
+    deadline: Option<IndexingDeadline>,
     mut progress: Option<&mut IndexProgress<'_>>,
 ) -> Result<IncrementalIndexOutcome> {
     if let Some(reason) = incremental_preflight(paths, delta, previous_state, current_state) {
@@ -334,10 +428,19 @@ pub fn index_facts_incremental_with_progress(
         Some(slice.changed_paths.len() as u64),
     );
     for file_path in &slice.changed_paths {
+        check_deadline(deadline, "incremental:graph")?;
         store.delete_file(file_path)?;
     }
-    let stats_nodes = store.ingest(slice.nodes.clone().into_iter(), std::iter::empty())?;
-    let stats_edges = store.ingest(std::iter::empty(), slice.edges.into_iter())?;
+    let stats_nodes =
+        store.ingest_with_cancel(slice.nodes.clone().into_iter(), std::iter::empty(), || {
+            deadline_expired(deadline)
+        })?;
+    check_deadline(deadline, "incremental:graph")?;
+    let stats_edges =
+        store.ingest_with_cancel(std::iter::empty(), slice.edges.into_iter(), || {
+            deadline_expired(deadline)
+        })?;
+    check_deadline(deadline, "incremental:graph")?;
     emit_index_progress(
         progress.as_deref_mut(),
         "incremental:layout",
@@ -345,6 +448,9 @@ pub fn index_facts_incremental_with_progress(
         None,
         None,
     );
+    if let Some(deadline) = deadline {
+        deadline.check("incremental:layout")?;
+    }
     let adj = Adjacency::build(&store)?;
     compute_layout(&store, &adj)?;
 
@@ -359,14 +465,19 @@ pub fn index_facts_incremental_with_progress(
         Some(slice.changed_paths.len() as u64),
     );
     for file_path in &slice.changed_paths {
+        if let Some(deadline) = deadline {
+            deadline.check("incremental:search")?;
+        }
         if !search.delete_file(file_path)? {
             return Ok(IncrementalIndexOutcome::FullRebuildRequired(
                 "search index schema lacks exact path field".into(),
             ));
         }
     }
-    search.add_nodes(slice.nodes.into_iter())?;
-    search.add_chunks(slice.chunks.into_iter())?;
+    search.add_nodes_with_cancel(slice.nodes.into_iter(), || deadline_expired(deadline))?;
+    check_deadline(deadline, "incremental:search")?;
+    search.add_chunks_with_cancel(slice.chunks.into_iter(), || deadline_expired(deadline))?;
+    check_deadline(deadline, "incremental:search")?;
     emit_index_progress(
         progress.as_deref_mut(),
         "incremental:commit",
@@ -374,6 +485,9 @@ pub fn index_facts_incremental_with_progress(
         None,
         None,
     );
+    if let Some(deadline) = deadline {
+        deadline.check("incremental:commit")?;
+    }
     search.commit()?;
     emit_index_progress(
         progress,
@@ -394,6 +508,17 @@ pub fn index_facts_incremental_with_progress(
         bad_lines: slice.bad_lines,
         incremental: true,
     }))
+}
+
+fn deadline_expired(deadline: Option<IndexingDeadline>) -> bool {
+    deadline.is_some_and(|deadline| deadline.is_expired())
+}
+
+fn check_deadline(deadline: Option<IndexingDeadline>, stage: &'static str) -> Result<()> {
+    if let Some(deadline) = deadline {
+        deadline.check(stage)?;
+    }
+    Ok(())
 }
 
 fn emit_index_progress(

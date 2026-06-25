@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::types::{ChunkRec, EdgeRec, EngineEvent, NodeRec};
 
-use super::emit_phase;
+use super::{emit_phase, EngineError, IndexingDeadline};
 
 pub(super) enum ProducedEngineFacts {
     DirectFacts,
@@ -20,25 +20,34 @@ pub(super) enum ProducedEngineFacts {
 pub(super) struct EngineFactOptions<'a> {
     pub(super) cache_dir: Option<&'a Path>,
     pub(super) no_chunks: bool,
+    pub(super) deadline: Option<super::IndexingDeadline>,
 }
 
 pub(super) fn normalize_engine_facts(
     batch: &mut FactBatch,
     repo: &Path,
     no_chunks: bool,
+    deadline: Option<IndexingDeadline>,
     on_event: &mut dyn FnMut(&EngineEvent),
-) {
-    for node in &mut batch.nodes {
+) -> Result<(), EngineError> {
+    for (idx, node) in batch.nodes.iter_mut().enumerate() {
+        if idx.is_multiple_of(4096) {
+            check_deadline(deadline, "facts:normalize:nodes")?;
+        }
         normalize_engine_node_fact(node);
     }
-    for edge in &mut batch.edges {
+    for (idx, edge) in batch.edges.iter_mut().enumerate() {
+        if idx.is_multiple_of(4096) {
+            check_deadline(deadline, "facts:normalize:edges")?;
+        }
         normalize_engine_edge_fact(edge);
     }
     if no_chunks {
         batch.chunks.clear();
     } else if batch.chunks.is_empty() {
-        batch.chunks = synthesize_chunks_from_node_facts(repo, &batch.nodes, on_event);
+        batch.chunks = synthesize_chunks_from_node_facts(repo, &batch.nodes, deadline, on_event)?;
     }
+    check_deadline(deadline, "facts:normalize:stats")?;
     batch.stats.files = batch
         .nodes
         .iter()
@@ -47,13 +56,15 @@ pub(super) fn normalize_engine_facts(
     batch.stats.nodes = batch.nodes.len() as u64;
     batch.stats.edges = batch.edges.len() as u64;
     batch.stats.chunks = batch.chunks.len() as u64;
+    Ok(())
 }
 
 fn synthesize_chunks_from_node_facts(
     repo: &Path,
     nodes: &[NodeRec],
+    deadline: Option<IndexingDeadline>,
     on_event: &mut dyn FnMut(&EngineEvent),
-) -> Vec<ChunkRec> {
+) -> Result<Vec<ChunkRec>, EngineError> {
     let candidates: Vec<_> = nodes
         .iter()
         .filter(|node| {
@@ -70,6 +81,9 @@ fn synthesize_chunks_from_node_facts(
     let mut chunks = Vec::with_capacity(candidates.len());
     let mut count = 0u64;
     for node in candidates {
+        if count.is_multiple_of(1024) {
+            check_deadline(deadline, "facts:chunks-from-facts")?;
+        }
         let Some(file_path) = node.file_path() else {
             continue;
         };
@@ -99,7 +113,17 @@ fn synthesize_chunks_from_node_facts(
             );
         }
     }
-    chunks
+    Ok(chunks)
+}
+
+fn check_deadline(
+    deadline: Option<IndexingDeadline>,
+    stage: &'static str,
+) -> Result<(), EngineError> {
+    if let Some(deadline) = deadline {
+        deadline.check(stage)?;
+    }
+    Ok(())
 }
 
 fn normalize_engine_edge_fact(edge: &mut EdgeRec) {
@@ -280,11 +304,12 @@ mod tests {
             Vec::new(),
         );
 
-        normalize_engine_facts(&mut batch, &repo, false, &mut |event| {
+        normalize_engine_facts(&mut batch, &repo, false, None, &mut |event| {
             if let EngineEvent::Phase { phase, .. } = event {
                 events.push(phase.clone());
             }
-        });
+        })
+        .unwrap();
 
         assert_eq!(batch.stats.files, 1);
         assert_eq!(batch.stats.nodes, 2);
@@ -326,7 +351,7 @@ mod tests {
             }],
         );
 
-        normalize_engine_facts(&mut batch, &dir, true, &mut |_| {});
+        normalize_engine_facts(&mut batch, &dir, true, None, &mut |_| {}).unwrap();
         assert_eq!(batch.stats.files, 1);
         assert_eq!(batch.stats.nodes, 1);
         assert_eq!(batch.stats.edges, 0);

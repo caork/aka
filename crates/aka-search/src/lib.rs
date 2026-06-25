@@ -65,6 +65,9 @@ pub enum SearchError {
     /// 路径包含非 UTF-8 字符（usearch FFI 只接受 &str 路径）。
     #[error("non-utf8 path: {0}")]
     InvalidPath(PathBuf),
+    /// Long-running write operation was cancelled by the runtime deadline.
+    #[error("operation cancelled: {0}")]
+    Cancelled(String),
 }
 
 /// aka-search 统一 Result 别名。

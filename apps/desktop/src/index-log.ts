@@ -2,7 +2,7 @@ import type { Repo } from "./store";
 
 export const INDEX_PHASES = [
   { key: "queued", label: "Queued" },
-  { key: "engine", label: "Parse" },
+  { key: "engine", label: "Engine" },
   { key: "facts", label: "Facts" },
   { key: "index", label: "Index" },
   { key: "register", label: "Register" },
@@ -54,7 +54,9 @@ export function compactIndexStatus(repo: Repo): string {
 export function indexPhaseLabel(stage: string | null | undefined): string {
   const normalized = (stage ?? "").toLowerCase();
   if (normalized === "done") return "Ready";
+  if (normalized === "timeout") return "Timeout";
   if (normalized === "failed") return "Failed";
+  if (normalized === "prepare") return "Queued";
   if (normalized.includes("register")) return "Register";
   if (
     normalized.startsWith("graph") ||
@@ -73,11 +75,14 @@ export function indexPhaseLabel(stage: string | null | undefined): string {
     return "Facts";
   }
   if (normalized.includes("queued")) return "Queued";
-  return "Parse";
+  return "Engine";
 }
 
 export function activeIndexPhase(repo: Repo): number {
   if (repo.status === "ready") return INDEX_PHASES.length;
+  if (repo.status === "failed" || repo.progress?.stage === "timeout") {
+    return INDEX_PHASES.length - 1;
+  }
   const stage = repo.progress?.stage ?? "";
   const label = indexPhaseLabel(stage);
   const idx = INDEX_PHASES.findIndex((phase) => phase.label === label);

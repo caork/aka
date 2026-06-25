@@ -2,13 +2,19 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, RecvTimeoutError, Sender},
+    Arc,
+};
 use std::thread;
+use std::time::Duration;
 
 use aka_facts::{FactBatchBuilder, FactManifest, FactSink, FactSourceError, FactStats};
 use chrono::Utc;
 use serde_json::{Map, Value};
 
-use crate::types::{EdgeRec, EngineEvent, NodeRec};
+use crate::types::{EdgeRec, EngineEvent, NodeRec, PipelineProgress, PipelineStage};
 
 use super::fact_producer::normalize_engine_facts;
 use super::{emit_phase, engine_cache_root, engine_mode, enrich_direct_fact_batch, EngineError};
@@ -27,6 +33,18 @@ struct AkaEngineIndexOptions {
     cache_dir: *const c_char,
     mode: AkaEngineMode,
     direct_facts_only: bool,
+    deadline_ms_monotonic: u64,
+    max_indexing_time_ms: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum AkaEngineLogLevel {
+    Debug = 0,
+    Info = 1,
+    Warn = 2,
+    Error = 3,
 }
 
 type ManifestCallback = extern "C" fn(*mut c_void, *const c_char, c_int, c_int, c_int) -> c_int;
@@ -56,6 +74,18 @@ type EdgeCallback = extern "C" fn(
     *const c_char,
 ) -> c_int;
 type DoneCallback = extern "C" fn(*mut c_void, c_int, c_int, c_int) -> c_int;
+type ProgressCallback =
+    extern "C" fn(*mut c_void, *const c_char, *const c_char, c_int, c_int, c_int, c_int) -> c_int;
+type LogCallback = extern "C" fn(*mut c_void, AkaEngineLogLevel, *const c_char);
+type ShouldCancelCallback = extern "C" fn(*mut c_void) -> c_int;
+
+#[repr(C)]
+struct AkaEngineCallbacks {
+    userdata: *mut c_void,
+    progress: Option<ProgressCallback>,
+    log: Option<LogCallback>,
+    should_cancel: Option<ShouldCancelCallback>,
+}
 
 #[repr(C)]
 struct AkaEngineFactSink {
@@ -64,6 +94,7 @@ struct AkaEngineFactSink {
     node: Option<NodeCallback>,
     edge: Option<EdgeCallback>,
     done: Option<DoneCallback>,
+    callbacks: *const AkaEngineCallbacks,
 }
 
 #[cfg(not(windows))]
@@ -162,18 +193,43 @@ impl EmbeddedEngineFactProducer {
         on_event(&EngineEvent::Log {
             stream: "engine".into(),
             line: format!(
-                "embedded repo_path={} cache_dir={} mode={}",
+                "embedded repo_path={} cache_dir={} mode={} max_secs={}",
                 engine_repo.display(),
                 cache_root.display(),
-                mode_name
+                mode_name,
+                options
+                    .deadline
+                    .map(|deadline| deadline.max_secs())
+                    .unwrap_or(0)
             ),
         });
         emit_phase(on_event, "aka-engine:index:embedded", 0, 0);
 
-        let mut batch = run_embedded_engine_on_large_stack(engine_repo.clone(), cache_root, mode)?;
+        let mut batch = run_embedded_engine_on_large_stack(
+            engine_repo.clone(),
+            cache_root,
+            mode,
+            options.deadline,
+            on_event,
+        )?;
+        if let Some(deadline) = options.deadline {
+            deadline.check("facts:normalize")?;
+        }
 
-        normalize_engine_facts(&mut batch, &engine_repo, options.no_chunks, on_event);
-        enrich_direct_fact_batch(&engine_repo, &mut batch, on_event)?;
+        normalize_engine_facts(
+            &mut batch,
+            &engine_repo,
+            options.no_chunks,
+            options.deadline,
+            on_event,
+        )?;
+        if let Some(deadline) = options.deadline {
+            deadline.check("enrichment:direct-facts")?;
+        }
+        enrich_direct_fact_batch(&engine_repo, &mut batch, options.deadline, on_event)?;
+        if let Some(deadline) = options.deadline {
+            deadline.check("engine:emit")?;
+        }
         batch.replay_into(sink)?;
         Ok(super::ProducedEngineFacts::DirectFacts)
     }
@@ -191,6 +247,7 @@ pub(super) fn run_embedded_engine_smoke(
         super::EngineFactOptions {
             cache_dir: Some(cache_dir),
             no_chunks: false,
+            deadline: None,
         },
         sink,
         on_event,
@@ -201,32 +258,111 @@ fn run_embedded_engine_on_large_stack(
     engine_repo: PathBuf,
     cache_root: PathBuf,
     mode: AkaEngineMode,
+    deadline: Option<super::IndexingDeadline>,
+    on_event: &mut dyn FnMut(&EngineEvent),
 ) -> Result<aka_facts::FactBatch, EngineError> {
-    thread::Builder::new()
+    let (tx, rx) = mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
+    let handle = thread::Builder::new()
         .name("aka-embedded-engine".into())
         .stack_size(64 * 1024 * 1024)
-        .spawn(move || run_embedded_engine_inner(&engine_repo, &cache_root, mode))
+        .spawn(move || {
+            let result = run_embedded_engine_inner(
+                &engine_repo,
+                &cache_root,
+                mode,
+                deadline,
+                tx,
+                worker_cancelled,
+            );
+            EngineWorkerMessage::Done(result)
+        })
         .map_err(|error| {
             EngineError::Facts(FactSourceError::Message(format!(
                 "spawn embedded engine thread failed: {error}"
             )))
-        })?
-        .join()
-        .map_err(|_| EngineError::Failed {
-            code: None,
-            stderr_tail: "panic in embedded engine thread".into(),
-        })?
+        })?;
+
+    let mut timeout_reported = false;
+    loop {
+        if let Some(deadline) = deadline {
+            if deadline.is_expired() {
+                cancelled.store(true, Ordering::Relaxed);
+                if !timeout_reported {
+                    timeout_reported = true;
+                    on_event(&EngineEvent::Progress {
+                        progress: PipelineProgress::new(
+                            PipelineStage::Timeout,
+                            "Indexing deadline reached; waiting for embedded engine to stop",
+                        ),
+                    });
+                }
+            }
+        }
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(EngineWorkerMessage::Event(event)) => on_event(&event),
+            Ok(EngineWorkerMessage::Done(result)) => {
+                let join_result = handle.join().map_err(|_| EngineError::Failed {
+                    code: None,
+                    stderr_tail: "panic in embedded engine thread".into(),
+                })?;
+                drop(join_result);
+                return result;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if let Some(deadline) = deadline {
+                    if deadline.is_expired() {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                let done = handle.join().map_err(|_| EngineError::Failed {
+                    code: None,
+                    stderr_tail: "panic in embedded engine thread".into(),
+                })?;
+                return match done {
+                    EngineWorkerMessage::Done(result) => result,
+                    EngineWorkerMessage::Event(_) => Err(EngineError::Failed {
+                        code: None,
+                        stderr_tail: "embedded engine thread exited without result".into(),
+                    }),
+                };
+            }
+        }
+    }
 }
 
 fn run_embedded_engine_inner(
     engine_repo: &Path,
     cache_root: &Path,
     mode: AkaEngineMode,
+    deadline: Option<super::IndexingDeadline>,
+    events: Sender<EngineWorkerMessage>,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<aka_facts::FactBatch, EngineError> {
+    if let Some(deadline) = deadline {
+        deadline.check("engine:parse")?;
+    }
     let api = EmbeddedEngineApi::load()?;
+    let max_indexing_time_ms = deadline
+        .map(|deadline| deadline.remaining().as_millis() as u64)
+        .unwrap_or(0);
     let repo_c = cstring_path(engine_repo)?;
     let cache_c = cstring_path(cache_root)?;
     let mut batch = FactBatchBuilder::new();
+    let mut event_bridge = EventBridge {
+        events: events.clone(),
+        deadline,
+        cancelled,
+    };
+    let ffi_callbacks = AkaEngineCallbacks {
+        userdata: (&mut event_bridge as *mut EventBridge).cast::<c_void>(),
+        progress: Some(progress_callback),
+        log: Some(log_callback),
+        should_cancel: Some(should_cancel_callback),
+    };
     let mut bridge = SinkBridge {
         sink: &mut batch,
         error: None,
@@ -237,17 +373,23 @@ fn run_embedded_engine_inner(
         node: Some(node_callback),
         edge: Some(edge_callback),
         done: Some(done_callback),
+        callbacks: &ffi_callbacks,
     };
     let ffi_options = AkaEngineIndexOptions {
         repo_path: repo_c.as_ptr(),
         cache_dir: cache_c.as_ptr(),
         mode,
         direct_facts_only: true,
+        deadline_ms_monotonic: 0,
+        max_indexing_time_ms,
     };
 
     let rc = unsafe { api.index_with_sink(&ffi_options, &ffi_sink) };
     if let Some(error) = bridge.error {
         return Err(error);
+    }
+    if rc == -2 {
+        return Err(timeout_error(deadline, "engine:parse"));
     }
     if rc != 0 {
         return Err(EngineError::Failed {
@@ -256,6 +398,148 @@ fn run_embedded_engine_inner(
         });
     }
     Ok(batch.finish())
+}
+
+enum EngineWorkerMessage {
+    Event(EngineEvent),
+    Done(Result<aka_facts::FactBatch, EngineError>),
+}
+
+struct EventBridge {
+    events: Sender<EngineWorkerMessage>,
+    deadline: Option<super::IndexingDeadline>,
+    cancelled: Arc<AtomicBool>,
+}
+
+extern "C" fn progress_callback(
+    userdata: *mut c_void,
+    phase: *const c_char,
+    file_path: *const c_char,
+    current: c_int,
+    total: c_int,
+    nodes: c_int,
+    edges: c_int,
+) -> c_int {
+    let Some(bridge) = event_bridge(userdata) else {
+        return 1;
+    };
+    if bridge.should_cancel() {
+        return 1;
+    }
+    let phase = cstr_lossy(phase);
+    let file_path = cstr_lossy(file_path);
+    let mut progress = PipelineProgress::new(
+        engine_progress_stage(&phase),
+        engine_progress_message(&phase, &file_path),
+    )
+    .counts(current.max(0) as u64, total.max(0) as u64);
+    progress.nodes = nodes.max(0) as u64;
+    progress.edges = edges.max(0) as u64;
+    let _ = bridge
+        .events
+        .send(EngineWorkerMessage::Event(EngineEvent::Progress {
+            progress,
+        }));
+    if bridge.should_cancel() {
+        return 1;
+    }
+    0
+}
+
+extern "C" fn log_callback(userdata: *mut c_void, level: AkaEngineLogLevel, line: *const c_char) {
+    let Some(bridge) = event_bridge(userdata) else {
+        return;
+    };
+    let line = cstr_lossy(line);
+    let level = match level {
+        AkaEngineLogLevel::Debug => "debug",
+        AkaEngineLogLevel::Info => "info",
+        AkaEngineLogLevel::Warn => "warn",
+        AkaEngineLogLevel::Error => "error",
+    };
+    let _ = bridge
+        .events
+        .send(EngineWorkerMessage::Event(EngineEvent::Log {
+            stream: "engine:c".into(),
+            line: format!("{level}: {line}"),
+        }));
+}
+
+extern "C" fn should_cancel_callback(userdata: *mut c_void) -> c_int {
+    match event_bridge(userdata) {
+        Some(bridge) if !bridge.should_cancel() => 0,
+        _ => 1,
+    }
+}
+
+impl EventBridge {
+    fn should_cancel(&self) -> bool {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return true;
+        }
+        if let Some(deadline) = self.deadline {
+            if deadline.is_expired() {
+                self.cancelled.store(true, Ordering::Relaxed);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn event_bridge<'a>(userdata: *mut c_void) -> Option<&'a EventBridge> {
+    if userdata.is_null() {
+        return None;
+    }
+    Some(unsafe { &*(userdata.cast::<EventBridge>()) })
+}
+
+fn engine_progress_stage(phase: &str) -> PipelineStage {
+    match phase {
+        "discover" => PipelineStage::EngineDiscover,
+        "facts_manifest" | "facts_nodes" | "facts_edges" | "facts_done" => {
+            PipelineStage::EngineEmit
+        }
+        "structure" | "definitions" | "parallel_extract" | "registry_build"
+        | "lsp_cross_prepare" | "parallel_resolve" | "calls" | "usages" | "semantic" | "k8s"
+        | "tests" | "githistory" | "decorator_tags" | "configlink" | "route_match"
+        | "similarity" | "semantic_edges" | "complexity" => PipelineStage::EngineParse,
+        _ => PipelineStage::EngineParse,
+    }
+}
+
+fn engine_progress_message(phase: &str, file_path: &str) -> String {
+    if file_path.is_empty() {
+        format!("C engine phase {phase}")
+    } else {
+        format!("C engine phase {phase}: {file_path}")
+    }
+}
+
+fn cstr_lossy(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn timeout_error(
+    deadline: Option<super::IndexingDeadline>,
+    stage: impl Into<String>,
+) -> EngineError {
+    if let Some(deadline) = deadline {
+        EngineError::Timeout {
+            stage: stage.into(),
+            elapsed_secs: deadline.elapsed_secs(),
+        }
+    } else {
+        EngineError::Failed {
+            code: Some(-2),
+            stderr_tail: "embedded engine cancelled".into(),
+        }
+    }
 }
 
 #[cfg(windows)]

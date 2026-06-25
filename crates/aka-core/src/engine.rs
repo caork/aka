@@ -61,7 +61,8 @@ use command_synth::{
 };
 use config_synth::{synthesize_configs_from_sources, SynthConfig};
 use dependency_synth::{
-    synthesize_dependency_edges_from_sources, DependencyProgress, DependencyProgressPhase,
+    synthesize_dependency_edges_from_sources_with_deadline, DependencyProgress,
+    DependencyProgressPhase,
 };
 #[cfg(feature = "embedded-engine")]
 use embedded::EmbeddedEngineFactProducer;
@@ -92,7 +93,9 @@ use source_scan::{
     pick_handler_node, project_code_nodes_by_file, read_repo_text, skip_ws,
     source_annotations_before_node, split_top_level_commas, stable_hash, ProjectSourceSet,
 };
-use source_symbol_synth::{synthesize_source_symbols_from_sources, SynthSourceSymbol};
+use source_symbol_synth::{
+    synthesize_source_symbols_from_sources_with_deadline, SynthSourceSymbol,
+};
 use tool_synth::{synthesize_tools_from_sources, SynthTool};
 use topic_synth::{
     merge_native_channel_topics, synthesize_topics_from_sources, NativeTopicDetection, SynthTopic,
@@ -101,6 +104,7 @@ use topic_synth::{
 use transaction_synth::{synthesize_transactions_from_sources, SynthTransaction};
 
 const DEFAULT_ENGINE_MODE: &str = "fast";
+const DEFAULT_INDEX_MAX_SECS: u64 = 30 * 60;
 const PROCESS_MAX_STARTS: usize = 200;
 const PROCESS_MIN_COUNT: usize = 20;
 const PROCESS_MAX_COUNT: usize = 300;
@@ -130,6 +134,8 @@ pub enum EngineError {
     Json(#[from] serde_json::Error),
     #[error("engine facts error: {0}")]
     Facts(#[from] aka_facts::FactSourceError),
+    #[error("indexing timed out after {elapsed_secs}s during {stage}")]
+    Timeout { stage: String, elapsed_secs: u64 },
 }
 
 /// Native AKA engine runner.
@@ -141,6 +147,55 @@ pub struct EngineRunner {
 pub struct AnalyzeFactsOptions<'a> {
     pub cache_dir: Option<&'a Path>,
     pub no_chunks: bool,
+    pub deadline: Option<IndexingDeadline>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexingDeadline {
+    started_at: Instant,
+    max_duration: Duration,
+}
+
+impl IndexingDeadline {
+    pub fn new(max_duration: Duration) -> Self {
+        Self {
+            started_at: Instant::now(),
+            max_duration,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        Self::new(index_max_duration())
+    }
+
+    pub fn is_expired(self) -> bool {
+        self.started_at.elapsed() >= self.max_duration
+    }
+
+    pub fn remaining(self) -> Duration {
+        self.max_duration
+            .checked_sub(self.started_at.elapsed())
+            .unwrap_or_default()
+    }
+
+    pub fn elapsed_secs(self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+
+    pub fn max_secs(self) -> u64 {
+        self.max_duration.as_secs()
+    }
+
+    pub fn check(self, stage: impl Into<String>) -> Result<(), EngineError> {
+        if self.is_expired() {
+            Err(EngineError::Timeout {
+                stage: stage.into(),
+                elapsed_secs: self.elapsed_secs(),
+            })
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Replayable facts emitted by the embedded engine.
@@ -296,6 +351,7 @@ impl EngineRunner {
         let fact_options = EngineFactOptions {
             cache_dir: options.cache_dir,
             no_chunks: options.no_chunks,
+            deadline: options.deadline,
         };
         let mut sink = FactBatchBuilder::new();
         let ProducedEngineFacts::DirectFacts =
@@ -331,13 +387,23 @@ impl EngineRunner {
     }
 }
 
+pub fn index_max_duration() -> Duration {
+    std::env::var("AKA_INDEX_MAX_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_INDEX_MAX_SECS))
+}
+
 pub(super) fn enrich_direct_fact_batch(
     repo: &Path,
     batch: &mut FactBatch,
+    deadline: Option<IndexingDeadline>,
     on_event: &mut dyn FnMut(&EngineEvent),
 ) -> Result<(), EngineError> {
     emit_phase(on_event, "aka-core:enrichment:direct-facts", 0, 0);
-    let synth = synthesize_graph_from_facts(batch, repo, on_event);
+    let synth = synthesize_graph_from_facts(batch, repo, deadline, on_event);
     let mut known_nodes: HashSet<String> = batch.nodes.iter().map(|node| node.id.clone()).collect();
     let mut known_edges: HashSet<String> = batch.edges.iter().map(|edge| edge.id.clone()).collect();
     let mut added_nodes = 0u64;
@@ -437,6 +503,15 @@ fn synth_stage_timeout() -> Duration {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_SYNTH_STAGE_TIMEOUT)
+}
+
+fn stage_timeout_for_deadline(
+    stage_timeout: Duration,
+    deadline: Option<IndexingDeadline>,
+) -> Duration {
+    deadline
+        .map(|deadline| stage_timeout.min(deadline.remaining()))
+        .unwrap_or(stage_timeout)
 }
 
 enum SynthWorkerMessage<T> {
@@ -1832,6 +1907,7 @@ fn synthesize_python_properties_from_facts(
 fn synthesize_graph_from_facts(
     batch: &FactBatch,
     repo: &Path,
+    deadline: Option<IndexingDeadline>,
     on_event: &mut dyn FnMut(&EngineEvent),
 ) -> SynthGraph {
     emit_phase(on_event, "aka-core:enrichment:nodes", 0, 0);
@@ -1841,7 +1917,8 @@ fn synthesize_graph_from_facts(
     let native_tools = native_app_nodes_from_facts(batch, "Tool");
     let native_topics = native_channel_topic_detections_from_facts(batch, repo);
     let mut nodes = load_synth_nodes_from_facts(batch);
-    let source_symbols = synthesize_source_symbols_from_sources(repo, &nodes);
+    let source_symbols =
+        synthesize_source_symbols_from_sources_with_deadline(repo, &nodes, deadline);
     for symbol in &source_symbols {
         nodes.insert(symbol.node().aka_id.clone(), symbol.node().clone());
     }
@@ -1867,6 +1944,7 @@ fn synthesize_graph_from_facts(
             .iter()
             .filter(|node| node.label != "File")
             .count(),
+        deadline,
         on_event,
     )
 }
@@ -1886,8 +1964,20 @@ fn synthesize_graph_from_parts(
     existing_call_pairs: HashSet<(String, String)>,
     native_calls: CallGraph,
     symbol_count: usize,
+    deadline: Option<IndexingDeadline>,
     on_event: &mut dyn FnMut(&EngineEvent),
 ) -> SynthGraph {
+    if deadline.is_some_and(|deadline| deadline.is_expired()) {
+        on_event(&EngineEvent::Log {
+            stream: "adapter".into(),
+            line: "aka-core:enrichment:skipped reason=indexing_deadline".into(),
+        });
+        return SynthGraph {
+            source_symbols,
+            properties,
+            ..SynthGraph::default()
+        };
+    }
     if nodes.is_empty() {
         let processes = Vec::new();
         let native_routes = Vec::new();
@@ -1937,13 +2027,18 @@ fn synthesize_graph_from_parts(
         0,
     );
     emit_phase(on_event, "aka-core:enrichment:dependency-edges", 0, 0);
-    let synthetic_edges =
-        synthesize_dependency_edges_from_sources(repo, &nodes, &existing_call_pairs, |progress| {
+    let synthetic_edges = synthesize_dependency_edges_from_sources_with_deadline(
+        repo,
+        &nodes,
+        &existing_call_pairs,
+        deadline,
+        |progress| {
             let (phase, current, total) = dependency_progress_phase(progress);
             emit_phase(on_event, phase, current, total);
-        });
+        },
+    );
     let calls = native_calls.with_synthetic_edges(&nodes, &synthetic_edges);
-    let project_sources = ProjectSourceSet::discover(repo);
+    let project_sources = ProjectSourceSet::discover_with_deadline(repo, deadline);
     emit_phase(on_event, "aka-core:enrichment:project-subgraph", 0, 0);
     let process_nodes = project_process_nodes(repo, &nodes, &project_sources);
     let process_calls = calls.project_subgraph(&process_nodes);
@@ -1992,7 +2087,7 @@ fn synthesize_graph_from_parts(
         synthesize_with_timeout_and_progress(
             on_event,
             "aka-core:enrichment:routes",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move |progress| {
                 synthesize_routes_from_sources_with_progress(
@@ -2012,7 +2107,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:tools",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || {
                 synthesize_tools_from_sources(
@@ -2031,7 +2126,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:commands",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || {
                 synthesize_commands_from_sources(
@@ -2048,7 +2143,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:configs",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || synthesize_configs_from_sources(repo.as_path(), nodes.as_ref()),
         )
@@ -2060,7 +2155,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:jobs",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || {
                 synthesize_jobs_from_sources(repo.as_path(), nodes.as_ref(), processes.as_slice())
@@ -2073,7 +2168,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:topics",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || synthesize_topics_from_sources(repo.as_path(), nodes.as_ref()),
         )
@@ -2085,7 +2180,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:caches",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || synthesize_caches_from_sources(repo.as_path(), nodes.as_ref()),
         )
@@ -2096,7 +2191,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:events",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || synthesize_events_from_sources(repo.as_path(), nodes.as_ref()),
         )
@@ -2107,7 +2202,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:policies",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || synthesize_policies_from_sources(repo.as_path(), nodes.as_ref()),
         )
@@ -2118,7 +2213,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:resources",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || synthesize_resources_from_sources(repo.as_path(), nodes.as_ref()),
         )
@@ -2130,7 +2225,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:graphql",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || {
                 synthesize_graphql_from_sources(
@@ -2147,7 +2242,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:persistence",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             SynthPersistenceGraph::default(),
             move || synthesize_persistence_from_sources(repo.as_path(), nodes.as_ref()),
         )
@@ -2158,7 +2253,7 @@ fn synthesize_graph_from_parts(
         run_synth_stage(
             on_event,
             "aka-core:enrichment:transactions",
-            stage_timeout,
+            stage_timeout_for_deadline(stage_timeout, deadline),
             Vec::new(),
             move || synthesize_transactions_from_sources(repo.as_path(), nodes.as_ref()),
         )
@@ -2200,7 +2295,7 @@ fn synthesize_graph_with_progress(
     let native_tools = load_native_app_nodes(conn, project, "Tool")?;
     emit_phase(on_event, "aka-core:enrichment:nodes", 0, 0);
     let mut nodes = load_synth_nodes(conn, project)?;
-    let source_symbols = synthesize_source_symbols_from_sources(repo, &nodes);
+    let source_symbols = synthesize_source_symbols_from_sources_with_deadline(repo, &nodes, None);
     for symbol in &source_symbols {
         nodes.insert(symbol.node().aka_id.clone(), symbol.node().clone());
     }
@@ -2259,11 +2354,16 @@ fn synthesize_graph_with_progress(
     emit_phase(on_event, "aka-core:enrichment:existing-call-pairs", 0, 0);
     let existing_call_pairs = load_existing_call_pairs(conn, project)?;
     emit_phase(on_event, "aka-core:enrichment:dependency-edges", 0, 0);
-    let synthetic_edges =
-        synthesize_dependency_edges_from_sources(repo, &nodes, &existing_call_pairs, |progress| {
+    let synthetic_edges = synthesize_dependency_edges_from_sources_with_deadline(
+        repo,
+        &nodes,
+        &existing_call_pairs,
+        None,
+        |progress| {
             let (phase, current, total) = dependency_progress_phase(progress);
             emit_phase(on_event, phase, current, total);
-        });
+        },
+    );
     emit_phase(
         on_event,
         format!(

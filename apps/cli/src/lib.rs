@@ -11,7 +11,7 @@ use aka_core::{
     build_parse_cache_manifest_from_facts, load_index_state, load_parse_cache_manifest,
     registry::now_unix, save_index_state, save_parse_cache_manifest, user_facing_path,
     AnalyzeFactsOptions, EngineEvent, EngineRunner, FactSource, FactStats, IndexDelta, IndexState,
-    Registry, RepoEntry, RepoPaths,
+    IndexingDeadline, PipelineProgress, PipelineStage, Registry, RepoEntry, RepoPaths,
 };
 use anyhow::{Context, Result};
 
@@ -30,6 +30,7 @@ pub fn run_analyze_with_progress(
     no_chunks: bool,
     mut progress: Option<&mut AnalyzeProgress<'_>>,
 ) -> Result<String> {
+    let deadline = IndexingDeadline::from_env();
     let repo = path
         .canonicalize()
         .with_context(|| format!("仓库路径不存在: {}", path.display()))?;
@@ -41,12 +42,14 @@ pub fn run_analyze_with_progress(
         .map(|s| s.trim().to_string());
 
     if let Some(cb) = progress.as_mut() {
-        cb(&EngineEvent::Phase {
-            phase: "Preparing index state".into(),
-            current: 0,
-            total: 0,
+        cb(&EngineEvent::Progress {
+            progress: PipelineProgress::new(
+                PipelineStage::Prepare,
+                format!("Preparing index state (max {}s)", deadline.max_secs()),
+            ),
         });
     }
+    deadline.check("prepare")?;
     let current_state = IndexState::compute(&repo, engine_sha.clone(), no_chunks)
         .with_context(|| format!("compute file hashes for {}", repo.display()))?;
     let previous_state = load_index_state(&paths.index_state_path())
@@ -56,10 +59,10 @@ pub fn run_analyze_with_progress(
         reusable_existing_index_stats(&repo, &paths, previous_state.as_ref(), &current_state)?
     {
         if let Some(cb) = progress.as_mut() {
-            cb(&EngineEvent::Phase {
-                phase: "Reusing unchanged index".into(),
-                current: 1,
-                total: 1,
+            cb(&EngineEvent::Progress {
+                progress: PipelineProgress::new(PipelineStage::Done, "Reusing unchanged index")
+                    .counts(1, 1)
+                    .stats(&stats),
             });
         }
         register(&repo, &paths, &stats, engine_sha)?;
@@ -91,8 +94,21 @@ pub fn run_analyze_with_progress(
         AnalyzeFactsOptions {
             cache_dir: Some(&engine_cache_dir),
             no_chunks,
+            deadline: Some(deadline),
         },
         |ev| match ev {
+            EngineEvent::Progress {
+                progress: event_progress,
+            } => {
+                eprintln!(
+                    "  · {}: {}",
+                    event_progress.stage.as_str(),
+                    event_progress.message
+                );
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(ev);
+                }
+            }
             EngineEvent::Phase { phase, .. } => {
                 if *phase != last_phase {
                     eprintln!("  · {phase}");
@@ -132,10 +148,11 @@ pub fn run_analyze_with_progress(
     )?;
 
     if let Some(cb) = progress.as_mut() {
-        cb(&EngineEvent::Phase {
-            phase: "Building graph and search indexes".into(),
-            current: 0,
-            total: 0,
+        cb(&EngineEvent::Progress {
+            progress: PipelineProgress::new(
+                PipelineStage::GraphNodes,
+                "Building graph and search indexes",
+            ),
         });
     }
     if let Some(cb) = progress.as_mut() {
@@ -148,6 +165,10 @@ pub fn run_analyze_with_progress(
     let mut index_progress = |ev: indexer::IndexProgressEvent| {
         eprintln!("  · index {}: {}", ev.stage, ev.message);
         if let Some(cb) = progress.as_deref_mut() {
+            cb(&EngineEvent::Progress {
+                progress: PipelineProgress::new(index_stage(ev.stage), ev.message.clone())
+                    .counts(ev.current.unwrap_or(0), ev.total.unwrap_or(0)),
+            });
             cb(&EngineEvent::Phase {
                 phase: format!("index:{}", ev.stage),
                 current: ev.current.unwrap_or(0),
@@ -161,12 +182,13 @@ pub fn run_analyze_with_progress(
     };
     let idx = match previous_state.as_ref() {
         Some(previous) if !delta.is_empty() => {
-            match indexer::index_facts_incremental_with_progress(
+            match indexer::index_facts_incremental_with_deadline_progress(
                 &facts,
                 &paths,
                 &delta,
                 previous,
                 &current_state,
+                deadline,
                 Some(&mut index_progress),
             )? {
                 indexer::IncrementalIndexOutcome::Applied(idx) => {
@@ -175,28 +197,40 @@ pub fn run_analyze_with_progress(
                 }
                 indexer::IncrementalIndexOutcome::FullRebuildRequired(reason) => {
                     eprintln!("  · 增量不可用，回退全量：{reason}");
-                    indexer::index_facts_with_progress(&facts, &paths, Some(&mut index_progress))?
+                    indexer::index_facts_with_deadline_progress(
+                        &facts,
+                        &paths,
+                        deadline,
+                        Some(&mut index_progress),
+                    )?
                 }
             }
         }
-        _ => indexer::index_facts_with_progress(&facts, &paths, Some(&mut index_progress))?,
+        _ => indexer::index_facts_with_deadline_progress(
+            &facts,
+            &paths,
+            deadline,
+            Some(&mut index_progress),
+        )?,
     };
+    deadline.check("parse-cache")?;
     if let Some(cb) = progress.as_mut() {
-        cb(&EngineEvent::Log {
-            stream: "runtime".into(),
-            line: format!(
-                "save parse cache manifest {}",
-                paths.parse_cache_manifest_path().display()
+        cb(&EngineEvent::Progress {
+            progress: PipelineProgress::new(
+                PipelineStage::ParseCache,
+                format!(
+                    "save parse cache manifest {}",
+                    paths.parse_cache_manifest_path().display()
+                ),
             ),
         });
     }
     save_parse_cache_snapshot(&paths, &facts, &current_state, delta.clone())?;
 
+    deadline.check("register")?;
     if let Some(cb) = progress.as_mut() {
-        cb(&EngineEvent::Phase {
-            phase: "Registering repository".into(),
-            current: 0,
-            total: 0,
+        cb(&EngineEvent::Progress {
+            progress: PipelineProgress::new(PipelineStage::Register, "Registering repository"),
         });
     }
     register(&repo, &paths, facts.stats(), engine_sha)?;
@@ -231,6 +265,22 @@ pub fn run_analyze_with_progress(
         }
     );
     Ok(summary)
+}
+
+fn index_stage(stage: &str) -> PipelineStage {
+    match stage {
+        "graph:nodes" => PipelineStage::GraphNodes,
+        "graph:edges" => PipelineStage::GraphEdges,
+        "graph:layout" => PipelineStage::GraphLayout,
+        "search:nodes" => PipelineStage::SearchNodes,
+        "search:chunks" => PipelineStage::SearchChunks,
+        "search:commit" => PipelineStage::SearchCommit,
+        _ if stage.starts_with("incremental:graph") => PipelineStage::GraphNodes,
+        _ if stage.starts_with("incremental:layout") => PipelineStage::GraphLayout,
+        _ if stage.starts_with("incremental:search") => PipelineStage::SearchNodes,
+        _ if stage.starts_with("incremental:commit") => PipelineStage::SearchCommit,
+        _ => PipelineStage::GraphNodes,
+    }
 }
 
 fn reusable_existing_index_stats(
