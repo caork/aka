@@ -169,6 +169,24 @@ pub enum EnrichmentError {
     UnsupportedAnalyzer { id: String },
     #[error("enrichment analyzer {id:?} did not report a tool version")]
     MissingToolVersion { id: String },
+    #[error("enrichment {fact_kind} {fact_id:?} is missing OSS analyzer provenance")]
+    MissingProvenance {
+        fact_kind: &'static str,
+        fact_id: String,
+    },
+    #[error(
+        "enrichment {fact_kind} {fact_id:?} provenance analyzer {id:?} is not in the OSS analyzer allowlist"
+    )]
+    UnsupportedProvenanceAnalyzer {
+        fact_kind: &'static str,
+        fact_id: String,
+        id: String,
+    },
+    #[error("enrichment {fact_kind} {fact_id:?} provenance is missing analyzer toolVersion")]
+    MissingProvenanceToolVersion {
+        fact_kind: &'static str,
+        fact_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +290,84 @@ pub fn stamp_enrichment_edge(edge: &mut EdgeFact, metadata: &AnalyzerRunMetadata
             edge.evidence = Some(Value::Object(evidence));
         }
     }
+}
+
+pub fn validate_enrichment_batch_provenance(batch: &FactBatch) -> Result<(), EnrichmentError> {
+    for node in &batch.nodes {
+        let provenance = node.properties.get("provenance").ok_or_else(|| {
+            EnrichmentError::MissingProvenance {
+                fact_kind: "node",
+                fact_id: node.id.clone(),
+            }
+        })?;
+        let analyzer_id = provenance_analyzer_id(provenance).ok_or_else(|| {
+            EnrichmentError::MissingProvenance {
+                fact_kind: "node",
+                fact_id: node.id.clone(),
+            }
+        })?;
+        if provenance_tool_version(provenance).is_none() {
+            return Err(EnrichmentError::MissingProvenanceToolVersion {
+                fact_kind: "node",
+                fact_id: node.id.clone(),
+            });
+        }
+        if find_oss_analyzer(analyzer_id).is_none() {
+            return Err(EnrichmentError::UnsupportedProvenanceAnalyzer {
+                fact_kind: "node",
+                fact_id: node.id.clone(),
+                id: analyzer_id.to_string(),
+            });
+        }
+    }
+
+    for edge in &batch.edges {
+        let provenance = edge
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.get("provenance"))
+            .ok_or_else(|| EnrichmentError::MissingProvenance {
+                fact_kind: "edge",
+                fact_id: edge.id.clone(),
+            })?;
+        let analyzer_id = provenance_analyzer_id(provenance).ok_or_else(|| {
+            EnrichmentError::MissingProvenance {
+                fact_kind: "edge",
+                fact_id: edge.id.clone(),
+            }
+        })?;
+        if provenance_tool_version(provenance).is_none() {
+            return Err(EnrichmentError::MissingProvenanceToolVersion {
+                fact_kind: "edge",
+                fact_id: edge.id.clone(),
+            });
+        }
+        if find_oss_analyzer(analyzer_id).is_none() {
+            return Err(EnrichmentError::UnsupportedProvenanceAnalyzer {
+                fact_kind: "edge",
+                fact_id: edge.id.clone(),
+                id: analyzer_id.to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn provenance_analyzer_id(value: &Value) -> Option<&str> {
+    value
+        .as_object()
+        .and_then(|provenance| provenance.get("analyzerId"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+}
+
+fn provenance_tool_version(value: &Value) -> Option<&str> {
+    value
+        .as_object()
+        .and_then(|provenance| provenance.get("toolVersion"))
+        .and_then(Value::as_str)
+        .filter(|version| !version.trim().is_empty())
 }
 
 pub fn run_optional_oss_analyzer_enrichment(
@@ -475,5 +571,91 @@ mod tests {
                 .and_then(|value| value.get("value")),
             Some(&Value::String("definition".into()))
         );
+    }
+
+    #[test]
+    fn validates_enrichment_batch_provenance() {
+        let metadata = AnalyzerRunMetadata::new("pyright", "1.2.3").expect("metadata");
+        let mut batch = FactBatch::new(
+            Default::default(),
+            vec![NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: Default::default(),
+            }],
+            vec![EdgeFact {
+                id: "edge:calls".into(),
+                source_id: "sym:handler".into(),
+                target_id: "sym:service".into(),
+                edge_type: "CALLS".into(),
+                confidence: 1.0,
+                reason: "lsp reference".into(),
+                step: None,
+                evidence: None,
+            }],
+            Vec::new(),
+        );
+        stamp_enrichment_batch(&mut batch, &metadata).expect("stamp");
+
+        validate_enrichment_batch_provenance(&batch).expect("valid provenance");
+    }
+
+    #[test]
+    fn rejects_enrichment_batch_without_tool_version() {
+        let batch = FactBatch::new(
+            Default::default(),
+            vec![NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({
+                    "provenance": {"analyzerId": "pyright"}
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let err = validate_enrichment_batch_provenance(&batch).unwrap_err();
+
+        assert!(matches!(
+            err,
+            EnrichmentError::MissingProvenanceToolVersion {
+                fact_kind: "node",
+                fact_id
+            } if fact_id == "sym:handler"
+        ));
+    }
+
+    #[test]
+    fn rejects_enrichment_batch_from_non_allowlisted_analyzer() {
+        let batch = FactBatch::new(
+            Default::default(),
+            vec![NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({
+                    "provenance": {"analyzerId": "custom-rust-heuristic", "toolVersion": "1.0"}
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let err = validate_enrichment_batch_provenance(&batch).unwrap_err();
+
+        assert!(matches!(
+            err,
+            EnrichmentError::UnsupportedProvenanceAnalyzer {
+                fact_kind: "node",
+                fact_id,
+                id
+            } if fact_id == "sym:handler" && id == "custom-rust-heuristic"
+        ));
     }
 }

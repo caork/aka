@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use aka_core::{
-    find_oss_analyzer, AnalyzerRunMetadata, EngineEvent, FactBatch, FactSourceError,
-    IndexingDeadline, OssAnalyzerEnrichmentPolicy, PipelineProgress, PipelineStage, RepoPaths,
+    find_oss_analyzer, validate_enrichment_batch_provenance, AnalyzerRunMetadata, EngineEvent,
+    FactBatch, FactSourceError, IndexingDeadline, OssAnalyzerEnrichmentPolicy, PipelineProgress,
+    PipelineStage, RepoPaths,
 };
 
 use crate::indexer::{merge_enrichment_facts_with_deadline_progress, EnrichmentMergeSummary};
@@ -94,6 +95,8 @@ pub fn run_optional_enrichment_with_providers(
     let deadline = IndexingDeadline::new(policy.max_duration);
     let mut attempted = 0usize;
     let mut failed = 0usize;
+    let mut merged = EnrichmentMergeSummary::default();
+    let mut merged_any = false;
     for provider in providers {
         if deadline.is_expired() {
             failed += 1;
@@ -128,6 +131,17 @@ pub fn run_optional_enrichment_with_providers(
         );
         match provider.produce(repo) {
             Ok(Some(batch)) => {
+                if let Err(err) = validate_enrichment_batch_provenance(&batch) {
+                    failed += 1;
+                    emit_log(
+                        on_event,
+                        format!(
+                            "provider={} rejected reason=invalid_provenance error={err}",
+                            provider.id()
+                        ),
+                    );
+                    continue;
+                }
                 let mut index_progress = |event: crate::indexer::IndexProgressEvent| {
                     on_event(&EngineEvent::Progress {
                         progress: PipelineProgress::new(
@@ -161,11 +175,8 @@ pub fn run_optional_enrichment_with_providers(
                                 summary.dangling_edges
                             ),
                         );
-                        return OptionalEnrichmentOutcome::Merged {
-                            summary,
-                            attempted,
-                            failed,
-                        };
+                        merged.add_assign(summary);
+                        merged_any = true;
                     }
                     Err(err) => {
                         failed += 1;
@@ -192,6 +203,14 @@ pub fn run_optional_enrichment_with_providers(
                 continue;
             }
         }
+    }
+
+    if merged_any {
+        return OptionalEnrichmentOutcome::Merged {
+            summary: merged,
+            attempted,
+            failed,
+        };
     }
 
     emit_skipped(
@@ -535,6 +554,214 @@ mod tests {
         assert_eq!(attempted, 2);
         assert_eq!(failed, 1);
         assert_eq!(summary.new_nodes, 1);
+    }
+
+    #[test]
+    fn optional_enrichment_rejects_batch_without_oss_provenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 0,
+                chunks: 0,
+            },
+            vec![NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({"name": "handler"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        index_facts(&baseline, &paths).unwrap();
+        let provider = BatchProvider {
+            batch: FactBatch::new(
+                FactStats {
+                    files: 0,
+                    nodes: 1,
+                    edges: 0,
+                    chunks: 0,
+                },
+                vec![NodeFact {
+                    id: "scip:symbol:service".into(),
+                    label: "Interface".into(),
+                    properties: serde_json::json!({"name": "Service"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                }],
+                Vec::new(),
+                Vec::new(),
+            ),
+        };
+        let events = RefCell::new(Vec::new());
+
+        let outcome = run_optional_enrichment_with_providers(
+            &repo,
+            &paths,
+            OssAnalyzerEnrichmentPolicy {
+                enabled: true,
+                max_duration: Duration::from_secs(5),
+            },
+            &[&provider],
+            &mut |event| events.borrow_mut().push(event.clone()),
+        );
+
+        assert!(matches!(
+            outcome,
+            OptionalEnrichmentOutcome::Skipped {
+                attempted: 1,
+                failed: 1
+            }
+        ));
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        assert_eq!(graph.node_count().unwrap(), 1);
+        assert!(events.borrow().iter().any(|event| matches!(
+            event,
+            EngineEvent::Log { stream, line }
+                if stream == "oss-analyzer-enrichment"
+                    && line.contains("reason=invalid_provenance")
+                    && line.contains("missing OSS analyzer provenance")
+        )));
+    }
+
+    #[test]
+    fn optional_enrichment_merges_all_successful_providers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 0,
+                chunks: 0,
+            },
+            vec![NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({"name": "handler"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        index_facts(&baseline, &paths).unwrap();
+        let provider_one = BatchProvider {
+            batch: FactBatch::new(
+                FactStats {
+                    files: 0,
+                    nodes: 1,
+                    edges: 1,
+                    chunks: 0,
+                },
+                vec![NodeFact {
+                    id: "scip:symbol:service".into(),
+                    label: "Interface".into(),
+                    properties: serde_json::json!({
+                        "name": "Service",
+                        "source": "scip",
+                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                }],
+                vec![EdgeFact {
+                    id: "scip:edge:handler-service".into(),
+                    source_id: "sym:handler".into(),
+                    target_id: "scip:symbol:service".into(),
+                    edge_type: "DEPENDS_ON".into(),
+                    confidence: 1.0,
+                    reason: "scip relationship".into(),
+                    step: None,
+                    evidence: Some(serde_json::json!({
+                        "source": "scip",
+                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                    })),
+                }],
+                Vec::new(),
+            ),
+        };
+        let provider_two = BatchProvider {
+            batch: FactBatch::new(
+                FactStats {
+                    files: 0,
+                    nodes: 1,
+                    edges: 1,
+                    chunks: 0,
+                },
+                vec![NodeFact {
+                    id: "scip:symbol:repo".into(),
+                    label: "Class".into(),
+                    properties: serde_json::json!({
+                        "name": "Repo",
+                        "source": "scip",
+                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                }],
+                vec![EdgeFact {
+                    id: "scip:edge:handler-repo".into(),
+                    source_id: "sym:handler".into(),
+                    target_id: "scip:symbol:repo".into(),
+                    edge_type: "DEPENDS_ON".into(),
+                    confidence: 1.0,
+                    reason: "scip relationship".into(),
+                    step: None,
+                    evidence: Some(serde_json::json!({
+                        "source": "scip",
+                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                    })),
+                }],
+                Vec::new(),
+            ),
+        };
+
+        let outcome = run_optional_enrichment_with_providers(
+            &repo,
+            &paths,
+            OssAnalyzerEnrichmentPolicy {
+                enabled: true,
+                max_duration: Duration::from_secs(5),
+            },
+            &[&provider_one, &provider_two],
+            &mut |_| {},
+        );
+
+        let OptionalEnrichmentOutcome::Merged {
+            summary,
+            attempted,
+            failed,
+        } = outcome
+        else {
+            panic!("expected merged outcome, got {outcome:?}");
+        };
+        assert_eq!(attempted, 2);
+        assert_eq!(failed, 0);
+        assert_eq!(summary.new_nodes, 2);
+        assert_eq!(summary.new_edges, 2);
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        assert_eq!(graph.node_count().unwrap(), 3);
+        assert_eq!(graph.edge_count().unwrap(), 2);
     }
 
     struct UnsupportedProvider;

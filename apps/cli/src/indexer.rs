@@ -34,6 +34,18 @@ pub struct EnrichmentMergeSummary {
     pub bad_lines: u64,
 }
 
+impl EnrichmentMergeSummary {
+    pub fn add_assign(&mut self, other: Self) {
+        self.new_nodes += other.new_nodes;
+        self.duplicate_nodes += other.duplicate_nodes;
+        self.new_edges += other.new_edges;
+        self.duplicate_edges += other.duplicate_edges;
+        self.dangling_edges += other.dangling_edges;
+        self.chunks += other.chunks;
+        self.bad_lines += other.bad_lines;
+    }
+}
+
 pub enum IncrementalIndexOutcome {
     Applied(IndexSummary),
     FullRebuildRequired(String),
