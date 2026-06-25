@@ -463,7 +463,7 @@ impl JobInfo {
                     }
                     return;
                 }
-                if phase_lc.contains("facts") || phase_lc.contains("enrichment") {
+                if phase_lc.contains("facts") {
                     self.progress.stage = "facts".into();
                     self.progress.message = phase.clone();
                     self.progress.current = (*total > 0 || *current > 0).then_some(*current);
@@ -572,48 +572,12 @@ struct AutoIndexState {
 
 fn adapter_percent(phase: &str, current: u64, total: u64) -> f32 {
     let phase = phase.to_ascii_lowercase();
-    if phase.contains("dependency-edges") && total > 0 {
-        let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
-        return 80.0 + ratio * 6.0;
-    }
-    if phase.contains("nodes") && total > 0 {
-        let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
-        return 89.0 + ratio;
-    }
-    if phase.contains("edges") && total > 0 {
-        let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
-        return 90.0 + ratio;
-    }
     if phase.contains("chunks") && total > 0 {
         let ratio = (current as f32 / total as f32).clamp(0.0, 1.0);
         return 91.0 + ratio;
     }
     if phase.contains("inspect-db") {
         77.0
-    } else if phase.contains("enrichment:native-labels") {
-        78.0
-    } else if phase.contains("enrichment:nodes") {
-        79.0
-    } else if phase.contains("enrichment:dependency-edges") {
-        80.0
-    } else if phase.contains("enrichment:call-graph") {
-        82.0
-    } else if phase.contains("enrichment:project-subgraph") {
-        83.0
-    } else if phase.contains("enrichment:communities") {
-        84.0
-    } else if phase.contains("enrichment:processes") {
-        87.0
-    } else if phase.contains("enrichment:routes:done") {
-        88.0
-    } else if phase.contains("enrichment:routes:consumers") {
-        progress_between(current, total, 87.7, 88.0)
-    } else if phase.contains("enrichment:routes:source-files") {
-        progress_between(current, total, 87.5, 87.7)
-    } else if phase.contains("enrichment:routes") {
-        87.5
-    } else if phase.contains("enrichment:topics") {
-        88.0
     } else if phase.contains("nodes") {
         89.0
     } else if phase.contains("edges") {
@@ -661,24 +625,6 @@ fn structured_percent(stage: &PipelineStage, current: u64, total: u64) -> f32 {
         PipelineStage::EngineParse => progress_between(current, total, 18.0, 70.0),
         PipelineStage::EngineEmit => progress_between(current, total, 70.0, 78.0),
         PipelineStage::FactsNormalize => progress_between(current, total, 78.0, 80.0),
-        PipelineStage::EnrichmentNodes => 80.0,
-        PipelineStage::EnrichmentDependencyEdges => progress_between(current, total, 80.0, 86.0),
-        PipelineStage::EnrichmentProjectGraph
-        | PipelineStage::EnrichmentCommunities
-        | PipelineStage::EnrichmentProcesses => 87.0,
-        PipelineStage::EnrichmentRoutes => progress_between(current, total, 87.0, 89.0),
-        PipelineStage::EnrichmentTools
-        | PipelineStage::EnrichmentCommands
-        | PipelineStage::EnrichmentPersistence
-        | PipelineStage::EnrichmentConfigs
-        | PipelineStage::EnrichmentJobs
-        | PipelineStage::EnrichmentTopics
-        | PipelineStage::EnrichmentCaches
-        | PipelineStage::EnrichmentEvents
-        | PipelineStage::EnrichmentPolicies
-        | PipelineStage::EnrichmentResources
-        | PipelineStage::EnrichmentGraphql
-        | PipelineStage::EnrichmentTransactions => 90.0,
         PipelineStage::GraphNodes => progress_between(current, total, 90.0, 92.0),
         PipelineStage::GraphEdges => progress_between(current, total, 92.0, 94.0),
         PipelineStage::GraphLayout => 95.0,
@@ -3713,17 +3659,15 @@ mod tests {
     }
 
     #[test]
-    fn facts_progress_tracks_synthesis_before_fact_counts() {
-        let synth_nodes = adapter_percent("aka-core:enrichment:nodes", 0, 0);
-        let deps_start = adapter_percent("aka-core:enrichment:dependency-edges", 0, 570);
-        let deps_mid = adapter_percent("aka-core:enrichment:dependency-edges", 285, 570);
-        let processes = adapter_percent("aka-core:enrichment:processes", 0, 0);
+    fn facts_progress_tracks_normalization_before_fact_counts() {
+        let normalize = adapter_percent("aka-core:facts:normalize", 0, 0);
+        let chunks_start = adapter_percent("aka-core:facts:chunks-from-facts", 0, 570);
+        let chunks_mid = adapter_percent("aka-core:facts:chunks-from-facts", 285, 570);
         let fact_nodes = adapter_percent("aka-engine:facts:nodes", 0, 12_687);
 
-        assert!(deps_start > synth_nodes);
-        assert!(deps_mid > deps_start);
-        assert!(processes > deps_mid);
-        assert!(fact_nodes > processes);
+        assert!(chunks_start > normalize);
+        assert!(chunks_mid > chunks_start);
+        assert!(fact_nodes > normalize);
     }
 
     #[test]

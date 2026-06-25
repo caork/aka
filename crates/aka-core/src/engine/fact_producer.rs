@@ -45,9 +45,8 @@ pub(super) fn normalize_engine_facts(
     if no_chunks {
         batch.chunks.clear();
     } else if batch.chunks.is_empty() {
-        batch.chunks = synthesize_chunks_from_node_facts(repo, &batch.nodes, deadline, on_event)?;
+        batch.chunks = synthesize_chunks_from_node_facts(repo, &batch.nodes, deadline, on_event);
     }
-    check_deadline(deadline, "facts:normalize:stats")?;
     batch.stats.files = batch
         .nodes
         .iter()
@@ -64,7 +63,7 @@ fn synthesize_chunks_from_node_facts(
     nodes: &[NodeRec],
     deadline: Option<IndexingDeadline>,
     on_event: &mut dyn FnMut(&EngineEvent),
-) -> Result<Vec<ChunkRec>, EngineError> {
+) -> Vec<ChunkRec> {
     let candidates: Vec<_> = nodes
         .iter()
         .filter(|node| {
@@ -76,13 +75,24 @@ fn synthesize_chunks_from_node_facts(
         })
         .collect();
     let total = candidates.len() as u64;
-    emit_phase(on_event, "aka-core:enrichment:chunks-from-facts", 0, total);
+    emit_phase(on_event, "aka-core:facts:chunks-from-facts", 0, total);
     let mut sources = SourceCache::new(repo);
     let mut chunks = Vec::with_capacity(candidates.len());
     let mut count = 0u64;
     for node in candidates {
-        if count.is_multiple_of(1024) {
-            check_deadline(deadline, "facts:chunks-from-facts")?;
+        if count.is_multiple_of(1024) && deadline.is_some_and(|deadline| deadline.is_expired()) {
+            on_event(&EngineEvent::Warning {
+                message: format!(
+                    "chunks-from-facts reached indexing deadline; keeping partial chunks ({count}/{total})"
+                ),
+            });
+            emit_phase(
+                on_event,
+                "aka-core:facts:chunks-from-facts:skipped",
+                count,
+                total,
+            );
+            return chunks;
         }
         let Some(file_path) = node.file_path() else {
             continue;
@@ -105,15 +115,10 @@ fn synthesize_chunks_from_node_facts(
         });
         count += 1;
         if count == total || count.is_multiple_of(1000) {
-            emit_phase(
-                on_event,
-                "aka-core:enrichment:chunks-from-facts",
-                count,
-                total,
-            );
+            emit_phase(on_event, "aka-core:facts:chunks-from-facts", count, total);
         }
     }
-    Ok(chunks)
+    chunks
 }
 
 fn check_deadline(
@@ -324,7 +329,7 @@ mod tests {
         assert_eq!(batch.chunks[0].text, "fn main() {}");
         assert!(events
             .iter()
-            .any(|phase| phase == "aka-core:enrichment:chunks-from-facts"));
+            .any(|phase| phase == "aka-core:facts:chunks-from-facts"));
     }
 
     #[test]

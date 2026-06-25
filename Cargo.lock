@@ -43,7 +43,6 @@ dependencies = [
  "aka-facts",
  "chrono",
  "libloading",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",

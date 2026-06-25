@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 use crate::types::{EdgeRec, EngineEvent, NodeRec, PipelineProgress, PipelineStage};
 
 use super::fact_producer::normalize_engine_facts;
-use super::{emit_phase, engine_cache_root, engine_mode, enrich_direct_fact_batch, EngineError};
+use super::{emit_phase, engine_cache_root, engine_mode, EngineError};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -223,13 +223,10 @@ impl EmbeddedEngineFactProducer {
             options.deadline,
             on_event,
         )?;
-        if let Some(deadline) = options.deadline {
-            deadline.check("enrichment:direct-facts")?;
-        }
-        enrich_direct_fact_batch(&engine_repo, &mut batch, options.deadline, on_event)?;
-        if let Some(deadline) = options.deadline {
-            deadline.check("engine:emit")?;
-        }
+        on_event(&EngineEvent::Log {
+            stream: "adapter".into(),
+            line: "aka-core:direct-facts-only custom_synthesis=disabled".into(),
+        });
         batch.replay_into(sink)?;
         Ok(super::ProducedEngineFacts::DirectFacts)
     }

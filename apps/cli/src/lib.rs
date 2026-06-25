@@ -182,13 +182,12 @@ pub fn run_analyze_with_progress(
     };
     let idx = match previous_state.as_ref() {
         Some(previous) if !delta.is_empty() => {
-            match indexer::index_facts_incremental_with_deadline_progress(
+            match indexer::index_facts_incremental_with_progress(
                 &facts,
                 &paths,
                 &delta,
                 previous,
                 &current_state,
-                deadline,
                 Some(&mut index_progress),
             )? {
                 indexer::IncrementalIndexOutcome::Applied(idx) => {
@@ -197,23 +196,12 @@ pub fn run_analyze_with_progress(
                 }
                 indexer::IncrementalIndexOutcome::FullRebuildRequired(reason) => {
                     eprintln!("  · 增量不可用，回退全量：{reason}");
-                    indexer::index_facts_with_deadline_progress(
-                        &facts,
-                        &paths,
-                        deadline,
-                        Some(&mut index_progress),
-                    )?
+                    indexer::index_facts_with_progress(&facts, &paths, Some(&mut index_progress))?
                 }
             }
         }
-        _ => indexer::index_facts_with_deadline_progress(
-            &facts,
-            &paths,
-            deadline,
-            Some(&mut index_progress),
-        )?,
+        _ => indexer::index_facts_with_progress(&facts, &paths, Some(&mut index_progress))?,
     };
-    deadline.check("parse-cache")?;
     if let Some(cb) = progress.as_mut() {
         cb(&EngineEvent::Progress {
             progress: PipelineProgress::new(
@@ -227,7 +215,6 @@ pub fn run_analyze_with_progress(
     }
     save_parse_cache_snapshot(&paths, &facts, &current_state, delta.clone())?;
 
-    deadline.check("register")?;
     if let Some(cb) = progress.as_mut() {
         cb(&EngineEvent::Progress {
             progress: PipelineProgress::new(PipelineStage::Register, "Registering repository"),
