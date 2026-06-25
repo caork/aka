@@ -52,7 +52,8 @@ pub enum PipelineStage {
     SearchCommit,
     ParseCache,
     Register,
-    LspEnrichment,
+    #[serde(alias = "lsp_enrichment")]
+    OssAnalyzerEnrichment,
     Done,
     Timeout,
 }
@@ -73,7 +74,7 @@ impl PipelineStage {
             Self::SearchCommit => "search:commit",
             Self::ParseCache => "parse-cache",
             Self::Register => "register",
-            Self::LspEnrichment => "lsp-enrichment",
+            Self::OssAnalyzerEnrichment => "oss-analyzer-enrichment",
             Self::Done => "done",
             Self::Timeout => "timeout",
         }

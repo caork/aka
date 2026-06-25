@@ -12,8 +12,8 @@ use aka_core::{
     build_parse_cache_manifest_from_facts, load_index_state, load_parse_cache_manifest,
     registry::now_unix, save_index_state, save_parse_cache_manifest, user_facing_path,
     AnalyzeFactsOptions, EngineEvent, EngineRunner, FactSource, FactStats, IndexDelta, IndexState,
-    IndexingDeadline, LspEnrichmentPolicy, PipelineProgress, PipelineStage, Registry, RepoEntry,
-    RepoPaths,
+    IndexingDeadline, OssAnalyzerEnrichmentPolicy, PipelineProgress, PipelineStage, Registry,
+    RepoEntry, RepoPaths,
 };
 use anyhow::{Context, Result};
 
@@ -233,7 +233,7 @@ pub fn run_analyze_with_progress(
         .with_context(|| format!("save index state {}", paths.index_state_path().display()))?;
 
     let settings = aka_core::AkaSettings::load().unwrap_or_default();
-    let enrichment_policy = LspEnrichmentPolicy::from_settings(settings.clone());
+    let enrichment_policy = OssAnalyzerEnrichmentPolicy::from_settings(settings.clone());
     let mut enrichment_progress = |ev: &EngineEvent| {
         if let Some(cb) = progress.as_deref_mut() {
             cb(ev);
@@ -287,8 +287,8 @@ fn index_stage(stage: &str) -> PipelineStage {
         "search:nodes" => PipelineStage::SearchNodes,
         "search:chunks" => PipelineStage::SearchChunks,
         "search:commit" => PipelineStage::SearchCommit,
-        "lsp-enrichment" => PipelineStage::LspEnrichment,
-        _ if stage.starts_with("enrichment:") => PipelineStage::LspEnrichment,
+        "oss-analyzer-enrichment" => PipelineStage::OssAnalyzerEnrichment,
+        _ if stage.starts_with("enrichment:") => PipelineStage::OssAnalyzerEnrichment,
         _ if stage.starts_with("incremental:graph") => PipelineStage::GraphNodes,
         _ if stage.starts_with("incremental:layout") => PipelineStage::GraphLayout,
         _ if stage.starts_with("incremental:search") => PipelineStage::SearchNodes,

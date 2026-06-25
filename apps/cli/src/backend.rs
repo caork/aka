@@ -633,7 +633,7 @@ fn structured_percent(stage: &PipelineStage, current: u64, total: u64) -> f32 {
         PipelineStage::SearchCommit => 98.0,
         PipelineStage::ParseCache => 98.5,
         PipelineStage::Register => 99.0,
-        PipelineStage::LspEnrichment => 99.0,
+        PipelineStage::OssAnalyzerEnrichment => 99.0,
         PipelineStage::Done => 100.0,
         PipelineStage::Timeout => 99.0,
     }
@@ -3717,25 +3717,25 @@ mod tests {
     }
 
     #[test]
-    fn optional_lsp_enrichment_progress_does_not_fail_index_job() {
+    fn optional_oss_analyzer_enrichment_progress_does_not_fail_index_job() {
         let mut job = JobInfo::new("local", None, PathBuf::from("/tmp/repo"));
 
         job.apply_engine_event(&EngineEvent::Progress {
             progress: PipelineProgress::new(
-                PipelineStage::LspEnrichment,
-                "LSP enrichment disabled for /tmp/repo",
+                PipelineStage::OssAnalyzerEnrichment,
+                "OSS analyzer enrichment disabled for /tmp/repo",
             ),
         });
         job.apply_engine_event(&EngineEvent::Log {
-            stream: "lsp-enrichment".into(),
+            stream: "oss-analyzer-enrichment".into(),
             line: "skipped enabled=false reason=disabled".into(),
         });
 
         assert_eq!(job.status, "indexing");
-        assert_eq!(job.progress.stage, "lsp-enrichment");
+        assert_eq!(job.progress.stage, "oss-analyzer-enrichment");
         assert_eq!(job.progress.percent, 99.0);
         assert!(job.progress.logs.iter().any(|line| {
-            line.contains("[lsp-enrichment] skipped enabled=false reason=disabled")
+            line.contains("[oss-analyzer-enrichment] skipped enabled=false reason=disabled")
         }));
     }
 

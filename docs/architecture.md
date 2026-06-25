@@ -38,7 +38,7 @@ Rust workspace 承担存储、搜索、服务、UI。唯一热路径合同是 `a
 
 - React 19 + Vite + Tailwind 4 + shadcn/ui。
 - 图谱可视化 Cosmograph（GPU/WebGL）+ 分层 LOD（已拍板，要求美观 + 高性能 + 支撑十亿级数据）：数据层按十亿级设计（磁盘索引、流式摄取、天花板在磁盘）；渲染层永远只画聚合视图——默认社区/模块级聚合图（数千节点），下钻文件层、符号层，每层视口内元素控制在 GPU 舒适区。aka-graph 提供 LOD/聚合查询（分层快照）。
-- 前端直接 invoke Rust 命令；索引进度走 Tauri event（facts discover/parse/fuse、graph/search、optional LSP enrichment 分阶段展示）。不再展示 legacy `export-artifacts` 作为运行阶段。
+- 前端直接 invoke Rust 命令；索引进度走 Tauri event（facts discover/parse/fuse、graph/search、optional OSS analyzer enrichment 分阶段展示）。不再展示 legacy `export-artifacts` 作为运行阶段。
 
 ## 部署形态（一套核心，三种交付）
 

@@ -20,12 +20,12 @@ use crate::types::{EngineEvent, PipelineProgress, PipelineStage};
 const ENRICHMENT_ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LspEnrichmentPolicy {
+pub struct OssAnalyzerEnrichmentPolicy {
     pub enabled: bool,
     pub max_duration: Duration,
 }
 
-impl LspEnrichmentPolicy {
+impl OssAnalyzerEnrichmentPolicy {
     pub fn from_settings(settings: AkaSettings) -> Self {
         Self {
             enabled: settings.oss_analyzer_enrichment_enabled,
@@ -34,7 +34,7 @@ impl LspEnrichmentPolicy {
     }
 }
 
-impl Default for LspEnrichmentPolicy {
+impl Default for OssAnalyzerEnrichmentPolicy {
     fn default() -> Self {
         Self::from_settings(AkaSettings::default())
     }
@@ -42,7 +42,7 @@ impl Default for LspEnrichmentPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LspEnrichmentOutcome {
+pub enum OssAnalyzerEnrichmentOutcome {
     Disabled,
     NoProviders,
 }
@@ -274,44 +274,45 @@ pub fn stamp_enrichment_edge(edge: &mut EdgeFact, metadata: &AnalyzerRunMetadata
     }
 }
 
-pub fn run_optional_lsp_enrichment(
+pub fn run_optional_oss_analyzer_enrichment(
     repo: &Path,
-    policy: LspEnrichmentPolicy,
+    policy: OssAnalyzerEnrichmentPolicy,
     mut on_event: impl FnMut(&EngineEvent),
-) -> LspEnrichmentOutcome {
+) -> OssAnalyzerEnrichmentOutcome {
     if !policy.enabled {
         emit_skipped(
             &mut on_event,
-            format!("LSP enrichment disabled for {}", repo.display()),
+            format!("OSS analyzer enrichment disabled for {}", repo.display()),
             "skipped enabled=false reason=disabled",
         );
-        return LspEnrichmentOutcome::Disabled;
+        return OssAnalyzerEnrichmentOutcome::Disabled;
     }
 
     emit_skipped(
         &mut on_event,
         format!(
-            "LSP enrichment skipped for {}: no providers installed",
+            "OSS analyzer enrichment skipped for {}: no providers installed",
             repo.display()
         ),
         format!(
             "skipped enabled=true providers=0 allowed={} max_secs={} reason=no_providers",
-            allowed_lsp_analyzers()
+            allowed_oss_analyzers()
+                .iter()
                 .map(|analyzer| analyzer.id)
                 .collect::<Vec<_>>()
                 .join(","),
             policy.max_duration.as_secs()
         ),
     );
-    LspEnrichmentOutcome::NoProviders
+    OssAnalyzerEnrichmentOutcome::NoProviders
 }
 
 fn emit_skipped(on_event: &mut impl FnMut(&EngineEvent), message: String, line: impl Into<String>) {
     on_event(&EngineEvent::Progress {
-        progress: PipelineProgress::new(PipelineStage::LspEnrichment, message),
+        progress: PipelineProgress::new(PipelineStage::OssAnalyzerEnrichment, message),
     });
     on_event(&EngineEvent::Log {
-        stream: "lsp-enrichment".into(),
+        stream: "oss-analyzer-enrichment".into(),
         line: line.into(),
     });
 }
@@ -321,46 +322,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn disabled_lsp_enrichment_reports_skip_without_error() {
+    fn disabled_oss_analyzer_enrichment_reports_skip_without_error() {
         let mut events = Vec::new();
-        let outcome = run_optional_lsp_enrichment(
+        let outcome = run_optional_oss_analyzer_enrichment(
             Path::new("/repo"),
-            LspEnrichmentPolicy::default(),
+            OssAnalyzerEnrichmentPolicy::default(),
             |event| events.push(event.clone()),
         );
 
-        assert_eq!(outcome, LspEnrichmentOutcome::Disabled);
+        assert_eq!(outcome, OssAnalyzerEnrichmentOutcome::Disabled);
         assert!(matches!(
             events.first(),
             Some(EngineEvent::Progress { progress })
-                if progress.stage == PipelineStage::LspEnrichment
+                if progress.stage == PipelineStage::OssAnalyzerEnrichment
         ));
         assert!(events.iter().any(|event| matches!(
             event,
             EngineEvent::Log { stream, line }
-                if stream == "lsp-enrichment" && line.contains("reason=disabled")
+                if stream == "oss-analyzer-enrichment" && line.contains("reason=disabled")
         )));
     }
 
     #[test]
-    fn enabled_lsp_enrichment_without_providers_is_skipped() {
+    fn enabled_oss_analyzer_enrichment_without_providers_is_skipped() {
         let mut events = Vec::new();
-        let outcome = run_optional_lsp_enrichment(
+        let outcome = run_optional_oss_analyzer_enrichment(
             Path::new("/repo"),
-            LspEnrichmentPolicy {
+            OssAnalyzerEnrichmentPolicy {
                 enabled: true,
                 max_duration: Duration::from_secs(15),
             },
             |event| events.push(event.clone()),
         );
 
-        assert_eq!(outcome, LspEnrichmentOutcome::NoProviders);
+        assert_eq!(outcome, OssAnalyzerEnrichmentOutcome::NoProviders);
         assert!(events.iter().any(|event| matches!(
             event,
             EngineEvent::Log { stream, line }
-                if stream == "lsp-enrichment"
+                if stream == "oss-analyzer-enrichment"
                     && line.contains("providers=0")
-                    && line.contains("allowed=rust-analyzer,pyright,jdtls,typescript-language-server,gopls")
+                    && line.contains("allowed=scip,stack-graphs,rust-analyzer,pyright,jdtls,typescript-language-server,gopls")
                     && line.contains("max_secs=15")
         )));
     }

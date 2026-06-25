@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use aka_core::{
     find_oss_analyzer, AnalyzerRunMetadata, EngineEvent, FactBatch, FactSourceError,
-    LspEnrichmentPolicy, PipelineProgress, PipelineStage, RepoPaths,
+    OssAnalyzerEnrichmentPolicy, PipelineProgress, PipelineStage, RepoPaths,
 };
 
 use crate::indexer::{merge_enrichment_facts_with_progress, EnrichmentMergeSummary};
@@ -36,7 +36,7 @@ pub struct EnrichmentProviderConfig {
 pub fn run_optional_enrichment(
     repo: &Path,
     paths: &RepoPaths,
-    policy: LspEnrichmentPolicy,
+    policy: OssAnalyzerEnrichmentPolicy,
     config: EnrichmentProviderConfig,
     on_event: &mut dyn FnMut(&EngineEvent),
 ) -> OptionalEnrichmentOutcome {
@@ -56,7 +56,7 @@ pub fn run_optional_enrichment(
 pub fn run_optional_enrichment_with_providers(
     repo: &Path,
     paths: &RepoPaths,
-    policy: LspEnrichmentPolicy,
+    policy: OssAnalyzerEnrichmentPolicy,
     providers: &[&dyn OptionalEnrichmentProvider],
     on_event: &mut dyn FnMut(&EngineEvent),
 ) -> OptionalEnrichmentOutcome {
@@ -106,7 +106,7 @@ pub fn run_optional_enrichment_with_providers(
                 let mut index_progress = |event: crate::indexer::IndexProgressEvent| {
                     on_event(&EngineEvent::Progress {
                         progress: PipelineProgress::new(
-                            PipelineStage::LspEnrichment,
+                            PipelineStage::OssAnalyzerEnrichment,
                             event.message.clone(),
                         )
                         .counts(event.current.unwrap_or(0), event.total.unwrap_or(0)),
@@ -231,14 +231,14 @@ impl OptionalEnrichmentProvider for ScipIndexProvider {
 
 fn emit_skipped(on_event: &mut dyn FnMut(&EngineEvent), message: String, line: impl Into<String>) {
     on_event(&EngineEvent::Progress {
-        progress: PipelineProgress::new(PipelineStage::LspEnrichment, message),
+        progress: PipelineProgress::new(PipelineStage::OssAnalyzerEnrichment, message),
     });
     emit_log(on_event, line.into());
 }
 
 fn emit_log(on_event: &mut dyn FnMut(&EngineEvent), line: impl Into<String>) {
     on_event(&EngineEvent::Log {
-        stream: "lsp-enrichment".into(),
+        stream: "oss-analyzer-enrichment".into(),
         line: line.into(),
     });
 }
@@ -355,7 +355,7 @@ mod tests {
         let outcome = run_optional_enrichment_with_providers(
             &repo,
             &paths,
-            LspEnrichmentPolicy {
+            OssAnalyzerEnrichmentPolicy {
                 enabled: true,
                 max_duration: std::time::Duration::from_secs(5),
             },
@@ -374,7 +374,7 @@ mod tests {
         assert!(events.borrow().iter().any(|event| matches!(
             event,
             EngineEvent::Log { stream, line }
-                if stream == "lsp-enrichment" && line.contains("merged nodes=1 edges=1")
+                if stream == "oss-analyzer-enrichment" && line.contains("merged nodes=1 edges=1")
         )));
     }
 
@@ -391,7 +391,7 @@ mod tests {
         let outcome = run_optional_enrichment_with_providers(
             &repo,
             &paths,
-            LspEnrichmentPolicy {
+            OssAnalyzerEnrichmentPolicy {
                 enabled: true,
                 max_duration: std::time::Duration::from_secs(5),
             },
@@ -403,7 +403,7 @@ mod tests {
         assert!(events.borrow().iter().any(|event| matches!(
             event,
             EngineEvent::Log { stream, line }
-                if stream == "lsp-enrichment" && line.contains("provider=scip failed")
+                if stream == "oss-analyzer-enrichment" && line.contains("provider=scip failed")
         )));
     }
 
@@ -431,7 +431,7 @@ mod tests {
         let outcome = run_optional_enrichment_with_providers(
             &repo,
             &paths,
-            LspEnrichmentPolicy {
+            OssAnalyzerEnrichmentPolicy {
                 enabled: true,
                 max_duration: Duration::from_secs(5),
             },
