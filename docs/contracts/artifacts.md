@@ -167,6 +167,25 @@ scripts/smoke-oss-analyzer-scip.sh \
 
 源码调试时可以用内部 runtime 命令 `aka validate-facts <path>` 预检 adapter 输出；这只做合同校验，不写 graph/search，也不是用户可见产品形态。
 
+tree-sitter stack-graphs 路径的大仓 smoke 用 `scripts/oss-analyzer-stack-graphs-python.mjs` 生成 bundle，再用 `scripts/smoke-oss-analyzer-stack-graphs-python.sh` 导入。这个 adapter 是脚本层工具：它启动外部开源 `tree-sitter-stack-graphs-python`，调用官方 `index` / `match` / `query definition` 命令读取 stack-graphs 分析结果，转换成 `File` / `Symbol` / `Reference` 节点、`CONTAINS` / `DEFINES` / `REFERS_TO` 边和 evidence chunks。AKA runtime 仍只读取 `ossAnalyzerFactsPath`、校验 provenance、在 baseline ready 后 staging merge；它不启动 stack-graphs、不持有 analyzer 进程、不扫描源码做自研语义推断。
+
+推荐在 CPython 这类 50 万行以上 Python 仓库执行：
+
+```bash
+scripts/smoke-oss-analyzer-stack-graphs-python.sh \
+  --repo /path/to/cpython \
+  --facts /path/to/cpython/.aka/stack-graphs-python-oss-analyzer-facts.json \
+  --tool tree-sitter-stack-graphs-python \
+  --tool-version tree-sitter-stack-graphs-python-0.3.0 \
+  --max-query-positions 10000 \
+  --query-timeout-secs 5 \
+  --max-query-timeouts-per-file 2 \
+  --query importlib \
+  --context main
+```
+
+判定标准同 SCIP：Python 源码行数必须达到 `--min-lines`，facts bundle 必须先通过 `validate-facts`，baseline graph/search 必须先 ready，`provider=aka-facts-file` 必须明确 merged/skipped/timeout outcome；provider failed、invalid provenance 或 merge failed 视为失败；`search` 和指定 `context` 必须返回非空。stack-graphs 只是外部分析结果来源，不是 runtime fallback/debug channel。adapter 会跳过非 UTF-8 / analyzer 无法解析的单文件；definition query 有单批 timeout 和 per-file timeout 熔断，避免 CPython `_pydecimal.py` 这类慢点拖住整个 enrichment。
+
 Pyright 路径的大仓 smoke 用 `scripts/oss-analyzer-pyright-lsp.mjs` 生成 bundle，再用 `scripts/smoke-oss-analyzer-pyright.sh` 导入。这个 adapter 是脚本层工具：它启动外部开源 `pyright-langserver --stdio`，通过 LSP `textDocument/documentSymbol` 读取 Pyright 的分析结果，转换成 `File` / symbol 节点、`DEFINES` / `CONTAINS` 边和 symbol chunks。AKA runtime 仍只读取 `ossAnalyzerFactsPath`、校验 provenance、在 baseline ready 后 staging merge；它不启动 Pyright、不持有 LSP 会话、不扫描源码做自研语义推断。
 
 推荐在 CPython 这类 50 万行以上仓库执行：
