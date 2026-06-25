@@ -199,6 +199,22 @@ scripts/smoke-oss-analyzer-gopls.sh \
 
 判定标准同 Pyright：Go 源码行数必须达到 `--min-lines`，facts bundle 必须先通过 `validate-facts`，baseline graph/search 必须先 ready，`provider=aka-facts-file` 必须明确 merged/skipped/timeout outcome；provider failed、invalid provenance 或 merge failed 视为失败；`search` 和指定 `context` 必须返回非空。
 
+TypeScript 路径的大仓 smoke 用 `scripts/oss-analyzer-typescript-lsp.mjs` 生成 bundle，再用 `scripts/smoke-oss-analyzer-typescript.sh` 导入。adapter 启动外部开源 `typescript-language-server --stdio`（底层 tsserver），通过 LSP `textDocument/documentSymbol` 读取结果，转换成 `File` / symbol 节点、`DEFINES` / `CONTAINS` 边和 symbol chunks。AKA runtime 不启动 tsserver，只读取 adapter 产出的 `aka-facts` bundle。脚本默认跳过 `tests/baselines/reference` 这类生成基线目录，避免语言服务在极端生成文件上崩栈；行数门槛按过滤后的实际 TS/JS 文件重新计算，必须仍达到 `--min-lines`。
+
+推荐在 Microsoft TypeScript 这类 50 万行以上 TS/JS 仓库执行：
+
+```bash
+scripts/smoke-oss-analyzer-typescript.sh \
+  --repo /path/to/TypeScript \
+  --facts /path/to/TypeScript/.aka/typescript-oss-analyzer-facts.json \
+  --server 'npx --yes --package typescript-language-server@latest --package typescript@latest typescript-language-server --stdio' \
+  --tool-version typescript-language-server-5.3.0 \
+  --query Program \
+  --context createProgram
+```
+
+判定标准同 Pyright/gopls：过滤后的 TS/JS 源码行数必须达到 `--min-lines`，facts bundle 必须先通过 `validate-facts`，baseline graph/search 必须先 ready，`provider=aka-facts-file` 必须明确 merged/skipped/timeout outcome；provider failed、invalid provenance 或 merge failed 视为失败；`search` 和指定 `context` 必须返回非空。
+
 内部 runtime 的 optional enrichment merge 只在 baseline graph/search ready 后追加 facts：新节点和对应 chunks 追加到 search，边写入 graph 并依赖 provenance edge id 去重。merge 使用同一个 `ossAnalyzerEnrichmentMaxSecs` deadline，并先写入临时 staging 副本；只有 merge 全流程成功后才安装回正式 graph/search。merge 失败或 provider 失败只能产生 skipped outcome 与日志，并继续尝试后续 provider；原 baseline graph/search 不被污染、不置 failed、不阻塞查询。
 
 不再新增 Rust 侧自研业务语义 synthesis/enrichment 阶段。Route/GraphQL/Tool/Command/Config/Topic/Table/Migration/Transaction/Process/Community 等增强语义只能来自上述成熟外部事实源；缺失表示 coverage unknown，不能用阻塞式启发算法补齐。旧 AKA engine 内部自研增强 pass 不属于 embedded/direct baseline。
