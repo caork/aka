@@ -127,8 +127,8 @@ pub fn run_analyze_with_progress(
             }
             EngineEvent::Log { stream, line } => {
                 // Surface engine progress plus adapter diagnostics (per-stage
-                // done/timeout/skipped lines) so a skipped synthesis stage is
-                // visible in the headless analyze path, not just in the desktop.
+                // done/timeout/skipped lines) so optional OSS analyzer passes
+                // are visible in the headless path, not just in the desktop.
                 if stream == "engine" || stream == "adapter" {
                     eprintln!("  · {line}");
                 }

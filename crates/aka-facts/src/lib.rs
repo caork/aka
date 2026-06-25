@@ -456,6 +456,9 @@ pub struct RelationFact {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<u32>,
+    /// Provenance carrier for analyzer-derived relations. Enrichment adapters
+    /// should preserve the analyzer's own rule/role/path fields and include
+    /// AKA provenance (`source`, `analyzerId`, `toolVersion`, `adapterVersion`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<Value>,
 }

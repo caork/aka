@@ -19,7 +19,11 @@ pub use aka_facts::{
 pub use engine::{
     index_max_duration, AnalyzeFactsOptions, EngineError, EngineRunner, IndexingDeadline,
 };
-pub use enrichment::{run_optional_lsp_enrichment, LspEnrichmentOutcome, LspEnrichmentPolicy};
+pub use enrichment::{
+    allowed_lsp_analyzers, allowed_oss_analyzers, find_oss_analyzer, run_optional_lsp_enrichment,
+    stamp_enrichment_batch, stamp_enrichment_edge, stamp_enrichment_node, AnalyzerRunMetadata,
+    EnrichmentError, LspEnrichmentOutcome, LspEnrichmentPolicy, OssAnalyzer, OssAnalyzerKind,
+};
 pub use incremental::{
     build_parse_cache_manifest_from_facts, load_index_state, load_parse_cache_manifest,
     save_index_state, save_parse_cache_manifest, FileFactStats, FileFingerprint, IndexDelta,

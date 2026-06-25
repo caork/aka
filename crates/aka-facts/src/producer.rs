@@ -1,8 +1,10 @@
 //! Producer interfaces for in-process semantic facts.
 //!
 //! Native parsers, SCIP importers, stack-graphs adapters, and live LSP
-//! fallbacks all feed the same sink, so indexing depends on facts instead of a
-//! filesystem transport.
+//! adapters all feed the same sink, so indexing depends on facts instead of a
+//! filesystem transport. Implementations that enrich graph semantics must be
+//! allowlisted wrappers around mature OSS analyzers; this trait is not a home
+//! for new heuristic synthesis stages.
 
 use std::path::Path;
 
