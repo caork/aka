@@ -1253,7 +1253,7 @@ mod tests {
         let dir = std::env::temp_dir().join("aka-facts-jsonl-test");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("facts.jsonl");
+        let path = dir.join("records.jsonl");
         let node = serde_json::to_string(&FactRecord::Node(NodeFact {
             id: "sym:handler".into(),
             label: "Function".into(),
