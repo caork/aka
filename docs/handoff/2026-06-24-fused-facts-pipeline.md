@@ -4,7 +4,7 @@ Date: 2026-06-24
 
 Branch: `codex/fused-facts-pipeline`
 
-Goal: remove the `artifact/` / sidecar / engine SQLite path from the hot indexing architecture, fuse native AKA engine facts directly into Rust indexing, and make semantic producers reusable for SCIP / stack-graphs / LSP ecosystems.
+Goal: remove the `artifact/` / sidecar / engine SQLite path from the hot indexing architecture, fuse native AKA engine facts directly into Rust indexing, and keep enrichment inputs limited to explicit SCIP / stack-graphs / LSP ecosystem fact adapters.
 
 Update on 2026-06-25: the compatibility window was closed. Embedded/direct-facts is now the only engine runtime path. The old bundled `aka-engine` / `aka-engine.exe`, facts sidecar NDJSON, and legacy engine SQLite artifact adapter must not be kept as fallback or debug channels.
 
@@ -19,7 +19,6 @@ Latest relevant main repo commits:
 - `486cff8 feat: add embedded engine fact producer`
 - `fe35a62 docs: hand off fused facts pipeline work`
 - `26e3b67 infra: pin embedded facts engine`
-- `9019e84 feat: add semantic fact producer seam`
 - `b326c41 infra: pin fact sink engine`
 
 Nested engine repo `engine/aka-engine-src` latest relevant commits:
@@ -105,20 +104,14 @@ Runtime selection:
 - Docker builds the embedded engine runtime before the Rust runtime, then builds the Linux runtime with `--features embedded-engine`; `/opt/aka/engine/aka-engine` must not remain in the image as fallback.
 - CI keeps the default workspace test/clippy gates, adds an embedded Linux gate that clones the pinned engine ref and builds `libaka_engine.a`, and adds a Windows embedded gate that builds `aka_engine.dll` and runs aka-core embedded tests.
 
-### Semantic producer seam
+### OSS analyzer facts import
 
-`aka-facts` has a public semantic producer seam:
-
-- `ProducerContext`
-- `ProducerCapability`
-- `SemanticFactSink`
-- `SemanticFactProducer`
-- `SemanticFactBundleBuilder`
-- `produce_semantic_batch`
-- `produce_semantic_into`
-- `replay_semantic_bundle_into`
-
-`crates/aka-core/src/lib.rs` re-exports the semantic records and producer traits so future SCIP / stack-graphs / LSP adapters can write facts without depending on private engine internals.
+`aka-facts` keeps the normalized fact records and `SemanticFactBundle::lower()` for
+format adapters such as SCIP. The old generic in-process producer extension point
+was removed after the enrichment rewrite so new runtime code cannot add ad-hoc
+Rust heuristic producers. Future SCIP / stack-graphs / LSP work should stay in
+explicit external adapters that emit `aka-facts` bundles, then let aka-core
+validate allowlisted OSS analyzer provenance before graph/search merge.
 
 Graph/search writers consume `FactSource`; they no longer require artifact files. They are still replay-based rather than a one-pass streaming writer because the current writer reads nodes more than once.
 
@@ -189,7 +182,7 @@ These are not blockers for the fused hot path but remain useful next work:
 
 - Keep the Windows DLL direct-facts path under release smoke coverage; revisit MSVC static linking only if a future packaging/signing constraint makes the DLL resource path unsuitable.
 - Replace replayable `FactBatch` with a true one-pass graph/search writer after the writer no longer needs to reread nodes.
-- Add real SCIP / stack-graphs / LSP adapters on top of `aka-facts::SemanticFactProducer`; the seam and fake producer tests already exist.
+- Add more SCIP / stack-graphs / LSP adapters as explicit external fact bundle producers with large-repo smoke coverage; do not reintroduce a generic Rust heuristic extension point.
 - Improve the C embedded API to take cache dir through pipeline state instead of process-global `AKA_ENGINE_CACHE_DIR`.
 - Run Docker image smoke on a machine with Docker daemon available.
 

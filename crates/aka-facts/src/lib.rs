@@ -10,14 +10,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-pub mod producer;
 #[cfg(feature = "scip-import")]
 pub mod scip_import;
 
-pub use producer::{
-    produce_semantic_batch, produce_semantic_into, replay_semantic_bundle_into, ProducerCapability,
-    ProducerContext, SemanticFactBundleBuilder, SemanticFactProducer, SemanticFactSink,
-};
 #[cfg(feature = "scip-import")]
 pub use scip_import::{
     import_scip_index, import_scip_path, import_scip_path_with_metadata, read_scip_index_metadata,

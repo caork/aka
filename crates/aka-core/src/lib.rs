@@ -14,13 +14,11 @@ pub use aka_facts::{
     ScipIndexMetadata,
 };
 pub use aka_facts::{
-    produce_semantic_batch, produce_semantic_into, replay_semantic_bundle_into, ChunkFact,
-    EdgeFact, FactBatch, FactBatchFileError, FactItem, FactManifest, FactRecord, FactSink,
-    FactSource, FactSourceError, FactStats, FileFact, JsonMap, LoadedOssAnalyzerFacts, NodeFact,
-    OccurrenceFact, OccurrenceRole, OssAnalyzerBundleMetadata, OssAnalyzerFactBundle,
-    ProducerCapability, ProducerContext, RelationFact, RelationKind, SemanticFactBundle,
-    SemanticFactBundleBuilder, SemanticFactProducer, SemanticFactSink, SymbolFact, SymbolId,
-    SymbolKind, TextRange, FACTS_VERSION,
+    ChunkFact, EdgeFact, FactBatch, FactBatchFileError, FactItem, FactManifest, FactRecord,
+    FactSink, FactSource, FactSourceError, FactStats, FileFact, JsonMap, LoadedOssAnalyzerFacts,
+    NodeFact, OccurrenceFact, OccurrenceRole, OssAnalyzerBundleMetadata, OssAnalyzerFactBundle,
+    RelationFact, RelationKind, SemanticFactBundle, SymbolFact, SymbolId, SymbolKind, TextRange,
+    FACTS_VERSION,
 };
 pub use engine::{
     index_max_duration, AnalyzeFactsOptions, EngineError, EngineRunner, IndexingDeadline,
