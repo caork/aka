@@ -1,6 +1,6 @@
 //! SQLite 持久层 — nodes/edges/edge_types/meta/positions/clusters 表，
 //! 单事务批量摄取（prepared statement，悬空边跳过计数）+ 基本查询。
-//! 打开时做轻量列迁移（`migrate`，目前只有 edges.step），旧库无需重建。
+//! 打开时做轻量列迁移（`migrate`），旧库无需重建。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -21,12 +21,14 @@ CREATE TABLE IF NOT EXISTS nodes (
     props      TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS edges (
+    id         TEXT,
     source     INTEGER NOT NULL,
     target     INTEGER NOT NULL,
     type_id    INTEGER NOT NULL,
     confidence REAL NOT NULL DEFAULT 0,
     reason     TEXT NOT NULL DEFAULT '',
-    step       INTEGER
+    step       INTEGER,
+    evidence   TEXT
 );
 CREATE TABLE IF NOT EXISTS edge_types (
     type_id INTEGER PRIMARY KEY,
@@ -74,6 +76,8 @@ pub struct IngestStats {
     pub duplicate_nodes: u64,
     /// 成功插入边数。
     pub edges: u64,
+    /// 因 edge id 重复被跳过的边数。
+    pub duplicate_edges: u64,
     /// 端点缺失（悬空）被跳过的边数。
     pub dangling_edges: u64,
 }
@@ -136,9 +140,11 @@ impl NodeRow {
 #[derive(Debug, Clone)]
 pub struct LinkedNodeRow {
     pub node: NodeRow,
+    pub edge_id: Option<String>,
     pub edge_type: String,
     pub reason: String,
     pub step: Option<u32>,
+    pub evidence: Option<serde_json::Value>,
 }
 
 impl GraphStore {
@@ -177,22 +183,24 @@ impl GraphStore {
     /// 轻量迁移。`CREATE TABLE IF NOT EXISTS` 不会改动已存在的表，
     /// 旧库要在这里补列；create/open 都走可写连接，ALTER 安全。
     fn migrate(conn: &Connection) -> Result<()> {
-        // edges.step：流程步号（`符号 -[STEP_IN_PROCESS]-> Process` 的 1-based 序）。
-        let has_step = {
-            let mut stmt = conn.prepare("PRAGMA table_info(edges)")?;
-            let mut rows = stmt.query([])?;
-            let mut found = false;
-            while let Some(row) = rows.next()? {
-                if row.get::<_, String>(1)? == "step" {
-                    found = true;
-                    break;
-                }
+        for column in [
+            ("id", "TEXT"),
+            (
+                "step",
+                "INTEGER", // 流程步号（`符号 -[STEP_IN_PROCESS]-> Process` 的 1-based 序）。
+            ),
+            ("evidence", "TEXT"),
+        ] {
+            if !edge_has_column(conn, column.0)? {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE edges ADD COLUMN {} {}",
+                    column.0, column.1
+                ))?;
             }
-            found
-        };
-        if !has_step {
-            conn.execute_batch("ALTER TABLE edges ADD COLUMN step INTEGER")?;
         }
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_id ON edges(id) WHERE id IS NOT NULL;",
+        )?;
         Ok(())
     }
 
@@ -200,7 +208,8 @@ impl GraphStore {
         &self.conn
     }
 
-    /// 单事务批量摄取。节点 id 重复跳过；悬空边（任一端点不存在）跳过并计数。
+    /// 单事务批量摄取。节点 id 重复跳过；非空 edge id 重复跳过；
+    /// 悬空边（任一端点不存在）跳过并计数。
     pub fn ingest(
         &mut self,
         nodes: impl Iterator<Item = NodeRec>,
@@ -267,8 +276,8 @@ impl GraphStore {
             let mut ins_type =
                 tx.prepare_cached("INSERT INTO edge_types (type_id, name) VALUES (?1, ?2)")?;
             let mut ins_edge = tx.prepare_cached(
-                "INSERT INTO edges (source, target, type_id, confidence, reason, step) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR IGNORE INTO edges (id, source, target, type_id, confidence, reason, step, evidence) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
 
             let mut resolve = |id: &str, map: &mut HashMap<String, i64>| -> Result<Option<i64>> {
@@ -309,8 +318,23 @@ impl GraphStore {
                         tid
                     }
                 };
-                ins_edge.execute(params![src, dst, tid, e.confidence, e.reason, e.step])?;
-                stats.edges += 1;
+                let edge_id = optional_edge_id(&e.id, e.evidence.as_ref());
+                let evidence = e.evidence.as_ref().map(serde_json::to_string).transpose()?;
+                let changed = ins_edge.execute(params![
+                    edge_id,
+                    src,
+                    dst,
+                    tid,
+                    e.confidence,
+                    e.reason,
+                    e.step,
+                    evidence,
+                ])?;
+                if changed == 1 {
+                    stats.edges += 1;
+                } else {
+                    stats.duplicate_edges += 1;
+                }
             }
         }
         tx.commit()?;
@@ -453,7 +477,7 @@ impl GraphStore {
         let linked_node_cols = "nodes.rowid, nodes.id, nodes.label, nodes.name, nodes.file_path, \
              nodes.start_line, nodes.end_line, nodes.props";
         let sql = format!(
-            "SELECT {linked_node_cols}, t.name, e.reason, e.step \
+            "SELECT {linked_node_cols}, e.id, t.name, e.reason, e.step, e.evidence \
              FROM edges e \
              JOIN edge_types t ON t.type_id = e.type_id \
              JOIN nodes ON nodes.rowid = {node_side} \
@@ -467,11 +491,14 @@ impl GraphStore {
         }
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_vec.as_slice(), |row| {
+            let evidence_text: Option<String> = row.get(12)?;
             Ok(LinkedNodeRow {
                 node: NodeRow::from_row(row)?,
-                edge_type: row.get(8)?,
-                reason: row.get(9)?,
-                step: row.get(10)?,
+                edge_id: row.get(8)?,
+                edge_type: row.get(9)?,
+                reason: row.get(10)?,
+                step: row.get(11)?,
+                evidence: parse_optional_json(evidence_text),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -587,6 +614,36 @@ fn escape_like(s: &str) -> String {
     out
 }
 
+fn edge_has_column(conn: &Connection, name: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(edges)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn optional_edge_id<'a>(id: &'a str, evidence: Option<&serde_json::Value>) -> Option<&'a str> {
+    if id.is_empty() || !has_provenance(evidence) {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+fn has_provenance(evidence: Option<&serde_json::Value>) -> bool {
+    matches!(
+        evidence,
+        Some(serde_json::Value::Object(map)) if map.contains_key("provenance")
+    )
+}
+
+fn parse_optional_json(text: Option<String>) -> Option<serde_json::Value> {
+    text.and_then(|text| serde_json::from_str(&text).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,7 +659,8 @@ mod tests {
         dir.join(format!("{base}.db"))
     }
 
-    /// 旧库（edges 建表早于 step 列）打开时自动 ALTER 补列，且补列后可正常摄取步号。
+    /// 旧库（edges 建表早于 id/step/evidence 列）打开时自动 ALTER 补列，
+    /// 且补列后可正常摄取步号。
     #[test]
     fn open_migrates_legacy_edges_table() {
         let path = temp_db("legacy-schema");
@@ -626,16 +684,34 @@ mod tests {
         }
 
         let mut store = GraphStore::open(&path).unwrap();
-        let has_step = {
+        let edge_columns: Vec<String> = {
             let mut stmt = store.conn().prepare("PRAGMA table_info(edges)").unwrap();
-            let cols: Vec<String> = stmt
-                .query_map([], |r| r.get::<_, String>(1))
+            stmt.query_map([], |r| r.get::<_, String>(1))
                 .unwrap()
                 .collect::<rusqlite::Result<_>>()
-                .unwrap();
-            cols.contains(&"step".to_string())
+                .unwrap()
         };
-        assert!(has_step, "open legacy db must add edges.step");
+        assert!(
+            edge_columns.contains(&"id".to_string()),
+            "open legacy db must add edges.id"
+        );
+        assert!(
+            edge_columns.contains(&"step".to_string()),
+            "open legacy db must add edges.step"
+        );
+        assert!(
+            edge_columns.contains(&"evidence".to_string()),
+            "open legacy db must add edges.evidence"
+        );
+        let index_count: u32 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_edges_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 1);
 
         // 迁移后的库能摄取带步号的边，并通过 process 查询读回。
         let nodes = vec![
@@ -676,6 +752,109 @@ mod tests {
         drop(store);
         let store = GraphStore::open(&path).unwrap();
         assert_eq!(store.edge_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn ingest_preserves_edge_id_and_evidence_and_dedupes_nonempty_edge_id() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let nodes = vec![
+            NodeRec {
+                id: "a".into(),
+                label: "Function".into(),
+                properties: json!({"name": "a"}).as_object().unwrap().clone(),
+            },
+            NodeRec {
+                id: "b".into(),
+                label: "Function".into(),
+                properties: json!({"name": "b"}).as_object().unwrap().clone(),
+            },
+        ];
+        let edge = EdgeRec {
+            id: "scip:edge:a-b".into(),
+            source_id: "a".into(),
+            target_id: "b".into(),
+            edge_type: "CALLS".into(),
+            confidence: 1.0,
+            reason: "scip occurrence".into(),
+            step: None,
+            evidence: Some(json!({
+                "source": "scip",
+                "provenance": {
+                    "analyzerId": "scip",
+                    "toolVersion": "1.0"
+                }
+            })),
+        };
+
+        let stats = store
+            .ingest(nodes.into_iter(), vec![edge.clone()].into_iter())
+            .unwrap();
+        let duplicate = store
+            .ingest(std::iter::empty(), vec![edge].into_iter())
+            .unwrap();
+
+        assert_eq!(stats.edges, 1);
+        assert_eq!(duplicate.edges, 0);
+        assert_eq!(duplicate.duplicate_edges, 1);
+        assert_eq!(store.edge_count().unwrap(), 1);
+
+        let a = store.node_by_id("a").unwrap().unwrap();
+        let linked = store
+            .outgoing_linked_nodes(a.rowid, &["CALLS"])
+            .expect("linked nodes");
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].edge_id.as_deref(), Some("scip:edge:a-b"));
+        assert_eq!(linked[0].edge_type, "CALLS");
+        assert_eq!(
+            linked[0]
+                .evidence
+                .as_ref()
+                .and_then(|value| value.get("source")),
+            Some(&json!("scip"))
+        );
+        assert_eq!(
+            linked[0]
+                .evidence
+                .as_ref()
+                .and_then(|value| value.get("provenance"))
+                .and_then(|value| value.get("analyzerId")),
+            Some(&json!("scip"))
+        );
+    }
+
+    #[test]
+    fn ingest_keeps_duplicate_legacy_edges_without_provenance() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let nodes = vec![
+            NodeRec {
+                id: "a".into(),
+                label: "Function".into(),
+                properties: json!({"name": "a"}).as_object().unwrap().clone(),
+            },
+            NodeRec {
+                id: "b".into(),
+                label: "Function".into(),
+                properties: json!({"name": "b"}).as_object().unwrap().clone(),
+            },
+        ];
+        let edge = EdgeRec {
+            id: "a-b".into(),
+            source_id: "a".into(),
+            target_id: "b".into(),
+            edge_type: "CALLS".into(),
+            confidence: 1.0,
+            reason: String::new(),
+            step: None,
+            evidence: None,
+        };
+
+        let stats = store
+            .ingest(nodes.into_iter(), vec![edge.clone(), edge].into_iter())
+            .unwrap();
+
+        assert_eq!(stats.edges, 2);
+        assert_eq!(stats.duplicate_edges, 0);
+        assert_eq!(store.edge_count().unwrap(), 2);
     }
 
     #[test]
