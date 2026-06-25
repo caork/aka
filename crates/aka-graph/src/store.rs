@@ -208,6 +208,14 @@ impl GraphStore {
         &self.conn
     }
 
+    /// Flush WAL state into the main database file before filesystem-level
+    /// copies/replacements. This keeps staged graph copies self-contained.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
     /// 单事务批量摄取。节点 id 重复跳过；非空 edge id 重复跳过；
     /// 悬空边（任一端点不存在）跳过并计数。
     pub fn ingest(

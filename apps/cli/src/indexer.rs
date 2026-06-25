@@ -1,7 +1,7 @@
 //! 索引管线：replayable facts → 图存储（SQLite + 布局） + 搜索索引（tantivy）。
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -136,12 +136,32 @@ fn merge_enrichment_facts_inner(
     source: &impl FactSource,
     paths: &RepoPaths,
     deadline: Option<IndexingDeadline>,
+    progress: Option<&mut IndexProgress<'_>>,
+) -> Result<EnrichmentMergeSummary> {
+    let staged_paths = stage_existing_indexes_for_enrichment(paths)?;
+    let summary = merge_enrichment_facts_staged(source, &staged_paths, deadline, progress);
+    match summary {
+        Ok(summary) => {
+            install_staged_enrichment(paths, &staged_paths)?;
+            Ok(summary)
+        }
+        Err(err) => {
+            cleanup_staged_enrichment(&staged_paths);
+            Err(err)
+        }
+    }
+}
+
+fn merge_enrichment_facts_staged(
+    source: &impl FactSource,
+    paths: &RepoPaths,
+    deadline: Option<IndexingDeadline>,
     mut progress: Option<&mut IndexProgress<'_>>,
 ) -> Result<EnrichmentMergeSummary> {
     emit_index_progress(
         progress.as_deref_mut(),
         "enrichment:open",
-        "opening existing graph and search indexes".into(),
+        "opening staged graph and search indexes".into(),
         None,
         None,
     );
@@ -266,6 +286,112 @@ fn merge_enrichment_facts_inner(
     );
 
     Ok(summary)
+}
+
+fn stage_existing_indexes_for_enrichment(paths: &RepoPaths) -> Result<RepoPaths> {
+    checkpoint_graph(&paths.graph_db())?;
+    let staging_root = unique_staging_root(&paths.root, "enrichment");
+    let graph_tmp = staging_root.join("graph.db");
+    let search_tmp = staging_root.join("search");
+    std::fs::create_dir_all(&staging_root)
+        .with_context(|| format!("create enrichment staging dir {}", staging_root.display()))?;
+    std::fs::copy(paths.graph_db(), &graph_tmp).with_context(|| {
+        format!(
+            "copy graph index {} to {}",
+            paths.graph_db().display(),
+            graph_tmp.display()
+        )
+    })?;
+    copy_dir_all(&paths.search_dir(), &search_tmp).with_context(|| {
+        format!(
+            "copy search index {} to {}",
+            paths.search_dir().display(),
+            search_tmp.display()
+        )
+    })?;
+    Ok(RepoPaths { root: staging_root })
+}
+
+fn install_staged_enrichment(paths: &RepoPaths, staged_paths: &RepoPaths) -> Result<()> {
+    checkpoint_graph(&staged_paths.graph_db())?;
+    checkpoint_graph(&paths.graph_db())?;
+    let backup_paths = RepoPaths {
+        root: unique_staging_root(&paths.root, "enrichment-backup"),
+    };
+    let install = install_staged_enrichment_inner(paths, staged_paths, &backup_paths);
+    if install.is_err() {
+        restore_enrichment_backup(paths, &backup_paths);
+    }
+    install.with_context(|| {
+        format!(
+            "install staged enrichment indexes from {}",
+            staged_paths.root.display()
+        )
+    })?;
+    cleanup_staged_enrichment(&backup_paths);
+    cleanup_staged_enrichment(staged_paths);
+    Ok(())
+}
+
+fn install_staged_enrichment_inner(
+    paths: &RepoPaths,
+    staged_paths: &RepoPaths,
+    backup_paths: &RepoPaths,
+) -> Result<()> {
+    std::fs::create_dir_all(&backup_paths.root).with_context(|| {
+        format!(
+            "create enrichment backup dir {}",
+            backup_paths.root.display()
+        )
+    })?;
+    remove_sqlite_sidecars(&paths.graph_db())?;
+    std::fs::rename(paths.search_dir(), backup_paths.search_dir()).with_context(|| {
+        format!(
+            "backup search index {} to {}",
+            paths.search_dir().display(),
+            backup_paths.search_dir().display()
+        )
+    })?;
+    std::fs::rename(paths.graph_db(), backup_paths.graph_db()).with_context(|| {
+        format!(
+            "backup graph index {} to {}",
+            paths.graph_db().display(),
+            backup_paths.graph_db().display()
+        )
+    })?;
+    std::fs::rename(staged_paths.graph_db(), paths.graph_db()).with_context(|| {
+        format!(
+            "install graph index {} to {}",
+            staged_paths.graph_db().display(),
+            paths.graph_db().display()
+        )
+    })?;
+    std::fs::rename(staged_paths.search_dir(), paths.search_dir()).with_context(|| {
+        format!(
+            "install search index {} to {}",
+            staged_paths.search_dir().display(),
+            paths.search_dir().display()
+        )
+    })?;
+    Ok(())
+}
+
+fn restore_enrichment_backup(paths: &RepoPaths, backup_paths: &RepoPaths) {
+    if backup_paths.graph_db().is_file() {
+        let _ = std::fs::remove_file(paths.graph_db());
+        let _ = remove_sqlite_sidecars(&paths.graph_db());
+        let _ = std::fs::rename(backup_paths.graph_db(), paths.graph_db());
+    }
+    if backup_paths.search_dir().is_dir() {
+        if paths.search_dir().exists() {
+            let _ = std::fs::remove_dir_all(paths.search_dir());
+        }
+        let _ = std::fs::rename(backup_paths.search_dir(), paths.search_dir());
+    }
+}
+
+fn cleanup_staged_enrichment(staged_paths: &RepoPaths) {
+    let _ = std::fs::remove_dir_all(&staged_paths.root);
 }
 
 fn index_facts_inner(
@@ -773,6 +899,60 @@ fn incremental_preflight(
     None
 }
 
+fn checkpoint_graph(graph_db: &Path) -> Result<()> {
+    let store = GraphStore::open(graph_db)
+        .with_context(|| format!("open graph index {}", graph_db.display()))?;
+    store
+        .checkpoint()
+        .with_context(|| format!("checkpoint graph index {}", graph_db.display()))?;
+    Ok(())
+}
+
+fn unique_staging_root(root: &Path, kind: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let id = format!(
+        "{}.tmp-{}-{}-{:?}",
+        kind,
+        std::process::id(),
+        nanos,
+        std::thread::current().id()
+    )
+    .replace(['(', ')', ' '], "-");
+    root.join(id)
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst).with_context(|| format!("create dir {}", dst.display()))?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("read dir {}", src.display()))? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else if ty.is_file() {
+            std::fs::copy(&from, &to)
+                .with_context(|| format!("copy {} to {}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_sqlite_sidecars(path: &Path) -> Result<()> {
+    remove_if_exists(&sidecar_path(path, "wal"))?;
+    remove_if_exists(&sidecar_path(path, "shm"))?;
+    Ok(())
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut os = path.as_os_str().to_owned();
+    os.push(format!("-{suffix}"));
+    PathBuf::from(os)
+}
+
 fn build_incremental_slice(
     source: &impl FactSource,
     delta: &IndexDelta,
@@ -1092,5 +1272,109 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn merge_enrichment_failure_leaves_baseline_indexes_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 1,
+                nodes: 1,
+                edges: 0,
+                chunks: 1,
+            },
+            vec![NodeRec {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({
+                    "name": "handler",
+                    "filePath": "src/lib.rs",
+                    "startLine": 0
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }],
+            Vec::new(),
+            vec![ChunkRec {
+                node_id: "sym:handler".into(),
+                kind: "ast-function".into(),
+                file_path: "src/lib.rs".into(),
+                start_line: 0,
+                end_line: 0,
+                text: "fn handler() {}".into(),
+            }],
+        );
+        index_facts(&baseline, &paths).unwrap();
+
+        let enrichment = FactBatch::new(
+            FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 0,
+                chunks: 1,
+            },
+            vec![NodeRec {
+                id: "scip:symbol:service".into(),
+                label: "Interface".into(),
+                properties: serde_json::json!({
+                    "name": "Service",
+                    "source": "scip",
+                    "provenance": {
+                        "source": "scip",
+                        "analyzerId": "scip",
+                        "toolVersion": "1.0",
+                        "adapterVersion": "test",
+                        "oss": true
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }],
+            Vec::new(),
+            vec![ChunkRec {
+                node_id: "scip:symbol:service".into(),
+                kind: "scip-symbol".into(),
+                file_path: "src/lib.rs".into(),
+                start_line: 0,
+                end_line: 0,
+                text: "trait Service".into(),
+            }],
+        );
+
+        let err = merge_enrichment_facts_with_deadline_progress(
+            &enrichment,
+            &paths,
+            IndexingDeadline::new(std::time::Duration::ZERO),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("timed out") || err.to_string().contains("cancelled"),
+            "unexpected enrichment error: {err:#}"
+        );
+
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        assert_eq!(graph.node_count().unwrap(), 1);
+        assert_eq!(graph.edge_count().unwrap(), 0);
+        assert!(graph.node_by_id("scip:symbol:service").unwrap().is_none());
+        let search = SearchIndex::open(&paths.search_dir()).unwrap();
+        assert!(search
+            .search("handler", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| { hit.node_id == "sym:handler" }));
+        assert!(search
+            .search("Service", 10)
+            .unwrap()
+            .iter()
+            .all(|hit| hit.node_id != "scip:symbol:service"));
     }
 }
