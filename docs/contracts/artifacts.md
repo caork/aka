@@ -231,6 +231,22 @@ scripts/smoke-oss-analyzer-rust-analyzer.sh \
 
 判定标准同其它 LSP：Rust 源码行数必须达到 `--min-lines`，facts bundle 必须先通过 `validate-facts`，baseline graph/search 必须先 ready，`provider=aka-facts-file` 必须明确 merged/skipped/timeout outcome；provider failed、invalid provenance 或 merge failed 视为失败；`search` 和指定 `context` 必须返回非空。
 
+JDTLS 路径的大仓 smoke 用 `scripts/oss-analyzer-jdtls-lsp.mjs` 生成 bundle，再用 `scripts/smoke-oss-analyzer-jdtls.sh` 导入。adapter 启动外部开源 Eclipse JDT Language Server，通过 LSP `textDocument/documentSymbol` 读取结果，转换成 `File` / symbol 节点、`DEFINES` / `CONTAINS` 边和 symbol chunks。AKA runtime 不启动 JDTLS，只读取 adapter 产出的 `aka-facts` bundle。
+
+推荐在 Apache Cassandra 这类 50 万行以上 Java 仓库执行：
+
+```bash
+scripts/smoke-oss-analyzer-jdtls.sh \
+  --repo /path/to/cassandra \
+  --facts /path/to/cassandra/.aka/jdtls-oss-analyzer-facts.json \
+  --server 'jdtls -data /tmp/aka-jdtls-workspace' \
+  --tool-version jdtls-2026-06-26 \
+  --query Cassandra \
+  --context StorageService
+```
+
+判定标准同其它 LSP：过滤后的 Java 源码行数必须达到 `--min-lines`，facts bundle 必须先通过 `validate-facts`，baseline graph/search 必须先 ready，`provider=aka-facts-file` 必须明确 merged/skipped/timeout outcome；provider failed、invalid provenance 或 merge failed 视为失败；`search` 和指定 `context` 必须返回非空。脚本默认跳过 `framework-docs`、`test/simulator`、`test/unit`、`tools/stress` 这类会让 JDTLS 长时间卡在单文件符号请求上的目录；行数门槛按过滤后的实际 Java 文件重新计算。
+
 内部 runtime 的 optional enrichment merge 只在 baseline graph/search ready 后追加 facts：新节点和对应 chunks 追加到 search，边写入 graph 并依赖 provenance edge id 去重。merge 使用同一个 `ossAnalyzerEnrichmentMaxSecs` deadline，并先写入临时 staging 副本；只有 merge 全流程成功后才安装回正式 graph/search。merge 失败或 provider 失败只能产生 skipped outcome 与日志，并继续尝试后续 provider；原 baseline graph/search 不被污染、不置 failed、不阻塞查询。
 
 不再新增 Rust 侧自研业务语义 synthesis/enrichment 阶段。Route/GraphQL/Tool/Command/Config/Topic/Table/Migration/Transaction/Process/Community 等增强语义只能来自上述成熟外部事实源；缺失表示 coverage unknown，不能用阻塞式启发算法补齐。旧 AKA engine 内部自研增强 pass 不属于 embedded/direct baseline。
