@@ -1289,5 +1289,4 @@ mod tests {
         assert_eq!(graphql_hit.node_id, "graphql:create-order");
         assert_eq!(graphql_hit.label, "GraphQL");
     }
-
 }
