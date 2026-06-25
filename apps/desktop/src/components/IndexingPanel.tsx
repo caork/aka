@@ -65,7 +65,7 @@ export default function IndexingPanel({ repo }: { repo: Repo }) {
         </div>
 
         <div className="mb-4">
-          <div className="mb-3 grid grid-cols-5 gap-2">
+          <div className="mb-3 grid grid-cols-6 gap-2">
             {INDEX_PHASES.map((phase, idx) => {
               const state =
                 repo.status === "failed" && idx >= activePhase

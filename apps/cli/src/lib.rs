@@ -11,7 +11,8 @@ use aka_core::{
     build_parse_cache_manifest_from_facts, load_index_state, load_parse_cache_manifest,
     registry::now_unix, save_index_state, save_parse_cache_manifest, user_facing_path,
     AnalyzeFactsOptions, EngineEvent, EngineRunner, FactSource, FactStats, IndexDelta, IndexState,
-    IndexingDeadline, PipelineProgress, PipelineStage, Registry, RepoEntry, RepoPaths,
+    IndexingDeadline, LspEnrichmentPolicy, PipelineProgress, PipelineStage, Registry, RepoEntry,
+    RepoPaths,
 };
 use anyhow::{Context, Result};
 
@@ -230,6 +231,22 @@ pub fn run_analyze_with_progress(
     save_index_state(&paths.index_state_path(), &current_state)
         .with_context(|| format!("save index state {}", paths.index_state_path().display()))?;
 
+    let lsp_policy = aka_core::AkaSettings::load()
+        .map(LspEnrichmentPolicy::from_settings)
+        .unwrap_or_default();
+    let mut lsp_progress = |ev: &EngineEvent| {
+        if let Some(cb) = progress.as_deref_mut() {
+            cb(ev);
+        }
+    };
+    let lsp_outcome = aka_core::run_optional_lsp_enrichment(&repo, lsp_policy, &mut lsp_progress);
+    if let Some(cb) = progress.as_mut() {
+        cb(&EngineEvent::Log {
+            stream: "runtime".into(),
+            line: format!("lsp enrichment outcome {lsp_outcome:?}"),
+        });
+    }
+
     let summary = format!(
         "aka ▸ {} 就绪：{} 节点 / {} 边（悬空跳过 {}）/ {} 切块{}；delta {}{}",
         repo.file_name()
@@ -262,6 +279,7 @@ fn index_stage(stage: &str) -> PipelineStage {
         "search:nodes" => PipelineStage::SearchNodes,
         "search:chunks" => PipelineStage::SearchChunks,
         "search:commit" => PipelineStage::SearchCommit,
+        "lsp-enrichment" => PipelineStage::LspEnrichment,
         _ if stage.starts_with("incremental:graph") => PipelineStage::GraphNodes,
         _ if stage.starts_with("incremental:layout") => PipelineStage::GraphLayout,
         _ if stage.starts_with("incremental:search") => PipelineStage::SearchNodes,

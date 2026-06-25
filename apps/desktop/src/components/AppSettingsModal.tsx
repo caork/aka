@@ -30,10 +30,18 @@ const THEME_OPTIONS: { id: ThemeMode; label: string }[] = [
 const INDEX_MAX_DEFAULT = 60;
 const INDEX_MAX_MIN = 10;
 const INDEX_MAX_LIMIT = 24 * 60 * 60;
+const LSP_MAX_DEFAULT = 30;
+const LSP_MAX_MIN = 5;
+const LSP_MAX_LIMIT = 10 * 60;
 
 function clampIndexMaxSecs(value: number): number {
   if (!Number.isFinite(value)) return INDEX_MAX_DEFAULT;
   return Math.min(INDEX_MAX_LIMIT, Math.max(INDEX_MAX_MIN, Math.round(value)));
+}
+
+function clampLspMaxSecs(value: number): number {
+  if (!Number.isFinite(value)) return LSP_MAX_DEFAULT;
+  return Math.min(LSP_MAX_LIMIT, Math.max(LSP_MAX_MIN, Math.round(value)));
 }
 
 export default function AppSettingsModal({
@@ -57,6 +65,11 @@ export default function AppSettingsModal({
   const [release, setRelease] = useState<ReleaseInfo | null>(null);
   const [indexMaxSecs, setIndexMaxSecs] = useState(INDEX_MAX_DEFAULT);
   const [savedIndexMaxSecs, setSavedIndexMaxSecs] = useState(INDEX_MAX_DEFAULT);
+  const [lspEnrichmentEnabled, setLspEnrichmentEnabled] = useState(false);
+  const [savedLspEnrichmentEnabled, setSavedLspEnrichmentEnabled] = useState(false);
+  const [lspEnrichmentMaxSecs, setLspEnrichmentMaxSecs] = useState(LSP_MAX_DEFAULT);
+  const [savedLspEnrichmentMaxSecs, setSavedLspEnrichmentMaxSecs] =
+    useState(LSP_MAX_DEFAULT);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -69,6 +82,11 @@ export default function AppSettingsModal({
         const next = clampIndexMaxSecs(settings.indexMaxSecs);
         setIndexMaxSecs(next);
         setSavedIndexMaxSecs(next);
+        const nextLsp = clampLspMaxSecs(settings.lspEnrichmentMaxSecs);
+        setLspEnrichmentEnabled(settings.lspEnrichmentEnabled);
+        setSavedLspEnrichmentEnabled(settings.lspEnrichmentEnabled);
+        setLspEnrichmentMaxSecs(nextLsp);
+        setSavedLspEnrichmentMaxSecs(nextLsp);
       })
       .catch((e) => {
         if (!cancelled) {
@@ -184,11 +202,18 @@ export default function AppSettingsModal({
     try {
       const settings = await setAppSettings({
         indexMaxSecs: clampIndexMaxSecs(indexMaxSecs),
+        lspEnrichmentEnabled,
+        lspEnrichmentMaxSecs: clampLspMaxSecs(lspEnrichmentMaxSecs),
       });
       const next = clampIndexMaxSecs(settings.indexMaxSecs);
       setIndexMaxSecs(next);
       setSavedIndexMaxSecs(next);
-      setNotice("Indexing 时间预算已保存");
+      const nextLsp = clampLspMaxSecs(settings.lspEnrichmentMaxSecs);
+      setLspEnrichmentEnabled(settings.lspEnrichmentEnabled);
+      setSavedLspEnrichmentEnabled(settings.lspEnrichmentEnabled);
+      setLspEnrichmentMaxSecs(nextLsp);
+      setSavedLspEnrichmentMaxSecs(nextLsp);
+      setNotice("Indexing 设置已保存");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -196,7 +221,10 @@ export default function AppSettingsModal({
     }
   };
 
-  const indexDirty = clampIndexMaxSecs(indexMaxSecs) !== savedIndexMaxSecs;
+  const indexDirty =
+    clampIndexMaxSecs(indexMaxSecs) !== savedIndexMaxSecs ||
+    lspEnrichmentEnabled !== savedLspEnrichmentEnabled ||
+    clampLspMaxSecs(lspEnrichmentMaxSecs) !== savedLspEnrichmentMaxSecs;
 
   return (
     <Modal open={open} onClose={onClose} title="Settings" width={520}>
@@ -315,6 +343,53 @@ export default function AppSettingsModal({
           >
             {settingsBusy ? "Saving..." : "Save"}
           </button>
+        </div>
+        <div className="themed-divider mt-4 border-t pt-4">
+          <div className="flex items-start gap-4">
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] font-medium text-ink">LSP enrichment</div>
+              <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
+                仅用于后续成熟语言服务增强；跳过或失败不影响 graph/search ready。
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={lspEnrichmentEnabled}
+              onClick={() => setLspEnrichmentEnabled((v) => !v)}
+              disabled={settingsBusy}
+              className={`focus-ring relative h-7 w-12 flex-none rounded-full transition-colors duration-150 ease-out ${
+                lspEnrichmentEnabled ? "bg-[var(--accent)]" : "bg-[var(--glass-strong)]"
+              }`}
+              style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }}
+              data-testid="lsp-enrichment-switch"
+            >
+              <span
+                className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow-sm transition-transform duration-150 ease-out ${
+                  lspEnrichmentEnabled ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <span className="cmd-input flex h-8 w-[96px] flex-none items-center px-2.5">
+              <input
+                type="number"
+                min={LSP_MAX_MIN}
+                max={LSP_MAX_LIMIT}
+                step={5}
+                value={lspEnrichmentMaxSecs}
+                onChange={(e) => setLspEnrichmentMaxSecs(Number(e.target.value))}
+                onBlur={() => setLspEnrichmentMaxSecs(clampLspMaxSecs(lspEnrichmentMaxSecs))}
+                disabled={settingsBusy || !lspEnrichmentEnabled}
+                className="tabular h-full w-full text-[12.5px]"
+                data-testid="lsp-enrichment-max-secs-input"
+              />
+            </span>
+            <span className="text-[11.5px] text-ink-3">
+              {formatDuration(clampLspMaxSecs(lspEnrichmentMaxSecs))} max per optional pass
+            </span>
+          </div>
         </div>
       </div>
 

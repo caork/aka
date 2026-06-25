@@ -12,18 +12,28 @@ use crate::paths::aka_home;
 pub const DEFAULT_INDEX_MAX_SECS: u64 = 60;
 pub const MIN_INDEX_MAX_SECS: u64 = 10;
 pub const MAX_INDEX_MAX_SECS: u64 = 24 * 60 * 60;
+pub const DEFAULT_LSP_ENRICHMENT_ENABLED: bool = false;
+pub const DEFAULT_LSP_ENRICHMENT_MAX_SECS: u64 = 30;
+pub const MIN_LSP_ENRICHMENT_MAX_SECS: u64 = 5;
+pub const MAX_LSP_ENRICHMENT_MAX_SECS: u64 = 10 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AkaSettings {
     #[serde(default = "default_index_max_secs")]
     pub index_max_secs: u64,
+    #[serde(default)]
+    pub lsp_enrichment_enabled: bool,
+    #[serde(default = "default_lsp_enrichment_max_secs")]
+    pub lsp_enrichment_max_secs: u64,
 }
 
 impl Default for AkaSettings {
     fn default() -> Self {
         Self {
             index_max_secs: DEFAULT_INDEX_MAX_SECS,
+            lsp_enrichment_enabled: DEFAULT_LSP_ENRICHMENT_ENABLED,
+            lsp_enrichment_max_secs: DEFAULT_LSP_ENRICHMENT_MAX_SECS,
         }
     }
 }
@@ -75,6 +85,7 @@ impl AkaSettings {
 
     fn normalize(&mut self) {
         self.index_max_secs = clamp_index_max_secs(self.index_max_secs);
+        self.lsp_enrichment_max_secs = clamp_lsp_enrichment_max_secs(self.lsp_enrichment_max_secs);
     }
 }
 
@@ -102,8 +113,16 @@ pub fn clamp_index_max_secs(seconds: u64) -> u64 {
     seconds.clamp(MIN_INDEX_MAX_SECS, MAX_INDEX_MAX_SECS)
 }
 
+pub fn clamp_lsp_enrichment_max_secs(seconds: u64) -> u64 {
+    seconds.clamp(MIN_LSP_ENRICHMENT_MAX_SECS, MAX_LSP_ENRICHMENT_MAX_SECS)
+}
+
 fn default_index_max_secs() -> u64 {
     DEFAULT_INDEX_MAX_SECS
+}
+
+fn default_lsp_enrichment_max_secs() -> u64 {
+    DEFAULT_LSP_ENRICHMENT_MAX_SECS
 }
 
 #[cfg(test)]
@@ -116,6 +135,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let settings = AkaSettings::load_from(&dir.join("settings.json")).unwrap();
         assert_eq!(settings.index_max_secs, 60);
+        assert!(!settings.lsp_enrichment_enabled);
+        assert_eq!(settings.lsp_enrichment_max_secs, 30);
     }
 
     #[test]
@@ -124,10 +145,20 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("settings.json");
 
-        let saved = AkaSettings { index_max_secs: 3 }.save_to(&path).unwrap();
+        let saved = AkaSettings {
+            index_max_secs: 3,
+            lsp_enrichment_enabled: true,
+            lsp_enrichment_max_secs: 1,
+        }
+        .save_to(&path)
+        .unwrap();
         assert_eq!(saved.index_max_secs, MIN_INDEX_MAX_SECS);
+        assert!(saved.lsp_enrichment_enabled);
+        assert_eq!(saved.lsp_enrichment_max_secs, MIN_LSP_ENRICHMENT_MAX_SECS);
 
         let loaded = AkaSettings::load_from(&path).unwrap();
         assert_eq!(loaded.index_max_secs, MIN_INDEX_MAX_SECS);
+        assert!(loaded.lsp_enrichment_enabled);
+        assert_eq!(loaded.lsp_enrichment_max_secs, MIN_LSP_ENRICHMENT_MAX_SECS);
     }
 }

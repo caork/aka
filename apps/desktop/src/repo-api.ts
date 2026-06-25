@@ -165,12 +165,22 @@ export async function setRepoSettings(
 
 export interface AppSettings {
   indexMaxSecs: number;
+  lspEnrichmentEnabled: boolean;
+  lspEnrichmentMaxSecs: number;
+}
+
+function normalizeAppSettings(settings: Partial<AppSettings>): AppSettings {
+  return {
+    indexMaxSecs: settings.indexMaxSecs ?? 60,
+    lspEnrichmentEnabled: settings.lspEnrichmentEnabled ?? false,
+    lspEnrichmentMaxSecs: settings.lspEnrichmentMaxSecs ?? 30,
+  };
 }
 
 export async function getAppSettings(): Promise<AppSettings> {
   if (isDesktopRuntime()) {
     try {
-      return await invokeDesktop<AppSettings>("get_app_settings");
+      return normalizeAppSettings(await invokeDesktop<AppSettings>("get_app_settings"));
     } catch (e) {
       throw asDesktopError(e, "读取设置失败");
     }
@@ -184,13 +194,15 @@ export async function getAppSettings(): Promise<AppSettings> {
     throw asError(e);
   }
   await ensureOk(r);
-  return (await r.json()) as AppSettings;
+  return normalizeAppSettings((await r.json()) as Partial<AppSettings>);
 }
 
 export async function setAppSettings(settings: AppSettings): Promise<AppSettings> {
   if (isDesktopRuntime()) {
     try {
-      return await invokeDesktop<AppSettings>("set_app_settings", { settings });
+      return normalizeAppSettings(
+        await invokeDesktop<AppSettings>("set_app_settings", { settings }),
+      );
     } catch (e) {
       throw asDesktopError(e, "保存设置失败");
     }
@@ -207,7 +219,7 @@ export async function setAppSettings(settings: AppSettings): Promise<AppSettings
     throw asError(e);
   }
   await ensureOk(r);
-  return (await r.json()) as AppSettings;
+  return normalizeAppSettings((await r.json()) as Partial<AppSettings>);
 }
 
 export async function deleteRepo(name: string): Promise<void> {

@@ -15,6 +15,7 @@ mod fact_producer;
 use embedded::EmbeddedEngineFactProducer;
 use fact_producer::{EngineFactOptions, ProducedEngineFacts};
 
+#[cfg_attr(not(feature = "embedded-engine"), allow(dead_code))]
 const DEFAULT_ENGINE_MODE: &str = "fast";
 
 #[derive(Debug, thiserror::Error)]
@@ -299,6 +300,7 @@ pub fn index_max_duration() -> Duration {
     Duration::from_secs(clamp_index_max_secs(seconds))
 }
 
+#[cfg_attr(not(feature = "embedded-engine"), allow(dead_code))]
 fn engine_cache_root(repo: &Path, cache_dir: Option<&Path>) -> PathBuf {
     cache_dir
         .map(|p| p.join("aka-engine"))
@@ -337,6 +339,7 @@ fn embedded_windows_dll_candidates(base: &Path) -> impl Iterator<Item = PathBuf>
     candidates.into_iter()
 }
 
+#[cfg_attr(not(feature = "embedded-engine"), allow(dead_code))]
 fn engine_mode() -> String {
     match std::env::var("AKA_ENGINE_MODE") {
         Ok(mode) if matches!(mode.as_str(), "fast" | "moderate" | "full") => mode,
@@ -344,6 +347,7 @@ fn engine_mode() -> String {
     }
 }
 
+#[cfg_attr(not(feature = "embedded-engine"), allow(dead_code))]
 fn emit_phase(
     on_event: &mut (impl FnMut(&EngineEvent) + ?Sized),
     phase: impl Into<String>,

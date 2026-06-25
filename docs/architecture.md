@@ -1,12 +1,12 @@
 # aka 架构设计
 
-立项 2026-06-10。当前方向：使用第一方 AKA engine 原生 C 引擎负责多语言 tree-sitter/LSP 解析，并以“engine / SCIP / stack-graphs 直接产出 `aka-facts`”作为唯一运行路径。Rust 侧保留存储、搜索、服务和桌面体验，并把 facts 直接写入 graph/search。
+立项 2026-06-10。当前方向：使用第一方 AKA engine 原生 C 引擎负责基础多语言解析，并以“engine / SCIP / stack-graphs / LSP adapter 直接产出 `aka-facts`”作为唯一运行路径。Rust 侧保留存储、搜索、服务和桌面体验，并把 facts 直接写入 graph/search。
 
 ## 总体策略
 
-Rust workspace 承担存储、搜索、服务、UI。唯一热路径合同是 `aka-facts`（见 [contracts/artifacts.md](contracts/artifacts.md)）：engine、SCIP importer、tree-sitter stack-graphs adapter、业务 enrichment job 都产出可重放 facts，graph/search writer 直接消费 `FactSource`。旧 AKA engine binary、facts sidecar NDJSON、engine SQLite artifact adapter 不再作为 fallback 或调试通道。
+Rust workspace 承担存储、搜索、服务、UI。唯一热路径合同是 `aka-facts`（见 [contracts/artifacts.md](contracts/artifacts.md)）：engine、SCIP importer、tree-sitter stack-graphs adapter、LSP adapter 都产出可重放 facts，graph/search writer 直接消费 `FactSource`。旧 AKA engine binary、facts sidecar NDJSON、engine SQLite artifact adapter 不再作为 fallback 或调试通道。
 
-不在 Rust 侧手写多语言 parser，也不引入 WASM tree-sitter worker 池。解析层优先使用 AKA engine embedded/direct fact API；语言生态已有能力通过 SCIP 或 stack-graphs 接入；LSP 只作为 unsupported language 或 live assist。业务语义补全必须变成有预算的 enrichment facts，不能阻塞 baseline index ready。
+不在 Rust 侧手写多语言 parser，也不引入 WASM tree-sitter worker 池。解析层优先使用 AKA engine embedded/direct fact API；语言生态已有能力通过 SCIP、stack-graphs 或成熟 LSP 接入。后续 enrichment 只接 rust-analyzer / pyright / jdtls / typescript-language-server / gopls 这类热门开源实现，作为 baseline index ready 之后的可跳过事实源；失败、超时或缺 provider 都不能影响 graph/search 可用。
 
 ## 解析引擎层（engine/，AKA engine native C）
 
@@ -30,7 +30,7 @@ Rust workspace 承担存储、搜索、服务、UI。唯一热路径合同是 `a
 ## 服务层（Rust）
 
 - MCP：rmcp（官方 SDK），stdio + Streamable HTTP。十九个工具：list_repos / query / search_code / context / find_definition / search_references / impact / rename / detect_changes / route_map / tool_map / graphql_map / topic_map / shape_check / api_impact / analyze / import_repo / update_repo / augment（cypher 已砍）。
-- GitNexus-like 能力：query/context/impact 会消费合成 Community/Process/Command/Config/Migration/Transaction，新增 detect_changes/route_map/tool_map/graphql_map/topic_map/shape_check/api_impact 消费 Route/GraphQL/Tool/Topic/Channel/Command/Config/Table/Repository/Migration/FETCHES/HANDLES_ROUTE/HANDLES_GRAPHQL/HANDLES_TOOL/CONSUMES_TOPIC/PUBLISHES_TOPIC/HANDLES_COMMAND/USES_CONFIG/MIGRATES_TABLE/HAS_TRANSACTION_BOUNDARY/ENTRY_POINT_OF/STEP_IN_PROCESS 等索引语义，覆盖流程分组、改动到流程映射、API 路由/GraphQL operation/工具入口、消息 topic/queue/channel 生产消费关系、CLI/management command、配置/env/settings、schema migration、事务边界和响应形状检查。它是面向 agent 工作流的保守兼容层，不提供完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义。
+- 应用语义能力：query/context/impact 会消费 facts 中已存在的 Route/GraphQL/Tool/Topic/Channel/Command/Config/Table/Repository/Migration/Process/Community 等节点和边；detect_changes/route_map/tool_map/graphql_map/topic_map/shape_check/api_impact 只是这些 facts 的查询视图。它不再依赖 Rust 侧自研 synthesis/enrichment 阶段，也不提供完整 GitNexus 图模型、Cypher 查询或完全等价的跨语言语义。
 - HTTP：axum，承接 query/repos/graph-stream/search-code/detect-changes/route-map/tool-map/graphql-map/topic-map/shape-check/api-impact REST 面，给远程模式和浏览器。
 - augmentation（编辑器 hook 增强）：BM25-only 路径，目标 <100ms。
 
@@ -38,7 +38,7 @@ Rust workspace 承担存储、搜索、服务、UI。唯一热路径合同是 `a
 
 - React 19 + Vite + Tailwind 4 + shadcn/ui。
 - 图谱可视化 Cosmograph（GPU/WebGL）+ 分层 LOD（已拍板，要求美观 + 高性能 + 支撑十亿级数据）：数据层按十亿级设计（磁盘索引、流式摄取、天花板在磁盘）；渲染层永远只画聚合视图——默认社区/模块级聚合图（数千节点），下钻文件层、符号层，每层视口内元素控制在 GPU 舒适区。aka-graph 提供 LOD/聚合查询（分层快照）。
-- 前端直接 invoke Rust 命令；索引进度走 Tauri event（facts discover/parse/fuse、enrichment、graph/search 分阶段展示）。不再展示 legacy `export-artifacts` 作为运行阶段。
+- 前端直接 invoke Rust 命令；索引进度走 Tauri event（facts discover/parse/fuse、graph/search、optional LSP enrichment 分阶段展示）。不再展示 legacy `export-artifacts` 作为运行阶段。
 
 ## 部署形态（一套核心，三种交付）
 
@@ -56,7 +56,7 @@ Rust workspace 承担存储、搜索、服务、UI。唯一热路径合同是 `a
 - M1 Rust 索引核心：摄取 + tantivy + usearch + 内部 runtime 验证
 - M2 MCP 工具面齐平并扩展 search_code，Claude Code dogfood，旧版退役
 - M3 Tauri 桌面 MVP
-- M4 headless + Docker + 远程模式；wiki/group/process 语义按需在 Rust 层补齐
+- M4 headless + Docker + 远程模式；LSP/SCIP/stack-graphs provider 按热门开源实现逐个接入，并以大仓基准决定是否默认可用
 
 ## 风险
 

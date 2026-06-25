@@ -1,4 +1,5 @@
 //! Engine fact normalization for the embedded direct-facts pipeline.
+#![cfg_attr(not(feature = "embedded-engine"), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;

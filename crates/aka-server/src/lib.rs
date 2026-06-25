@@ -45,7 +45,10 @@ use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-use aka_core::{clamp_index_max_secs, AkaSettings};
+use aka_core::{
+    clamp_index_max_secs, clamp_lsp_enrichment_max_secs, AkaSettings,
+    DEFAULT_LSP_ENRICHMENT_MAX_SECS,
+};
 pub use aka_mcp::ops;
 pub use aka_mcp::{
     clamp_render_nodes, Backend, RepoInfo, RepoProgress, RepoSettingsUpdate, SearchHit, SymbolRef,
@@ -668,6 +671,10 @@ pub struct SettingsRequest {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettingsRequest {
     pub index_max_secs: u64,
+    #[serde(default)]
+    pub lsp_enrichment_enabled: bool,
+    #[serde(default)]
+    pub lsp_enrichment_max_secs: Option<u64>,
 }
 
 async fn app_settings() -> Response {
@@ -680,6 +687,11 @@ async fn app_settings() -> Response {
 async fn update_app_settings(Json(req): Json<AppSettingsRequest>) -> Response {
     let settings = AkaSettings {
         index_max_secs: clamp_index_max_secs(req.index_max_secs),
+        lsp_enrichment_enabled: req.lsp_enrichment_enabled,
+        lsp_enrichment_max_secs: clamp_lsp_enrichment_max_secs(
+            req.lsp_enrichment_max_secs
+                .unwrap_or(DEFAULT_LSP_ENRICHMENT_MAX_SECS),
+        ),
     };
     match settings.save() {
         Ok(settings) => Json(settings).into_response(),

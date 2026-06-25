@@ -1,6 +1,7 @@
 //! aka-core — 域模型、direct facts、仓库注册表、embedded engine 运行器。
 
 pub mod engine;
+pub mod enrichment;
 pub mod incremental;
 pub mod paths;
 pub mod registry;
@@ -18,6 +19,7 @@ pub use aka_facts::{
 pub use engine::{
     index_max_duration, AnalyzeFactsOptions, EngineError, EngineRunner, IndexingDeadline,
 };
+pub use enrichment::{run_optional_lsp_enrichment, LspEnrichmentOutcome, LspEnrichmentPolicy};
 pub use incremental::{
     build_parse_cache_manifest_from_facts, load_index_state, load_parse_cache_manifest,
     save_index_state, save_parse_cache_manifest, FileFactStats, FileFingerprint, IndexDelta,
@@ -29,7 +31,9 @@ pub use registry::{
     MAX_RENDER_NODES, MIN_RENDER_NODES,
 };
 pub use settings::{
-    clamp_index_max_secs, settings_path, AkaSettings, SettingsError, DEFAULT_INDEX_MAX_SECS,
-    MAX_INDEX_MAX_SECS, MIN_INDEX_MAX_SECS,
+    clamp_index_max_secs, clamp_lsp_enrichment_max_secs, settings_path, AkaSettings, SettingsError,
+    DEFAULT_INDEX_MAX_SECS, DEFAULT_LSP_ENRICHMENT_ENABLED, DEFAULT_LSP_ENRICHMENT_MAX_SECS,
+    MAX_INDEX_MAX_SECS, MAX_LSP_ENRICHMENT_MAX_SECS, MIN_INDEX_MAX_SECS,
+    MIN_LSP_ENRICHMENT_MAX_SECS,
 };
 pub use types::*;
