@@ -86,8 +86,9 @@ async fn app_settings_default_and_update() {
     assert_eq!(res.status(), StatusCode::OK);
     let v = body_json(res).await;
     assert_eq!(v["indexMaxSecs"], 60);
-    assert_eq!(v["lspEnrichmentEnabled"], false);
-    assert_eq!(v["lspEnrichmentMaxSecs"], 30);
+    assert_eq!(v["ossAnalyzerEnrichmentEnabled"], false);
+    assert_eq!(v["ossAnalyzerEnrichmentMaxSecs"], 30);
+    assert!(v["scipIndexPath"].is_null());
 
     let res = app()
         .oneshot(post_json("/api/settings", json!({ "indexMaxSecs": 3 })))
@@ -96,16 +97,18 @@ async fn app_settings_default_and_update() {
     assert_eq!(res.status(), StatusCode::OK);
     let v = body_json(res).await;
     assert_eq!(v["indexMaxSecs"], 10);
-    assert_eq!(v["lspEnrichmentEnabled"], false);
-    assert_eq!(v["lspEnrichmentMaxSecs"], 30);
+    assert_eq!(v["ossAnalyzerEnrichmentEnabled"], false);
+    assert_eq!(v["ossAnalyzerEnrichmentMaxSecs"], 30);
+    assert!(v["scipIndexPath"].is_null());
 
     let res = app()
         .oneshot(post_json(
             "/api/settings",
             json!({
                 "indexMaxSecs": 120,
-                "lspEnrichmentEnabled": true,
-                "lspEnrichmentMaxSecs": 1
+                "ossAnalyzerEnrichmentEnabled": true,
+                "ossAnalyzerEnrichmentMaxSecs": 1,
+                "scipIndexPath": "/tmp/repo/index.scip"
             }),
         ))
         .await
@@ -113,8 +116,26 @@ async fn app_settings_default_and_update() {
     assert_eq!(res.status(), StatusCode::OK);
     let v = body_json(res).await;
     assert_eq!(v["indexMaxSecs"], 120);
-    assert_eq!(v["lspEnrichmentEnabled"], true);
-    assert_eq!(v["lspEnrichmentMaxSecs"], 5);
+    assert_eq!(v["ossAnalyzerEnrichmentEnabled"], true);
+    assert_eq!(v["ossAnalyzerEnrichmentMaxSecs"], 5);
+    assert_eq!(v["scipIndexPath"], "/tmp/repo/index.scip");
+
+    let res = app()
+        .oneshot(post_json(
+            "/api/settings",
+            json!({
+                "indexMaxSecs": 90,
+                "lspEnrichmentEnabled": true,
+                "lspEnrichmentMaxSecs": 7
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["indexMaxSecs"], 90);
+    assert_eq!(v["ossAnalyzerEnrichmentEnabled"], true);
+    assert_eq!(v["ossAnalyzerEnrichmentMaxSecs"], 7);
 }
 
 #[tokio::test]

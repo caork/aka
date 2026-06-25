@@ -8,6 +8,11 @@ pub mod registry;
 pub mod settings;
 pub mod types;
 
+#[cfg(feature = "scip-import")]
+pub use aka_facts::{
+    import_scip_path, import_scip_path_with_metadata, read_scip_index_metadata, ScipImportError,
+    ScipIndexMetadata,
+};
 pub use aka_facts::{
     produce_semantic_batch, produce_semantic_into, replay_semantic_bundle_into, ChunkFact,
     EdgeFact, FactBatch, FactItem, FactManifest, FactRecord, FactSink, FactSource, FactSourceError,
@@ -35,9 +40,11 @@ pub use registry::{
     MAX_RENDER_NODES, MIN_RENDER_NODES,
 };
 pub use settings::{
-    clamp_index_max_secs, clamp_lsp_enrichment_max_secs, settings_path, AkaSettings, SettingsError,
-    DEFAULT_INDEX_MAX_SECS, DEFAULT_LSP_ENRICHMENT_ENABLED, DEFAULT_LSP_ENRICHMENT_MAX_SECS,
-    MAX_INDEX_MAX_SECS, MAX_LSP_ENRICHMENT_MAX_SECS, MIN_INDEX_MAX_SECS,
-    MIN_LSP_ENRICHMENT_MAX_SECS,
+    clamp_index_max_secs, clamp_lsp_enrichment_max_secs, clamp_oss_analyzer_enrichment_max_secs,
+    settings_path, AkaSettings, SettingsError, DEFAULT_INDEX_MAX_SECS,
+    DEFAULT_LSP_ENRICHMENT_ENABLED, DEFAULT_LSP_ENRICHMENT_MAX_SECS,
+    DEFAULT_OSS_ANALYZER_ENRICHMENT_ENABLED, DEFAULT_OSS_ANALYZER_ENRICHMENT_MAX_SECS,
+    MAX_INDEX_MAX_SECS, MAX_LSP_ENRICHMENT_MAX_SECS, MAX_OSS_ANALYZER_ENRICHMENT_MAX_SECS,
+    MIN_INDEX_MAX_SECS, MIN_LSP_ENRICHMENT_MAX_SECS, MIN_OSS_ANALYZER_ENRICHMENT_MAX_SECS,
 };
 pub use types::*;

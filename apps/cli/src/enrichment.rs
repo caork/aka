@@ -4,11 +4,12 @@
 //! search index are already ready before this module runs, so every error is
 //! reported as an outcome and left to callers to log/skip.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use aka_core::{
-    EngineEvent, FactBatch, FactSourceError, LspEnrichmentPolicy, PipelineProgress, PipelineStage,
-    RepoPaths,
+    find_oss_analyzer, AnalyzerRunMetadata, EngineEvent, FactBatch, FactSourceError,
+    LspEnrichmentPolicy, PipelineProgress, PipelineStage, RepoPaths,
 };
 
 use crate::indexer::{merge_enrichment_facts_with_progress, EnrichmentMergeSummary};
@@ -27,13 +28,29 @@ pub trait OptionalEnrichmentProvider {
     fn produce(&self, repo: &Path) -> Result<Option<FactBatch>, FactSourceError>;
 }
 
+#[derive(Debug, Clone)]
+pub struct EnrichmentProviderConfig {
+    pub scip_index_path: Option<PathBuf>,
+}
+
 pub fn run_optional_enrichment(
     repo: &Path,
     paths: &RepoPaths,
     policy: LspEnrichmentPolicy,
+    config: EnrichmentProviderConfig,
     on_event: &mut dyn FnMut(&EngineEvent),
 ) -> OptionalEnrichmentOutcome {
-    run_optional_enrichment_with_providers(repo, paths, policy, &[], on_event)
+    #[cfg(feature = "scip-import")]
+    {
+        let scip = ScipIndexProvider::new(config.scip_index_path, policy.max_duration);
+        let providers: [&dyn OptionalEnrichmentProvider; 1] = [&scip];
+        run_optional_enrichment_with_providers(repo, paths, policy, &providers, on_event)
+    }
+    #[cfg(not(feature = "scip-import"))]
+    {
+        let _ = config;
+        run_optional_enrichment_with_providers(repo, paths, policy, &[], on_event)
+    }
 }
 
 pub fn run_optional_enrichment_with_providers(
@@ -68,6 +85,14 @@ pub fn run_optional_enrichment_with_providers(
     }
 
     for provider in providers {
+        if find_oss_analyzer(provider.id()).is_none() {
+            let message = format!(
+                "provider={} rejected reason=unsupported_analyzer",
+                provider.id()
+            );
+            emit_log(on_event, message.clone());
+            return OptionalEnrichmentOutcome::Failed(message);
+        }
         emit_log(
             on_event,
             format!(
@@ -145,6 +170,65 @@ pub fn run_optional_enrichment_with_providers(
     OptionalEnrichmentOutcome::NoProviders
 }
 
+#[cfg(feature = "scip-import")]
+#[derive(Debug, Clone)]
+struct ScipIndexProvider {
+    configured_path: Option<PathBuf>,
+    max_duration: Duration,
+}
+
+#[cfg(feature = "scip-import")]
+impl ScipIndexProvider {
+    fn new(configured_path: Option<PathBuf>, max_duration: Duration) -> Self {
+        Self {
+            configured_path,
+            max_duration,
+        }
+    }
+
+    fn candidate_path(&self, repo: &Path) -> PathBuf {
+        self.configured_path
+            .clone()
+            .unwrap_or_else(|| repo.join("index.scip"))
+    }
+}
+
+#[cfg(feature = "scip-import")]
+impl OptionalEnrichmentProvider for ScipIndexProvider {
+    fn id(&self) -> &'static str {
+        "scip"
+    }
+
+    fn produce(&self, repo: &Path) -> Result<Option<FactBatch>, FactSourceError> {
+        let started_at = Instant::now();
+        let path = self.candidate_path(repo);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let (metadata, bundle) = aka_core::import_scip_path_with_metadata(&path)
+            .map_err(|err| FactSourceError::Message(err.to_string()))?;
+        let tool_version = metadata.tool_version.clone().ok_or_else(|| {
+            FactSourceError::Message(format!(
+                "SCIP index {} missing metadata.tool_info.version",
+                path.display()
+            ))
+        })?;
+        let provenance = AnalyzerRunMetadata::new("scip", tool_version)
+            .map_err(|err| FactSourceError::Message(err.to_string()))?;
+        let mut batch = bundle.lower();
+        if started_at.elapsed() >= self.max_duration {
+            return Err(FactSourceError::Message(format!(
+                "SCIP import timed out after decode path={} max_secs={}",
+                path.display(),
+                self.max_duration.as_secs()
+            )));
+        }
+        aka_core::stamp_enrichment_batch(&mut batch, &provenance)
+            .map_err(|err| FactSourceError::Message(err.to_string()))?;
+        Ok(Some(batch))
+    }
+}
+
 fn emit_skipped(on_event: &mut dyn FnMut(&EngineEvent), message: String, line: impl Into<String>) {
     on_event(&EngineEvent::Progress {
         progress: PipelineProgress::new(PipelineStage::LspEnrichment, message),
@@ -163,7 +247,7 @@ fn emit_log(on_event: &mut dyn FnMut(&EngineEvent), line: impl Into<String>) {
 mod tests {
     use std::cell::RefCell;
 
-    use aka_core::{ChunkFact, EdgeFact, FactStats, NodeFact};
+    use aka_core::{ChunkFact, EdgeFact, FactSource, FactStats, NodeFact};
     use aka_graph::GraphStore;
 
     use super::*;
@@ -175,7 +259,7 @@ mod tests {
 
     impl OptionalEnrichmentProvider for BatchProvider {
         fn id(&self) -> &'static str {
-            "fake-scip"
+            "scip"
         }
 
         fn produce(&self, _repo: &Path) -> Result<Option<FactBatch>, FactSourceError> {
@@ -187,7 +271,7 @@ mod tests {
 
     impl OptionalEnrichmentProvider for ErrorProvider {
         fn id(&self) -> &'static str {
-            "fake-error"
+            "scip"
         }
 
         fn produce(&self, _repo: &Path) -> Result<Option<FactBatch>, FactSourceError> {
@@ -319,7 +403,114 @@ mod tests {
         assert!(events.borrow().iter().any(|event| matches!(
             event,
             EngineEvent::Log { stream, line }
-                if stream == "lsp-enrichment" && line.contains("provider=fake-error failed")
+                if stream == "lsp-enrichment" && line.contains("provider=scip failed")
         )));
+    }
+
+    struct UnsupportedProvider;
+
+    impl OptionalEnrichmentProvider for UnsupportedProvider {
+        fn id(&self) -> &'static str {
+            "custom-rust-heuristic"
+        }
+
+        fn produce(&self, _repo: &Path) -> Result<Option<FactBatch>, FactSourceError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn optional_enrichment_rejects_non_allowlisted_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+
+        let outcome = run_optional_enrichment_with_providers(
+            &repo,
+            &paths,
+            LspEnrichmentPolicy {
+                enabled: true,
+                max_duration: Duration::from_secs(5),
+            },
+            &[&UnsupportedProvider],
+            &mut |_| {},
+        );
+
+        assert!(
+            matches!(outcome, OptionalEnrichmentOutcome::Failed(message) if message.contains("unsupported_analyzer"))
+        );
+    }
+
+    #[cfg(feature = "scip-import")]
+    #[test]
+    fn scip_provider_skips_when_index_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let provider = ScipIndexProvider::new(None, Duration::from_secs(5));
+
+        let batch = provider.produce(&repo).unwrap();
+
+        assert!(batch.is_none());
+    }
+
+    #[cfg(feature = "scip-import")]
+    #[test]
+    fn scip_provider_imports_existing_index_and_stamps_provenance() {
+        use protobuf::{Enum, EnumOrUnknown, Message};
+        use scip::types::{
+            symbol_information, Document, Index, Metadata, Occurrence, SymbolInformation,
+            SymbolRole, ToolInfo,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let index_path = repo.join("index.scip");
+        let mut index = Index::new();
+        let mut metadata = Metadata::new();
+        let mut tool_info = ToolInfo::new();
+        tool_info.name = "scip-java".into();
+        tool_info.version = "0.3.0".into();
+        metadata.tool_info = Some(tool_info).into();
+        index.metadata = Some(metadata).into();
+        let mut doc = Document::new();
+        doc.language = "java".into();
+        doc.relative_path = "src/main/java/demo/Service.java".into();
+        let mut service = SymbolInformation::new();
+        service.symbol = "java maven demo 1.0.0 demo/Service#".into();
+        service.display_name = "Service".into();
+        service.kind = EnumOrUnknown::new(symbol_information::Kind::Interface);
+        let mut def = Occurrence::new();
+        def.symbol = service.symbol.clone();
+        def.range = vec![1, 0, 1, 7];
+        def.symbol_roles = SymbolRole::Definition.value();
+        doc.symbols.push(service);
+        doc.occurrences.push(def);
+        index.documents.push(doc);
+        std::fs::write(&index_path, index.write_to_bytes().unwrap()).unwrap();
+        let provider = ScipIndexProvider::new(None, Duration::from_secs(5));
+
+        let batch = provider.produce(&repo).unwrap().expect("scip facts");
+        let node = batch
+            .nodes()
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|node| node.id.starts_with("scip:symbol:"))
+            .expect("scip symbol node");
+
+        assert_eq!(
+            node.properties.get("source"),
+            Some(&serde_json::json!("scip"))
+        );
+        assert_eq!(
+            node.properties
+                .get("provenance")
+                .and_then(|value| value.get("toolVersion")),
+            Some(&serde_json::json!("0.3.0"))
+        );
     }
 }

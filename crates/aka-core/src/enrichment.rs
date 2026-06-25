@@ -28,8 +28,8 @@ pub struct LspEnrichmentPolicy {
 impl LspEnrichmentPolicy {
     pub fn from_settings(settings: AkaSettings) -> Self {
         Self {
-            enabled: settings.lsp_enrichment_enabled,
-            max_duration: Duration::from_secs(settings.lsp_enrichment_max_secs),
+            enabled: settings.oss_analyzer_enrichment_enabled,
+            max_duration: Duration::from_secs(settings.oss_analyzer_enrichment_max_secs),
         }
     }
 }

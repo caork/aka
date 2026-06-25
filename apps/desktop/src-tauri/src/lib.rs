@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aka_cli::AkaBackend;
 use aka_core::{
-    clamp_index_max_secs, clamp_lsp_enrichment_max_secs, AkaSettings,
-    DEFAULT_LSP_ENRICHMENT_MAX_SECS,
+    clamp_index_max_secs, clamp_oss_analyzer_enrichment_max_secs, AkaSettings,
+    DEFAULT_OSS_ANALYZER_ENRICHMENT_MAX_SECS,
 };
 use aka_mcp::{clamp_render_nodes, ops, Backend, RepoSettingsUpdate, MAX_RENDER_NODES};
 use serde::Deserialize;
@@ -201,7 +201,13 @@ struct RepoSettingsRequest {
 struct AppSettingsRequest {
     index_max_secs: u64,
     #[serde(default)]
-    lsp_enrichment_enabled: bool,
+    oss_analyzer_enrichment_enabled: Option<bool>,
+    #[serde(default)]
+    oss_analyzer_enrichment_max_secs: Option<u64>,
+    #[serde(default)]
+    scip_index_path: Option<PathBuf>,
+    #[serde(default)]
+    lsp_enrichment_enabled: Option<bool>,
     #[serde(default)]
     lsp_enrichment_max_secs: Option<u64>,
 }
@@ -566,12 +572,17 @@ async fn get_app_settings() -> Result<AkaSettings, String> {
 async fn set_app_settings(settings: AppSettingsRequest) -> Result<AkaSettings, String> {
     AkaSettings {
         index_max_secs: clamp_index_max_secs(settings.index_max_secs),
-        lsp_enrichment_enabled: settings.lsp_enrichment_enabled,
-        lsp_enrichment_max_secs: clamp_lsp_enrichment_max_secs(
+        oss_analyzer_enrichment_enabled: settings
+            .oss_analyzer_enrichment_enabled
+            .or(settings.lsp_enrichment_enabled)
+            .unwrap_or_default(),
+        oss_analyzer_enrichment_max_secs: clamp_oss_analyzer_enrichment_max_secs(
             settings
-                .lsp_enrichment_max_secs
-                .unwrap_or(DEFAULT_LSP_ENRICHMENT_MAX_SECS),
+                .oss_analyzer_enrichment_max_secs
+                .or(settings.lsp_enrichment_max_secs)
+                .unwrap_or(DEFAULT_OSS_ANALYZER_ENRICHMENT_MAX_SECS),
         ),
+        scip_index_path: settings.scip_index_path,
     }
     .save()
     .map_err(|e| format!("{e:#}"))

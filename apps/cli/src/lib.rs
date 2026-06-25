@@ -232,9 +232,8 @@ pub fn run_analyze_with_progress(
     save_index_state(&paths.index_state_path(), &current_state)
         .with_context(|| format!("save index state {}", paths.index_state_path().display()))?;
 
-    let enrichment_policy = aka_core::AkaSettings::load()
-        .map(LspEnrichmentPolicy::from_settings)
-        .unwrap_or_default();
+    let settings = aka_core::AkaSettings::load().unwrap_or_default();
+    let enrichment_policy = LspEnrichmentPolicy::from_settings(settings.clone());
     let mut enrichment_progress = |ev: &EngineEvent| {
         if let Some(cb) = progress.as_deref_mut() {
             cb(ev);
@@ -244,6 +243,9 @@ pub fn run_analyze_with_progress(
         &repo,
         &paths,
         enrichment_policy,
+        enrichment::EnrichmentProviderConfig {
+            scip_index_path: settings.scip_index_path,
+        },
         &mut enrichment_progress,
     );
     if let Some(cb) = progress.as_mut() {

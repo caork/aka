@@ -16,7 +16,10 @@ pub use producer::{
     ProducerContext, SemanticFactBundleBuilder, SemanticFactProducer, SemanticFactSink,
 };
 #[cfg(feature = "scip-import")]
-pub use scip_import::{import_scip_index, import_scip_path, ScipImportError};
+pub use scip_import::{
+    import_scip_index, import_scip_path, import_scip_path_with_metadata, read_scip_index_metadata,
+    ScipImportError, ScipIndexMetadata,
+};
 
 pub const FACTS_VERSION: u32 = 1;
 

@@ -8,6 +8,7 @@ build = "build.rs"
 [features]
 default = []
 embedded-engine = []
+scip-import = ["aka-facts/scip-import"]
 
 [dependencies]
 aka-facts = { path = "../aka-facts" }

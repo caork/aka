@@ -7,6 +7,7 @@ publish.workspace = true
 [features]
 default = []
 embedded-engine = ["aka-core/embedded-engine"]
+scip-import = ["aka-core/scip-import"]
 
 [[bin]]
 name = "aka"
@@ -27,4 +28,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+protobuf = "=3.7.2"
+scip = "0.8.1"
 tempfile = "3"

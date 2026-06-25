@@ -20,6 +20,13 @@ use crate::{
     SemanticFactBundle, SymbolFact, SymbolKind, TextRange,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScipIndexMetadata {
+    pub tool_name: Option<String>,
+    pub tool_version: Option<String>,
+    pub project_root: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum ScipImportError {
     #[error("read SCIP index {path}: {source}")]
@@ -37,6 +44,21 @@ pub enum ScipImportError {
 }
 
 pub fn import_scip_path(path: &Path) -> Result<SemanticFactBundle, ScipImportError> {
+    read_scip_index(path).map(|index| import_scip_index(&index))
+}
+
+pub fn import_scip_path_with_metadata(
+    path: &Path,
+) -> Result<(ScipIndexMetadata, SemanticFactBundle), ScipImportError> {
+    let index = read_scip_index(path)?;
+    Ok((scip_index_metadata(&index), import_scip_index(&index)))
+}
+
+pub fn read_scip_index_metadata(path: &Path) -> Result<ScipIndexMetadata, ScipImportError> {
+    Ok(scip_index_metadata(&read_scip_index(path)?))
+}
+
+fn read_scip_index(path: &Path) -> Result<Index, ScipImportError> {
     let bytes = fs::read(path).map_err(|source| ScipImportError::Io {
         path: path.display().to_string(),
         source,
@@ -45,7 +67,17 @@ pub fn import_scip_path(path: &Path) -> Result<SemanticFactBundle, ScipImportErr
         path: path.display().to_string(),
         source,
     })?;
-    Ok(import_scip_index(&index))
+    Ok(index)
+}
+
+fn scip_index_metadata(index: &Index) -> ScipIndexMetadata {
+    let metadata = index.metadata.as_ref();
+    let tool_info = metadata.and_then(|metadata| metadata.tool_info.as_ref());
+    ScipIndexMetadata {
+        tool_name: tool_info.and_then(|tool| empty_to_none(&tool.name)),
+        tool_version: tool_info.and_then(|tool| empty_to_none(&tool.version)),
+        project_root: metadata.and_then(|metadata| empty_to_none(&metadata.project_root)),
+    }
 }
 
 pub fn import_scip_index(index: &Index) -> SemanticFactBundle {

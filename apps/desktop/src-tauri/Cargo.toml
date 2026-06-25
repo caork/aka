@@ -12,7 +12,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = []
-embedded-engine = ["aka-cli/embedded-engine", "aka-core/embedded-engine"]
+embedded-engine = [
+  "aka-cli/embedded-engine",
+  "aka-cli/scip-import",
+  "aka-core/embedded-engine",
+  "aka-core/scip-import",
+]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

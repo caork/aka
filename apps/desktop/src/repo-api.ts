@@ -165,15 +165,25 @@ export async function setRepoSettings(
 
 export interface AppSettings {
   indexMaxSecs: number;
+  ossAnalyzerEnrichmentEnabled: boolean;
+  ossAnalyzerEnrichmentMaxSecs: number;
+  scipIndexPath: string | null;
   lspEnrichmentEnabled: boolean;
   lspEnrichmentMaxSecs: number;
 }
 
 function normalizeAppSettings(settings: Partial<AppSettings>): AppSettings {
+  const enrichmentEnabled =
+    settings.ossAnalyzerEnrichmentEnabled ?? settings.lspEnrichmentEnabled ?? false;
+  const enrichmentMaxSecs =
+    settings.ossAnalyzerEnrichmentMaxSecs ?? settings.lspEnrichmentMaxSecs ?? 30;
   return {
     indexMaxSecs: settings.indexMaxSecs ?? 60,
-    lspEnrichmentEnabled: settings.lspEnrichmentEnabled ?? false,
-    lspEnrichmentMaxSecs: settings.lspEnrichmentMaxSecs ?? 30,
+    ossAnalyzerEnrichmentEnabled: enrichmentEnabled,
+    ossAnalyzerEnrichmentMaxSecs: enrichmentMaxSecs,
+    scipIndexPath: settings.scipIndexPath ?? null,
+    lspEnrichmentEnabled: enrichmentEnabled,
+    lspEnrichmentMaxSecs: enrichmentMaxSecs,
   };
 }
 
