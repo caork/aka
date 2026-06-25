@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod commands;
+mod enrichment;
 pub mod indexer;
 mod rename;
 
@@ -231,19 +232,24 @@ pub fn run_analyze_with_progress(
     save_index_state(&paths.index_state_path(), &current_state)
         .with_context(|| format!("save index state {}", paths.index_state_path().display()))?;
 
-    let lsp_policy = aka_core::AkaSettings::load()
+    let enrichment_policy = aka_core::AkaSettings::load()
         .map(LspEnrichmentPolicy::from_settings)
         .unwrap_or_default();
-    let mut lsp_progress = |ev: &EngineEvent| {
+    let mut enrichment_progress = |ev: &EngineEvent| {
         if let Some(cb) = progress.as_deref_mut() {
             cb(ev);
         }
     };
-    let lsp_outcome = aka_core::run_optional_lsp_enrichment(&repo, lsp_policy, &mut lsp_progress);
+    let enrichment_outcome = enrichment::run_optional_enrichment(
+        &repo,
+        &paths,
+        enrichment_policy,
+        &mut enrichment_progress,
+    );
     if let Some(cb) = progress.as_mut() {
         cb(&EngineEvent::Log {
             stream: "runtime".into(),
-            line: format!("lsp enrichment outcome {lsp_outcome:?}"),
+            line: format!("optional enrichment outcome {enrichment_outcome:?}"),
         });
     }
 
@@ -280,6 +286,7 @@ fn index_stage(stage: &str) -> PipelineStage {
         "search:chunks" => PipelineStage::SearchChunks,
         "search:commit" => PipelineStage::SearchCommit,
         "lsp-enrichment" => PipelineStage::LspEnrichment,
+        _ if stage.starts_with("enrichment:") => PipelineStage::LspEnrichment,
         _ if stage.starts_with("incremental:graph") => PipelineStage::GraphNodes,
         _ if stage.starts_with("incremental:layout") => PipelineStage::GraphLayout,
         _ if stage.starts_with("incremental:search") => PipelineStage::SearchNodes,
