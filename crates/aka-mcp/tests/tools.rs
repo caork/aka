@@ -730,7 +730,7 @@ async fn topic_map_shape() {
     let topic = &v["topics"].as_array().unwrap()[0];
     assert_eq!(topic["name"], "orders.created");
     assert_eq!(topic["broker"], "kafka");
-    assert_eq!(topic["source"], "native-channel+source-scan");
+    assert_eq!(topic["source"], "oss-analyzer-fixture");
     assert_eq!(
         topic["consumerGroups"].as_array().unwrap()[0],
         "orders-service"

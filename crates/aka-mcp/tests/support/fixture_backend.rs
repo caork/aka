@@ -263,7 +263,7 @@ fn fixture_topics(
         id: "fixture:topic:kafka:orders.created".into(),
         name: "orders.created".into(),
         broker: "kafka".into(),
-        source: "native-channel+source-scan".into(),
+        source: "oss-analyzer-fixture".into(),
         consumer_groups: vec!["orders-service".into()],
         producers: vec![TopicEndpoint {
             name: "handle_request".into(),

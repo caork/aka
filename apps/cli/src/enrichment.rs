@@ -1060,7 +1060,7 @@ mod tests {
             &facts_path,
             serde_json::json!({
                 "analyzer": {
-                    "analyzerId": "custom-rust-heuristic",
+                    "analyzerId": "unsupported-private-analyzer",
                     "toolVersion": "1.0"
                 },
                 "stats": {"files": 0, "nodes": 1, "edges": 0, "chunks": 0},
@@ -1111,7 +1111,7 @@ mod tests {
 
     impl OptionalEnrichmentProvider for UnsupportedProvider {
         fn id(&self) -> &'static str {
-            "custom-rust-heuristic"
+            "unsupported-private-analyzer"
         }
 
         fn produce(&self, _repo: &Path) -> Result<Option<FactBatch>, FactSourceError> {

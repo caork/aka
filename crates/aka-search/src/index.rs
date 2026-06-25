@@ -1052,7 +1052,10 @@ mod tests {
         let mut cache_props = Map::new();
         cache_props.insert("name".into(), Value::String("orders:last".into()));
         cache_props.insert("backend".into(), Value::String("redis".into()));
-        cache_props.insert("cacheSource".into(), Value::String("source-scan".into()));
+        cache_props.insert(
+            "cacheSource".into(),
+            Value::String("oss-analyzer-fixture".into()),
+        );
 
         let mut event_props = Map::new();
         event_props.insert("name".into(), Value::String("OrderCreatedEvent".into()));
@@ -1060,12 +1063,18 @@ mod tests {
             "bus".into(),
             Value::String("spring-application-event".into()),
         );
-        event_props.insert("eventSource".into(), Value::String("source-scan".into()));
+        event_props.insert(
+            "eventSource".into(),
+            Value::String("oss-analyzer-fixture".into()),
+        );
 
         let mut topic_props = Map::new();
         topic_props.insert("name".into(), Value::String("orders.created".into()));
         topic_props.insert("broker".into(), Value::String("kafka".into()));
-        topic_props.insert("topicSource".into(), Value::String("source-scan".into()));
+        topic_props.insert(
+            "topicSource".into(),
+            Value::String("oss-analyzer-fixture".into()),
+        );
         topic_props.insert(
             "consumerGroups".into(),
             Value::Array(vec![Value::String("orders-service".into())]),
@@ -1074,7 +1083,10 @@ mod tests {
         let mut policy_props = Map::new();
         policy_props.insert("name".into(), Value::String("orders.view_order".into()));
         policy_props.insert("policyType".into(), Value::String("permission".into()));
-        policy_props.insert("policySource".into(), Value::String("source-scan".into()));
+        policy_props.insert(
+            "policySource".into(),
+            Value::String("oss-analyzer-fixture".into()),
+        );
 
         let mut resource_props = Map::new();
         resource_props.insert(
@@ -1086,7 +1098,10 @@ mod tests {
             Value::String("https://payments.example.com/v1/orders/{param}/charge".into()),
         );
         resource_props.insert("resourceType".into(), Value::String("http".into()));
-        resource_props.insert("resourceSource".into(), Value::String("source-scan".into()));
+        resource_props.insert(
+            "resourceSource".into(),
+            Value::String("oss-analyzer-fixture".into()),
+        );
 
         let mut transaction_props = Map::new();
         transaction_props.insert(
@@ -1120,7 +1135,10 @@ mod tests {
         graphql_props.insert("operationName".into(), Value::String("createOrder".into()));
         graphql_props.insert("operationType".into(), Value::String("mutation".into()));
         graphql_props.insert("handlerName".into(), Value::String("createOrder".into()));
-        graphql_props.insert("graphqlSource".into(), Value::String("source-scan".into()));
+        graphql_props.insert(
+            "graphqlSource".into(),
+            Value::String("oss-analyzer-fixture".into()),
+        );
 
         let mut writer = SearchIndexWriter::create(dir.path()).unwrap();
         writer

@@ -499,10 +499,10 @@ mod tests {
 
     #[test]
     fn unknown_analyzer_is_rejected() {
-        let err = AnalyzerRunMetadata::new("custom-rust-heuristic", "1.0").unwrap_err();
+        let err = AnalyzerRunMetadata::new("unsupported-private-analyzer", "1.0").unwrap_err();
         assert!(matches!(
             err,
-            EnrichmentError::UnsupportedAnalyzer { id } if id == "custom-rust-heuristic"
+            EnrichmentError::UnsupportedAnalyzer { id } if id == "unsupported-private-analyzer"
         ));
     }
 
@@ -673,9 +673,9 @@ mod tests {
                 properties: serde_json::json!({
                     "provenance": {
                         "source": "custom",
-                        "analyzerId": "custom-rust-heuristic",
+                        "analyzerId": "unsupported-private-analyzer",
                         "analyzerKind": "lsp",
-                        "tool": "Custom scanner",
+                        "tool": "Private analyzer",
                         "toolVersion": "1.0",
                         "adapterVersion": "test",
                         "oss": true
@@ -697,7 +697,7 @@ mod tests {
                 fact_kind: "node",
                 fact_id,
                 id
-            } if fact_id == "sym:handler" && id == "custom-rust-heuristic"
+            } if fact_id == "sym:handler" && id == "unsupported-private-analyzer"
         ));
     }
 
