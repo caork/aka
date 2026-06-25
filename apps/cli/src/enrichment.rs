@@ -9,17 +9,24 @@ use std::time::{Duration, Instant};
 
 use aka_core::{
     find_oss_analyzer, AnalyzerRunMetadata, EngineEvent, FactBatch, FactSourceError,
-    OssAnalyzerEnrichmentPolicy, PipelineProgress, PipelineStage, RepoPaths,
+    IndexingDeadline, OssAnalyzerEnrichmentPolicy, PipelineProgress, PipelineStage, RepoPaths,
 };
 
-use crate::indexer::{merge_enrichment_facts_with_progress, EnrichmentMergeSummary};
+use crate::indexer::{merge_enrichment_facts_with_deadline_progress, EnrichmentMergeSummary};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OptionalEnrichmentOutcome {
     Disabled,
     NoProviders,
-    Merged(EnrichmentMergeSummary),
-    Failed(String),
+    Skipped {
+        attempted: usize,
+        failed: usize,
+    },
+    Merged {
+        summary: EnrichmentMergeSummary,
+        attempted: usize,
+        failed: usize,
+    },
 }
 
 pub trait OptionalEnrichmentProvider {
@@ -84,15 +91,33 @@ pub fn run_optional_enrichment_with_providers(
         return OptionalEnrichmentOutcome::NoProviders;
     }
 
+    let deadline = IndexingDeadline::new(policy.max_duration);
+    let mut attempted = 0usize;
+    let mut failed = 0usize;
     for provider in providers {
-        if find_oss_analyzer(provider.id()).is_none() {
-            let message = format!(
-                "provider={} rejected reason=unsupported_analyzer",
-                provider.id()
+        if deadline.is_expired() {
+            failed += 1;
+            emit_log(
+                on_event,
+                format!(
+                    "skipped remaining providers reason=timeout max_secs={}",
+                    policy.max_duration.as_secs()
+                ),
             );
-            emit_log(on_event, message.clone());
-            return OptionalEnrichmentOutcome::Failed(message);
+            break;
         }
+        if find_oss_analyzer(provider.id()).is_none() {
+            failed += 1;
+            emit_log(
+                on_event,
+                format!(
+                    "provider={} rejected reason=unsupported_analyzer",
+                    provider.id()
+                ),
+            );
+            continue;
+        }
+        attempted += 1;
         emit_log(
             on_event,
             format!(
@@ -118,8 +143,12 @@ pub fn run_optional_enrichment_with_providers(
                     });
                     emit_log(on_event, format!("{}: {}", event.stage, event.message));
                 };
-                match merge_enrichment_facts_with_progress(&batch, paths, Some(&mut index_progress))
-                {
+                match merge_enrichment_facts_with_deadline_progress(
+                    &batch,
+                    paths,
+                    deadline,
+                    Some(&mut index_progress),
+                ) {
                     Ok(summary) => {
                         emit_log(
                             on_event,
@@ -132,13 +161,19 @@ pub fn run_optional_enrichment_with_providers(
                                 summary.dangling_edges
                             ),
                         );
-                        return OptionalEnrichmentOutcome::Merged(summary);
+                        return OptionalEnrichmentOutcome::Merged {
+                            summary,
+                            attempted,
+                            failed,
+                        };
                     }
                     Err(err) => {
-                        let message =
-                            format!("provider={} merge_failed error={err}", provider.id());
-                        emit_log(on_event, message.clone());
-                        return OptionalEnrichmentOutcome::Failed(message);
+                        failed += 1;
+                        emit_log(
+                            on_event,
+                            format!("provider={} merge_failed error={err}", provider.id()),
+                        );
+                        continue;
                     }
                 }
             }
@@ -149,9 +184,12 @@ pub fn run_optional_enrichment_with_providers(
                 );
             }
             Err(err) => {
-                let message = format!("provider={} failed error={err}", provider.id());
-                emit_log(on_event, message.clone());
-                return OptionalEnrichmentOutcome::Failed(message);
+                failed += 1;
+                emit_log(
+                    on_event,
+                    format!("provider={} failed error={err}", provider.id()),
+                );
+                continue;
             }
         }
     }
@@ -163,11 +201,13 @@ pub fn run_optional_enrichment_with_providers(
             repo.display()
         ),
         format!(
-            "skipped enabled=true providers={} reason=no_facts",
-            providers.len()
+            "skipped enabled=true providers={} attempted={} failed={} reason=no_facts",
+            providers.len(),
+            attempted,
+            failed
         ),
     );
-    OptionalEnrichmentOutcome::NoProviders
+    OptionalEnrichmentOutcome::Skipped { attempted, failed }
 }
 
 #[cfg(feature = "scip-import")]
@@ -363,9 +403,16 @@ mod tests {
             &mut |event| events.borrow_mut().push(event.clone()),
         );
 
-        let OptionalEnrichmentOutcome::Merged(summary) = outcome else {
+        let OptionalEnrichmentOutcome::Merged {
+            summary,
+            attempted,
+            failed,
+        } = outcome
+        else {
             panic!("expected merged outcome, got {outcome:?}");
         };
+        assert_eq!(attempted, 1);
+        assert_eq!(failed, 0);
         assert_eq!(summary.new_nodes, 1);
         assert_eq!(summary.new_edges, 1);
         let graph = GraphStore::open(&paths.graph_db()).unwrap();
@@ -379,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_enrichment_provider_error_is_reported_as_failed_outcome() {
+    fn optional_enrichment_provider_error_is_reported_as_skipped_outcome() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -399,12 +446,95 @@ mod tests {
             &mut |event| events.borrow_mut().push(event.clone()),
         );
 
-        assert!(matches!(outcome, OptionalEnrichmentOutcome::Failed(_)));
+        assert!(matches!(
+            outcome,
+            OptionalEnrichmentOutcome::Skipped {
+                attempted: 1,
+                failed: 1
+            }
+        ));
         assert!(events.borrow().iter().any(|event| matches!(
             event,
             EngineEvent::Log { stream, line }
                 if stream == "oss-analyzer-enrichment" && line.contains("provider=scip failed")
         )));
+    }
+
+    #[test]
+    fn optional_enrichment_continues_after_provider_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 0,
+                nodes: 1,
+                edges: 0,
+                chunks: 0,
+            },
+            vec![NodeFact {
+                id: "sym:handler".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({"name": "handler"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        index_facts(&baseline, &paths).unwrap();
+        let provider = BatchProvider {
+            batch: FactBatch::new(
+                FactStats {
+                    files: 0,
+                    nodes: 1,
+                    edges: 0,
+                    chunks: 0,
+                },
+                vec![NodeFact {
+                    id: "scip:symbol:service".into(),
+                    label: "Interface".into(),
+                    properties: serde_json::json!({
+                        "name": "Service",
+                        "source": "scip",
+                        "provenance": {"analyzerId": "scip", "toolVersion": "1.0"}
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                }],
+                Vec::new(),
+                Vec::new(),
+            ),
+        };
+
+        let outcome = run_optional_enrichment_with_providers(
+            &repo,
+            &paths,
+            OssAnalyzerEnrichmentPolicy {
+                enabled: true,
+                max_duration: Duration::from_secs(5),
+            },
+            &[&ErrorProvider, &provider],
+            &mut |_| {},
+        );
+
+        let OptionalEnrichmentOutcome::Merged {
+            summary,
+            attempted,
+            failed,
+        } = outcome
+        else {
+            panic!("expected merged outcome after one failed provider, got {outcome:?}");
+        };
+        assert_eq!(attempted, 2);
+        assert_eq!(failed, 1);
+        assert_eq!(summary.new_nodes, 1);
     }
 
     struct UnsupportedProvider;
@@ -439,9 +569,13 @@ mod tests {
             &mut |_| {},
         );
 
-        assert!(
-            matches!(outcome, OptionalEnrichmentOutcome::Failed(message) if message.contains("unsupported_analyzer"))
-        );
+        assert!(matches!(
+            outcome,
+            OptionalEnrichmentOutcome::Skipped {
+                attempted: 0,
+                failed: 1
+            }
+        ));
     }
 
     #[cfg(feature = "scip-import")]
