@@ -35,6 +35,7 @@ struct AkaEngineIndexOptions {
     direct_facts_only: bool,
     deadline_ms_monotonic: u64,
     max_indexing_time_ms: u64,
+    baseline_facts_only: bool,
 }
 
 #[repr(C)]
@@ -225,7 +226,8 @@ impl EmbeddedEngineFactProducer {
         )?;
         on_event(&EngineEvent::Log {
             stream: "adapter".into(),
-            line: "aka-core:direct-facts-only custom_synthesis=disabled".into(),
+            line: "aka-core:direct-facts baseline_facts_only=true custom_enrichment=disabled"
+                .into(),
         });
         batch.replay_into(sink)?;
         Ok(super::ProducedEngineFacts::DirectFacts)
@@ -379,6 +381,7 @@ fn run_embedded_engine_inner(
         direct_facts_only: true,
         deadline_ms_monotonic: 0,
         max_indexing_time_ms,
+        baseline_facts_only: true,
     };
 
     let rc = unsafe { api.index_with_sink(&ffi_options, &ffi_sink) };
@@ -904,12 +907,47 @@ mod tests {
         std::fs::write(repo.join("src/lib.rs"), "pub fn main() {}\n").unwrap();
 
         let mut sink = FactBatchBuilder::new();
-        run_embedded_engine_smoke(&repo, &cache, &mut sink, &mut |_| {}).unwrap();
+        let mut events = Vec::new();
+        run_embedded_engine_smoke(&repo, &cache, &mut sink, &mut |event| {
+            events.push(event.clone());
+        })
+        .unwrap();
         let batch = sink.finish();
 
         assert!(batch.stats.nodes > 0);
         assert!(batch.nodes.iter().any(|node| node.label == "File"));
         assert!(!contains_sqlite_db(&cache));
+        assert_no_legacy_enrichment_phases(&events);
+    }
+
+    fn assert_no_legacy_enrichment_phases(events: &[EngineEvent]) {
+        let forbidden = [
+            "lsp_cross_prepare",
+            "parallel_resolve",
+            "calls",
+            "usages",
+            "semantic",
+            "k8s",
+            "tests",
+            "githistory",
+            "decorator_tags",
+            "configlink",
+            "route_match",
+            "similarity",
+            "semantic_edges",
+            "complexity",
+        ];
+        for event in events {
+            if let EngineEvent::Progress { progress } = event {
+                for phase in forbidden {
+                    assert!(
+                        !progress.message.contains(phase),
+                        "legacy enrichment phase should be skipped in direct baseline: {}",
+                        progress.message
+                    );
+                }
+            }
+        }
     }
 
     fn contains_sqlite_db(path: &Path) -> bool {

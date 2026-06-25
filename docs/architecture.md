@@ -6,7 +6,7 @@
 
 Rust workspace 承担存储、搜索、服务、UI。唯一热路径合同是 `aka-facts`（见 [contracts/artifacts.md](contracts/artifacts.md)）：engine、SCIP importer、tree-sitter stack-graphs adapter、LSP adapter 都产出可重放 facts，graph/search writer 直接消费 `FactSource`。旧 AKA engine binary、facts sidecar NDJSON、engine SQLite artifact adapter 不再作为 fallback 或调试通道。
 
-不在 Rust 侧手写多语言 parser，也不引入 WASM tree-sitter worker 池。解析层优先使用 AKA engine embedded/direct fact API；语言生态已有能力通过 SCIP、stack-graphs 或成熟 LSP 接入。后续 enrichment 只接 rust-analyzer / pyright / jdtls / typescript-language-server / gopls 这类热门开源实现，作为 baseline index ready 之后的可跳过事实源；失败、超时或缺 provider 都不能影响 graph/search 可用。具体入场条件以 [facts 合同](contracts/artifacts.md#producer-ownership) 为准：allowlist、provenance、非阻塞和大仓基准缺一不可。
+不在 Rust 侧手写多语言 parser，也不引入 WASM tree-sitter worker 池。解析层优先使用 AKA engine embedded/direct fact API，但默认只取 baseline parser facts：结构、定义、导入和事实发射；engine 旧的 route/config/k8s/tests/git-history/similarity/complexity/call-heuristic/usages/semantic 推断 pass 不进入默认图。语言生态已有能力通过 SCIP、stack-graphs 或成熟 LSP 接入。后续 enrichment 只接 rust-analyzer / pyright / jdtls / typescript-language-server / gopls 这类热门开源实现，作为 baseline index ready 之后的可跳过事实源；失败、超时或缺 provider 都不能影响 graph/search 可用。具体入场条件以 [facts 合同](contracts/artifacts.md#producer-ownership) 为准：allowlist、provenance、非阻塞和大仓基准缺一不可。
 
 ## 解析引擎层（engine/，AKA engine native C）
 
