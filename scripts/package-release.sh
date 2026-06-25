@@ -261,7 +261,8 @@ copy_engine_resource_metadata() {
 }
 
 prepare_embedded_engine_lib() {
-  local src lib
+  local platform src lib
+  platform="${1:-}"
   src="$(find_engine_source_dir || true)"
   if [[ -z "${src}" ]]; then
     echo "==> 本地未找到 AKA engine 源码，运行 scripts/sync-engine.sh 构建 embedded lib"
@@ -270,7 +271,11 @@ prepare_embedded_engine_lib() {
   fi
   [[ -n "${src}" ]] || { echo "error: 找不到 AKA engine 源码目录，无法构建 embedded lib" >&2; return 1; }
   lib="${src}/build/c/libaka_engine.a"
-  if [[ ! -f "${lib}" ]]; then
+  if [[ "${platform}" == linux-* ]]; then
+    echo "==> 构建 AKA engine embedded lib (PIC): ${lib}"
+    rm -f "${lib}"
+    make -C "${src}" -f Makefile.cbm PIC=1 libaka-engine
+  elif [[ ! -f "${lib}" ]]; then
     echo "==> 构建 AKA engine embedded lib: ${lib}"
     make -C "${src}" -f Makefile.cbm libaka-engine
   fi
@@ -481,7 +486,7 @@ prepare_desktop_resources() {
   platform="$(platform_from_triple "${triple}")"
   echo "==> 准备桌面内置资源 (${platform})"
   if [[ "${platform}" != "win-x64" ]]; then
-    prepare_embedded_engine_lib
+    prepare_embedded_engine_lib "${platform}"
   elif [[ -z "$(find_engine_dll "${platform}" || true)" ]]; then
     prepare_windows_embedded_engine_dll
   fi
