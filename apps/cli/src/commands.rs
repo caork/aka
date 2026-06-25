@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::{run_analyze, AkaBackend};
-use aka_core::{Registry, RepoPaths};
+use aka_core::{validate_enrichment_batch_provenance, FactBatch, Registry, RepoPaths};
 use aka_mcp::Backend;
 
 #[derive(Parser)]
@@ -78,6 +78,11 @@ enum Cmd {
         #[arg(long, default_value = "127.0.0.1:4111")]
         addr: SocketAddr,
     },
+    /// Internal debug: validate an external OSS analyzer aka-facts JSON/JSONL bundle.
+    ValidateFacts {
+        /// aka-facts bundle path produced by an OSS analyzer adapter.
+        path: PathBuf,
+    },
 }
 
 pub fn run_from_env() -> Result<()> {
@@ -145,6 +150,7 @@ where
             backend.start_auto_indexer();
             aka_server::serve(Arc::new(backend) as Arc<dyn Backend>, addr).await
         }),
+        Cmd::ValidateFacts { path } => run_validate_facts(path),
     }
 }
 
@@ -172,6 +178,18 @@ fn run_repos() -> Result<()> {
             if r.embeddings_enabled { "on" } else { "off" }
         );
     }
+    Ok(())
+}
+
+fn run_validate_facts(path: PathBuf) -> Result<()> {
+    let batch =
+        FactBatch::from_json_file(&path).with_context(|| format!("read {}", path.display()))?;
+    validate_enrichment_batch_provenance(&batch)
+        .with_context(|| format!("validate OSS analyzer provenance in {}", path.display()))?;
+    println!(
+        "valid aka-facts: nodes={} edges={} chunks={} files={}",
+        batch.stats.nodes, batch.stats.edges, batch.stats.chunks, batch.stats.files
+    );
     Ok(())
 }
 
@@ -293,4 +311,44 @@ fn run_lod(repo: String, max_nodes: usize, out: Option<PathBuf>) -> Result<()> {
         None => println!("{json}"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_facts_accepts_oss_analyzer_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("facts.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "stats": {"files": 0, "nodes": 1, "edges": 0, "chunks": 0},
+                "nodes": [{
+                    "id": "pyright:symbol:service",
+                    "label": "Function",
+                    "properties": {
+                        "name": "service",
+                        "source": "lsp",
+                        "provenance": {
+                            "source": "lsp",
+                            "analyzerId": "pyright",
+                            "analyzerKind": "lsp",
+                            "tool": "Pyright",
+                            "toolVersion": "1.1.400",
+                            "adapterVersion": "test",
+                            "oss": true
+                        }
+                    }
+                }],
+                "edges": [],
+                "chunks": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        run_from(["aka", "validate-facts", path.to_str().unwrap()]).unwrap();
+    }
 }
