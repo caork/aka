@@ -6,7 +6,7 @@ export const INDEX_PHASES = [
   { key: "facts", label: "Facts" },
   { key: "index", label: "Index" },
   { key: "register", label: "Register" },
-  { key: "lsp", label: "LSP" },
+  { key: "oss-analyzer", label: "OSS Analyzer" },
 ] as const;
 
 export function indexLogLines(repo: Repo): string[] {
@@ -58,7 +58,9 @@ export function indexPhaseLabel(stage: string | null | undefined): string {
   if (normalized === "timeout") return "Timeout";
   if (normalized === "failed") return "Failed";
   if (normalized === "prepare") return "Queued";
-  if (normalized.includes("lsp")) return "LSP";
+  if (normalized.includes("oss-analyzer") || normalized.includes("lsp")) {
+    return "OSS Analyzer";
+  }
   if (normalized.includes("register")) return "Register";
   if (
     normalized.startsWith("graph") ||
