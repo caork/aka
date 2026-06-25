@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aka-cli"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "aka-core",
  "aka-graph",
@@ -37,12 +37,11 @@ dependencies = [
 
 [[package]]
 name = "aka-core"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "aka-facts",
  "chrono",
  "libloading 0.8.9",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -51,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "aka-desktop"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "aka-cli",
  "aka-core",
@@ -69,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "aka-facts"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "serde",
  "serde_json",
@@ -78,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "aka-graph"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "aka-core",
  "rayon",
@@ -90,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "aka-mcp"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "aka-core",
  "anyhow",
@@ -105,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "aka-search"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "aka-core",
  "serde",
@@ -117,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "aka-server"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "aka-core",
  "aka-mcp",
