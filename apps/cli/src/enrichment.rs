@@ -5,6 +5,7 @@
 //! reported as an outcome and left to callers to log/skip.
 
 use std::path::{Path, PathBuf};
+#[cfg(feature = "scip-import")]
 use std::time::{Duration, Instant};
 
 use aka_core::{
@@ -359,8 +360,9 @@ fn emit_log(on_event: &mut dyn FnMut(&EngineEvent), line: impl Into<String>) {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::time::Duration;
 
-    use aka_core::{ChunkFact, EdgeFact, FactSource, FactStats, NodeFact};
+    use aka_core::{ChunkFact, EdgeFact, FactStats, NodeFact};
     use aka_graph::GraphStore;
 
     use super::*;

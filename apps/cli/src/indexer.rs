@@ -13,7 +13,6 @@ use aka_graph::{compute_layout, Adjacency, GraphStore};
 use aka_search::SearchIndexWriter;
 
 const MAX_INCREMENTAL_CHANGED_FILES: usize = 64;
-const INCREMENTAL_RATIO_DIVISOR: usize = 5;
 
 pub struct IndexSummary {
     pub nodes: u64,
@@ -64,6 +63,7 @@ pub struct IndexProgressEvent {
 
 struct IncrementalSlice {
     changed_paths: BTreeSet<String>,
+    deleted_paths: BTreeSet<String>,
     nodes: Vec<NodeRec>,
     edges: Vec<EdgeRec>,
     chunks: Vec<ChunkRec>,
@@ -697,6 +697,7 @@ fn index_facts_incremental_inner(
         return Ok(IncrementalIndexOutcome::FullRebuildRequired(reason));
     }
 
+    let changed_count = delta.added.len() + delta.modified.len();
     emit_index_progress(
         progress.as_deref_mut(),
         "incremental:slice",
@@ -704,17 +705,28 @@ fn index_facts_incremental_inner(
         None,
         None,
     );
-    let slice = match build_incremental_slice(source, delta)? {
-        Ok(slice) => slice,
-        Err(reason) => {
-            emit_index_progress(
-                progress.as_deref_mut(),
-                "incremental:slice",
-                format!("full rebuild required: {reason}"),
-                None,
-                None,
-            );
-            return Ok(IncrementalIndexOutcome::FullRebuildRequired(reason));
+    let slice = if changed_count > 0 {
+        match build_incremental_slice(source, delta)? {
+            Ok(slice) => slice,
+            Err(reason) => {
+                emit_index_progress(
+                    progress.as_deref_mut(),
+                    "incremental:slice",
+                    format!("full rebuild required: {reason}"),
+                    None,
+                    None,
+                );
+                return Ok(IncrementalIndexOutcome::FullRebuildRequired(reason));
+            }
+        }
+    } else {
+        IncrementalSlice {
+            changed_paths: BTreeSet::new(),
+            deleted_paths: delta.deleted.iter().cloned().collect(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            chunks: Vec::new(),
+            bad_lines: 0,
         }
     };
 
@@ -751,13 +763,14 @@ fn index_facts_incremental_inner(
         progress.as_deref_mut(),
         "incremental:graph",
         format!(
-            "replacing {} changed files in graph",
-            slice.changed_paths.len()
+            "replacing {} changed files and deleting {} removed files in graph",
+            slice.changed_paths.len(),
+            slice.deleted_paths.len()
         ),
         Some(0),
-        Some(slice.changed_paths.len() as u64),
+        Some((slice.changed_paths.len() + slice.deleted_paths.len()) as u64),
     );
-    for file_path in &slice.changed_paths {
+    for file_path in slice.changed_paths.iter().chain(slice.deleted_paths.iter()) {
         check_deadline(deadline, "incremental:graph")?;
         store.delete_file(file_path)?;
     }
@@ -788,13 +801,14 @@ fn index_facts_incremental_inner(
         progress.as_deref_mut(),
         "incremental:search",
         format!(
-            "replacing {} changed files in search index",
-            slice.changed_paths.len()
+            "replacing {} changed files and deleting {} removed files in search index",
+            slice.changed_paths.len(),
+            slice.deleted_paths.len()
         ),
         Some(0),
-        Some(slice.changed_paths.len() as u64),
+        Some((slice.changed_paths.len() + slice.deleted_paths.len()) as u64),
     );
-    for file_path in &slice.changed_paths {
+    for file_path in slice.changed_paths.iter().chain(slice.deleted_paths.iter()) {
         if let Some(deadline) = deadline {
             deadline.check("incremental:search")?;
         }
@@ -884,24 +898,10 @@ fn incremental_preflight(
     {
         return Some("index state metadata changed".into());
     }
-    if !delta.deleted.is_empty() {
-        return Some("deleted files require full graph/search rebuild".into());
-    }
     let changed = delta.changed_count();
     if changed > MAX_INCREMENTAL_CHANGED_FILES {
         return Some(format!(
             "too many changed files for incremental update: {changed} > {MAX_INCREMENTAL_CHANGED_FILES}"
-        ));
-    }
-    let total_files = current_state
-        .files
-        .len()
-        .max(previous_state.files.len())
-        .max(1);
-    let ratio_limit = (total_files / INCREMENTAL_RATIO_DIVISOR).max(1);
-    if changed > ratio_limit {
-        return Some(format!(
-            "changed file ratio too large for incremental update: {changed}/{total_files}"
         ));
     }
     if !paths.graph_db().is_file() {
@@ -977,8 +977,16 @@ fn build_incremental_slice(
         .chain(delta.modified.iter())
         .cloned()
         .collect();
+    let deleted_paths: BTreeSet<String> = delta.deleted.iter().cloned().collect();
     if changed_paths.is_empty() {
-        return Ok(Err("no added or modified files to replace".into()));
+        return Ok(Ok(IncrementalSlice {
+            changed_paths,
+            deleted_paths,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            chunks: Vec::new(),
+            bad_lines: 0,
+        }));
     }
 
     let mut bad_lines = 0u64;
@@ -1069,6 +1077,7 @@ fn build_incremental_slice(
 
     Ok(Ok(IncrementalSlice {
         changed_paths,
+        deleted_paths,
         nodes,
         edges,
         chunks,
@@ -1162,6 +1171,283 @@ mod tests {
         assert_eq!(summary.chunks, 1);
         assert!(paths.graph_db().is_file());
         assert!(paths.search_dir().is_dir());
+    }
+
+    #[test]
+    fn incremental_update_deletes_removed_file_without_full_rebuild() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn keep() {}\n").unwrap();
+        std::fs::write(repo.join("src/b.rs"), "fn drop_me() {}\n").unwrap();
+
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 2,
+                nodes: 2,
+                edges: 0,
+                chunks: 2,
+            },
+            vec![
+                NodeRec {
+                    id: "sym:keep".into(),
+                    label: "Function".into(),
+                    properties: serde_json::json!({
+                        "name": "keep",
+                        "qualifiedName": "demo::keep",
+                        "filePath": "src/a.rs",
+                        "startLine": 0,
+                        "endLine": 0
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                },
+                NodeRec {
+                    id: "sym:drop_me".into(),
+                    label: "Function".into(),
+                    properties: serde_json::json!({
+                        "name": "drop_me",
+                        "qualifiedName": "demo::drop_me",
+                        "filePath": "src/b.rs",
+                        "startLine": 0,
+                        "endLine": 0
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                },
+            ],
+            Vec::new(),
+            vec![
+                ChunkRec {
+                    node_id: "sym:keep".into(),
+                    kind: "ast-function".into(),
+                    file_path: "src/a.rs".into(),
+                    start_line: 0,
+                    end_line: 0,
+                    text: "fn keep() {}".into(),
+                },
+                ChunkRec {
+                    node_id: "sym:drop_me".into(),
+                    kind: "ast-function".into(),
+                    file_path: "src/b.rs".into(),
+                    start_line: 0,
+                    end_line: 0,
+                    text: "fn drop_me() {}".into(),
+                },
+            ],
+        );
+        index_facts(&baseline, &paths).unwrap();
+        let previous = IndexState::compute(&repo, Some("engine".into()), false).unwrap();
+
+        std::fs::remove_file(repo.join("src/b.rs")).unwrap();
+        let current = IndexState::compute(&repo, Some("engine".into()), false).unwrap();
+        let delta = current.delta_from(Some(&previous));
+        assert_eq!(delta.deleted, vec!["src/b.rs"]);
+
+        let current_facts = FactBatch::new(
+            FactStats {
+                files: 1,
+                nodes: 1,
+                edges: 0,
+                chunks: 1,
+            },
+            vec![NodeRec {
+                id: "sym:keep".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({
+                    "name": "keep",
+                    "qualifiedName": "demo::keep",
+                    "filePath": "src/a.rs",
+                    "startLine": 0,
+                    "endLine": 0
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }],
+            Vec::new(),
+            vec![ChunkRec {
+                node_id: "sym:keep".into(),
+                kind: "ast-function".into(),
+                file_path: "src/a.rs".into(),
+                start_line: 0,
+                end_line: 0,
+                text: "fn keep() {}".into(),
+            }],
+        );
+
+        let outcome =
+            index_facts_incremental(&current_facts, &paths, &delta, &previous, &current).unwrap();
+        let IncrementalIndexOutcome::Applied(summary) = outcome else {
+            panic!("expected deleted-file delta to apply incrementally");
+        };
+        assert!(summary.incremental);
+
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        assert!(graph.node_by_id("sym:keep").unwrap().is_some());
+        assert!(graph.node_by_id("sym:drop_me").unwrap().is_none());
+        let search = SearchIndex::open(&paths.search_dir()).unwrap();
+        assert!(search
+            .search("keep", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.node_id == "sym:keep"));
+        assert!(search
+            .search("drop_me", 10)
+            .unwrap()
+            .iter()
+            .all(|hit| hit.node_id != "sym:drop_me"));
+    }
+
+    #[test]
+    fn incremental_update_handles_modified_and_deleted_files_with_edges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn keep() { drop_me(); }\n").unwrap();
+        std::fs::write(repo.join("src/b.rs"), "fn drop_me() {}\n").unwrap();
+
+        let paths = RepoPaths {
+            root: tmp.path().join("aka-data").join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let baseline = FactBatch::new(
+            FactStats {
+                files: 2,
+                nodes: 2,
+                edges: 1,
+                chunks: 2,
+            },
+            vec![
+                NodeRec {
+                    id: "sym:keep".into(),
+                    label: "Function".into(),
+                    properties: serde_json::json!({
+                        "name": "keep",
+                        "qualifiedName": "demo::keep",
+                        "filePath": "src/a.rs",
+                        "startLine": 0,
+                        "endLine": 0
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                },
+                NodeRec {
+                    id: "sym:drop_me".into(),
+                    label: "Function".into(),
+                    properties: serde_json::json!({
+                        "name": "drop_me",
+                        "qualifiedName": "demo::drop_me",
+                        "filePath": "src/b.rs",
+                        "startLine": 0,
+                        "endLine": 0
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                },
+            ],
+            vec![EdgeRec {
+                id: "edge:keep-drop".into(),
+                source_id: "sym:keep".into(),
+                target_id: "sym:drop_me".into(),
+                edge_type: "CALLS".into(),
+                confidence: 1.0,
+                reason: "test".into(),
+                step: None,
+                evidence: None,
+            }],
+            vec![
+                ChunkRec {
+                    node_id: "sym:keep".into(),
+                    kind: "ast-function".into(),
+                    file_path: "src/a.rs".into(),
+                    start_line: 0,
+                    end_line: 0,
+                    text: "fn keep() { drop_me(); }".into(),
+                },
+                ChunkRec {
+                    node_id: "sym:drop_me".into(),
+                    kind: "ast-function".into(),
+                    file_path: "src/b.rs".into(),
+                    start_line: 0,
+                    end_line: 0,
+                    text: "fn drop_me() {}".into(),
+                },
+            ],
+        );
+        index_facts(&baseline, &paths).unwrap();
+        let previous = IndexState::compute(&repo, Some("engine".into()), false).unwrap();
+
+        std::fs::write(repo.join("src/a.rs"), "fn keep() { 42; }\n").unwrap();
+        std::fs::remove_file(repo.join("src/b.rs")).unwrap();
+        let current = IndexState::compute(&repo, Some("engine".into()), false).unwrap();
+        let delta = current.delta_from(Some(&previous));
+        assert_eq!(delta.modified, vec!["src/a.rs"]);
+        assert_eq!(delta.deleted, vec!["src/b.rs"]);
+
+        let current_facts = FactBatch::new(
+            FactStats {
+                files: 1,
+                nodes: 1,
+                edges: 0,
+                chunks: 1,
+            },
+            vec![NodeRec {
+                id: "sym:keep".into(),
+                label: "Function".into(),
+                properties: serde_json::json!({
+                    "name": "keep",
+                    "qualifiedName": "demo::keep",
+                    "filePath": "src/a.rs",
+                    "startLine": 0,
+                    "endLine": 0
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }],
+            Vec::new(),
+            vec![ChunkRec {
+                node_id: "sym:keep".into(),
+                kind: "ast-function".into(),
+                file_path: "src/a.rs".into(),
+                start_line: 0,
+                end_line: 0,
+                text: "fn keep() { 42; }".into(),
+            }],
+        );
+
+        let outcome =
+            index_facts_incremental(&current_facts, &paths, &delta, &previous, &current).unwrap();
+        let IncrementalIndexOutcome::Applied(summary) = outcome else {
+            panic!("expected mixed modified/deleted delta to apply incrementally");
+        };
+        assert!(summary.incremental);
+
+        let graph = GraphStore::open(&paths.graph_db()).unwrap();
+        assert!(graph.node_by_id("sym:keep").unwrap().is_some());
+        assert!(graph.node_by_id("sym:drop_me").unwrap().is_none());
+        assert_eq!(graph.edge_count().unwrap(), 0);
+
+        let search = SearchIndex::open(&paths.search_dir()).unwrap();
+        assert!(search
+            .search("42", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.node_id == "sym:keep"));
+        assert!(search
+            .search("drop_me", 10)
+            .unwrap()
+            .iter()
+            .all(|hit| hit.node_id != "sym:drop_me"));
     }
 
     #[test]

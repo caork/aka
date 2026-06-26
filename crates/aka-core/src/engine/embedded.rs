@@ -36,6 +36,7 @@ struct AkaEngineIndexOptions {
     deadline_ms_monotonic: u64,
     max_indexing_time_ms: u64,
     baseline_facts_only: bool,
+    db_path: *const c_char,
 }
 
 #[repr(C)]
@@ -226,8 +227,7 @@ impl EmbeddedEngineFactProducer {
         )?;
         on_event(&EngineEvent::Log {
             stream: "adapter".into(),
-            line: "aka-core:direct-facts baseline_facts_only=true custom_enrichment=disabled"
-                .into(),
+            line: "aka-core:direct-facts baseline_facts_only=true engine_incremental_cache=enabled custom_enrichment=disabled".into(),
         });
         batch.replay_into(sink)?;
         Ok(super::ProducedEngineFacts::DirectFacts)
@@ -350,6 +350,8 @@ fn run_embedded_engine_inner(
         .unwrap_or(0);
     let repo_c = cstring_path(engine_repo)?;
     let cache_c = cstring_path(cache_root)?;
+    let db_path = cache_root.join("facts.db");
+    let db_c = cstring_path(&db_path)?;
     let mut batch = FactBatchBuilder::new();
     let mut event_bridge = EventBridge {
         events: events.clone(),
@@ -378,10 +380,11 @@ fn run_embedded_engine_inner(
         repo_path: repo_c.as_ptr(),
         cache_dir: cache_c.as_ptr(),
         mode,
-        direct_facts_only: true,
+        direct_facts_only: false,
         deadline_ms_monotonic: 0,
         max_indexing_time_ms,
         baseline_facts_only: true,
+        db_path: db_c.as_ptr(),
     };
 
     let rc = unsafe { api.index_with_sink(&ffi_options, &ffi_sink) };
@@ -797,6 +800,45 @@ fn clamp_line(line: c_int) -> u32 {
 mod tests {
     use super::*;
 
+    fn field_offset<T>(base: usize, field: &T) -> usize {
+        (field as *const T as usize) - base
+    }
+
+    #[test]
+    fn ffi_index_options_appends_db_path_without_shifting_existing_fields() {
+        let options = AkaEngineIndexOptions {
+            repo_path: std::ptr::null(),
+            cache_dir: std::ptr::null(),
+            mode: AkaEngineMode::Fast,
+            direct_facts_only: false,
+            deadline_ms_monotonic: 0,
+            max_indexing_time_ms: 0,
+            baseline_facts_only: true,
+            db_path: std::ptr::null(),
+        };
+        let base = (&options as *const AkaEngineIndexOptions).cast::<u8>() as usize;
+
+        assert_eq!(field_offset(base, &options.repo_path), 0);
+        assert!(field_offset(base, &options.cache_dir) > 0);
+        assert!(field_offset(base, &options.mode) > field_offset(base, &options.cache_dir));
+        assert!(field_offset(base, &options.direct_facts_only) > field_offset(base, &options.mode));
+        assert!(
+            field_offset(base, &options.deadline_ms_monotonic)
+                > field_offset(base, &options.direct_facts_only)
+        );
+        assert!(
+            field_offset(base, &options.max_indexing_time_ms)
+                > field_offset(base, &options.deadline_ms_monotonic)
+        );
+        assert!(
+            field_offset(base, &options.baseline_facts_only)
+                > field_offset(base, &options.max_indexing_time_ms)
+        );
+        assert!(
+            field_offset(base, &options.db_path) > field_offset(base, &options.baseline_facts_only)
+        );
+    }
+
     #[test]
     fn callbacks_copy_engine_records_into_fact_batch() {
         let mut batch = FactBatchBuilder::new();
@@ -894,7 +936,7 @@ mod tests {
 
     #[test]
     #[ignore = "links and runs the native embedded engine; use for local smoke"]
-    fn embedded_engine_indexes_tiny_repo_without_sqlite_dump() {
+    fn embedded_engine_indexes_tiny_repo_with_private_incremental_cache() {
         let root = std::env::temp_dir().join(format!(
             "aka-core-embedded-engine-smoke-{}",
             std::process::id()
@@ -916,7 +958,7 @@ mod tests {
 
         assert!(batch.stats.nodes > 0);
         assert!(batch.nodes.iter().any(|node| node.label == "File"));
-        assert!(!contains_sqlite_db(&cache));
+        assert!(cache.join("facts.db").is_file());
         assert_no_legacy_enrichment_phases(&events);
     }
 
@@ -948,22 +990,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    fn contains_sqlite_db(path: &Path) -> bool {
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return false;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if contains_sqlite_db(&path) {
-                    return true;
-                }
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("db") {
-                return true;
-            }
-        }
-        false
     }
 }
