@@ -117,7 +117,7 @@ interface AppState {
 
   /** Code 视图目标（null = 无打开的文件；view === "code" 时必有值） */
   codeTarget: CodeTarget | null;
-  /** 打开 Code 视图定位到文件/行；记住来源视图供 closeCode 返回 */
+  /** 打开 Code 视图定位到文件/行；可同步右侧详情锚点 */
   openCode(target: CodeTarget): void;
   /** 关闭 Code 视图，返回打开前的视图 */
   closeCode(): void;
@@ -338,7 +338,16 @@ export const useAppStore = create<AppState>((set) => ({
 
   codeTarget: null,
   openCode: (codeTarget) => {
-    set({ codeTarget, view: "code" });
+    const state = useAppStore.getState();
+    const detailTarget = state.detailTarget;
+    const nextDetail =
+      detailTarget && detailTarget.file === codeTarget.path
+        ? {
+            ...detailTarget,
+            line: codeTarget.line ?? detailTarget.line,
+          }
+        : detailTarget;
+    set({ codeTarget, view: "code", detailTarget: nextDetail });
   },
   closeCode: () => set({ codeTarget: null }),
 

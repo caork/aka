@@ -8,11 +8,15 @@ import GraphView from "./components/GraphView";
 import RepoDropdown from "./components/RepoDropdown";
 import SearchBubble from "./components/SearchBubble";
 import SegmentedControl from "./components/SegmentedControl";
-import { useAppStore } from "./store";
+import { fetchNodeDetail } from "./repo-api";
+import { useAppStore, type ViewId } from "./store";
 
 export default function App() {
   const view = useAppStore((s) => s.view);
   const setView = useAppStore((s) => s.setView);
+  const selectedRepoId = useAppStore((s) => s.selectedRepoId);
+  const detailTarget = useAppStore((s) => s.detailTarget);
+  const openCode = useAppStore((s) => s.openCode);
   const syncSystemTheme = useAppStore((s) => s.syncSystemTheme);
 
   useEffect(() => {
@@ -27,6 +31,46 @@ export default function App() {
     if (e.button !== 0 || !isDesktopRuntime()) return;
     e.preventDefault();
     void getCurrentWindow().startDragging().catch(() => {});
+  };
+
+  const changeView = (next: ViewId) => {
+    if (next !== "code" || view !== "graph" || !detailTarget) {
+      setView(next);
+      return;
+    }
+
+    const fallbackFile = detailTarget.file;
+    if (fallbackFile) {
+      openCode({
+        repo: selectedRepoId,
+        path: fallbackFile,
+        line: detailTarget.line > 0 ? detailTarget.line : undefined,
+      });
+      return;
+    }
+
+    setView(next);
+    void fetchNodeDetail(selectedRepoId, detailTarget.id).then((res) => {
+      const state = useAppStore.getState();
+      if (
+        state.view !== "code" ||
+        state.selectedRepoId !== selectedRepoId ||
+        state.detailTarget?.id !== detailTarget.id
+      ) {
+        return;
+      }
+      if (res.state !== "ok") return;
+      const file = res.detail.file || res.detail.process?.entry?.file;
+      const line = res.detail.file ? res.detail.line : (res.detail.process?.entry?.line ?? 0);
+      const endLine = res.detail.file ? res.detail.end_line : line;
+      if (!file) return;
+      openCode({
+        repo: selectedRepoId,
+        path: file,
+        line: line > 0 ? line : undefined,
+        endLine: endLine > line ? endLine : undefined,
+      });
+    });
   };
 
   return (
@@ -55,7 +99,7 @@ export default function App() {
 
         <div className="absolute right-3 top-3 z-30 flex items-center gap-2">
           <SearchBubble />
-          <SegmentedControl value={view} onChange={setView} />
+          <SegmentedControl value={view} onChange={changeView} />
         </div>
 
         <AnimatePresence mode="wait">

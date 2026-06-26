@@ -223,6 +223,16 @@ function PanelBody({
   /* 关系/流程跳转时打开 Code 视图（GitHub 式全文预览） */
   const repoName = repos.find((r) => r.id === repoId)?.name ?? repoId;
 
+  const openTargetCode = () => {
+    if (!file) return;
+    openCode({
+      repo: repoName,
+      path: file,
+      line: line > 0 ? line : undefined,
+      endLine: endLine > line ? endLine : undefined,
+    });
+  };
+
   /* 点击关系条目：Code 视图里同时把中栏跳到该节点（跟着图谱走），
      并把抽屉重锚到它；Graph 视图里只重锚，不抢占画布。 */
   const pickRelation = (r: ContextRef) => {
@@ -519,13 +529,24 @@ function PanelBody({
         >
           {copied ? "已复制 ✓" : "复制路径"}
         </ActionButton>
-        <button
-          onClick={() => requestFocus(target.id, target.name || target.id)}
-          className="btn-primary focus-ring px-3 py-2 text-[12.5px] font-semibold"
-          data-testid="detail-focus-graph"
-        >
-          在 Graph 定位
-        </button>
+        {view === "code" ? (
+          <button
+            onClick={() => requestFocus(target.id, target.name || target.id)}
+            className="btn-primary focus-ring px-3 py-2 text-[12.5px] font-semibold"
+            data-testid="detail-focus-graph"
+          >
+            在 Graph 定位
+          </button>
+        ) : (
+          <button
+            onClick={openTargetCode}
+            disabled={!file}
+            className="btn-primary focus-ring px-3 py-2 text-[12.5px] font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+            data-testid="detail-open-code"
+          >
+            在 Code 打开
+          </button>
+        )}
         <ActionButton
           onClick={() => requestEgo(target.id, target.name || target.id)}
           testId="detail-ego"
