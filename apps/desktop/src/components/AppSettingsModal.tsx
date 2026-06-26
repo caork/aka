@@ -34,6 +34,16 @@ const OSS_ANALYZER_MAX_DEFAULT = 30;
 const OSS_ANALYZER_MAX_MIN = 5;
 const OSS_ANALYZER_MAX_LIMIT = 10 * 60;
 
+const OSS_ANALYZERS = [
+  { name: "SCIP", detail: "Sourcegraph protocol · Apache-2.0" },
+  { name: "Stack graphs", detail: "tree-sitter · MIT/Apache-2.0" },
+  { name: "Pyright", detail: "Python · MIT" },
+  { name: "gopls", detail: "Go · BSD-3-Clause" },
+  { name: "TypeScript LS", detail: "TS/JS · MIT/Apache-2.0" },
+  { name: "rust-analyzer", detail: "Rust · MIT/Apache-2.0" },
+  { name: "JDT LS", detail: "Java · EPL-2.0" },
+];
+
 function clampIndexMaxSecs(value: number): number {
   if (!Number.isFinite(value)) return INDEX_MAX_DEFAULT;
   return Math.min(INDEX_MAX_LIMIT, Math.max(INDEX_MAX_MIN, Math.round(value)));
@@ -381,11 +391,26 @@ export default function AppSettingsModal({
         <div className="themed-divider mt-4 border-t pt-4">
           <div className="flex items-start gap-4">
             <div className="min-w-0 flex-1">
-              <div className="text-[13px] font-medium text-ink">
-                OSS analyzer enrichment
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-[13px] font-medium text-ink">
+                  Open-source analyzer enrichment
+                </div>
+                <span
+                  className="rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                  style={{
+                    background: ossAnalyzerEnrichmentEnabled
+                      ? "var(--accent-fill)"
+                      : "var(--subtle-fill)",
+                    color: ossAnalyzerEnrichmentEnabled
+                      ? "var(--accent)"
+                      : "var(--ink-3)",
+                  }}
+                >
+                  {ossAnalyzerEnrichmentEnabled ? "Enabled" : "Off"}
+                </span>
               </div>
               <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
-                仅导入成熟开源分析器结果；跳过或失败不影响 graph/search ready。
+                仅导入成熟开源分析器结果；下一次导入或更新时生效，跳过或失败不影响 graph/search ready。
               </div>
             </div>
             <button
@@ -408,6 +433,32 @@ export default function AppSettingsModal({
                 }`}
               />
             </button>
+          </div>
+          <div
+            className="mt-3 grid grid-cols-2 gap-1.5"
+            data-testid="oss-analyzer-allowlist"
+          >
+            {OSS_ANALYZERS.map((analyzer) => (
+              <div
+                key={analyzer.name}
+                className="min-w-0 rounded-[8px] px-2.5 py-1.5"
+                style={{
+                  background: "var(--subtle-fill-2)",
+                  boxShadow: "inset 0 0 0 0.5px var(--hairline)",
+                }}
+              >
+                <div className="truncate text-[11.5px] font-medium text-ink">
+                  {analyzer.name}
+                </div>
+                <div className="truncate text-[10.5px] text-ink-3">
+                  {analyzer.detail}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 text-[11px] leading-relaxed text-ink-3">
+            SCIP 指 Sourcegraph Code Intelligence Protocol，不是同名优化器。
+            AKA 只读取显式配置的 index.scip 或 aka-facts bundle，不自动启动语言服务。
           </div>
           <div className="mt-3 flex items-center gap-3">
             <span className="cmd-input flex h-8 w-[96px] flex-none items-center px-2.5">
