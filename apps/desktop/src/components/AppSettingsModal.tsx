@@ -7,6 +7,13 @@ import {
   type InstallProgress,
   type NativeUpdateInfo,
 } from "../app-update-api";
+import {
+  getClientIntegrationsStatus,
+  installClientIntegration,
+  type ClientIntegrationId,
+  type ClientIntegrationsStatus,
+  type ClientIntegrationStatus,
+} from "../client-integrations-api";
 import { isDesktopRuntime } from "../desktop-api";
 import {
   checkForAppUpdate,
@@ -72,6 +79,12 @@ export default function AppSettingsModal({
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [clientIntegrations, setClientIntegrations] =
+    useState<ClientIntegrationsStatus | null>(null);
+  const [clientIntegrationsBusy, setClientIntegrationsBusy] = useState(false);
+  const [clientIntegrationAction, setClientIntegrationAction] = useState<string | null>(
+    null,
+  );
   const [openingUrl, setOpeningUrl] = useState<string | null>(null);
   const [nativeUpdate, setNativeUpdate] = useState<NativeUpdateInfo | null>(null);
   const [installProgress, setInstallProgress] = useState<InstallProgress | null>(null);
@@ -118,6 +131,31 @@ export default function AppSettingsModal({
       .catch((e) => {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !isDesktopRuntime()) return;
+    let cancelled = false;
+    setClientIntegrationsBusy(true);
+    void getClientIntegrationsStatus()
+      .then((status) => {
+        if (!cancelled) {
+          setClientIntegrations(status);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setClientIntegrationsBusy(false);
         }
       });
     return () => {
@@ -196,6 +234,26 @@ export default function AppSettingsModal({
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setOpeningUrl(null);
+    }
+  };
+
+  const runClientIntegration = async (
+    client: ClientIntegrationId,
+    reinstall: boolean,
+  ) => {
+    const actionKey = `${client}:${reinstall ? "reinstall" : "install"}`;
+    if (clientIntegrationAction) return;
+    setClientIntegrationAction(actionKey);
+    setNotice(null);
+    setError(null);
+    try {
+      const next = await installClientIntegration({ client, reinstall });
+      setClientIntegrations(next);
+      setNotice(next.lastAction ?? "客户端插件已更新");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setClientIntegrationAction(null);
     }
   };
 
@@ -671,6 +729,65 @@ export default function AppSettingsModal({
       </div>
 
       <div className="themed-divider mt-5 border-t pt-4">
+        <div className="mb-3 flex items-start gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-medium text-ink">Agent plugins</div>
+            <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
+              一键安装或重装 Claude Code / OpenCode 插件包，默认连接桌面端本地 MCP。
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={clientIntegrationsBusy || !isDesktopRuntime()}
+            onClick={() => {
+              if (!isDesktopRuntime()) return;
+              setClientIntegrationsBusy(true);
+              setError(null);
+              void getClientIntegrationsStatus()
+                .then(setClientIntegrations)
+                .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+                .finally(() => setClientIntegrationsBusy(false));
+            }}
+            className="focus-ring rounded-[9px] px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-45"
+            style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
+            data-testid="refresh-client-integrations"
+          >
+            {clientIntegrationsBusy ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+
+        {isDesktopRuntime() ? (
+          <div className="space-y-2">
+            {(clientIntegrations?.clients ?? []).map((client) => (
+              <ClientIntegrationRow
+                key={client.client}
+                client={client}
+                action={clientIntegrationAction}
+                onInstall={() => void runClientIntegration(client.client, false)}
+                onReinstall={() => void runClientIntegration(client.client, true)}
+              />
+            ))}
+            {!clientIntegrations && (
+              <div className="text-[11.5px] text-ink-3">
+                {clientIntegrationsBusy
+                  ? "Reading plugin status..."
+                  : "Click Refresh to read plugin status."}
+              </div>
+            )}
+            {clientIntegrations?.mcpUrl && (
+              <div className="truncate text-[11px] text-ink-3">
+                MCP endpoint: {clientIntegrations.mcpUrl}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="rounded-[9px] px-3 py-2 text-[11.5px] text-ink-3">
+            打开 AKA 桌面端后可管理本机插件安装。
+          </div>
+        )}
+      </div>
+
+      <div className="themed-divider mt-5 border-t pt-4">
         <div className="mb-3">
           <div className="text-[13px] font-medium text-ink">Local data</div>
           <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
@@ -765,6 +882,126 @@ function ReleaseAssetRow({
       </button>
     </div>
   );
+}
+
+function ClientIntegrationRow({
+  client,
+  action,
+  onInstall,
+  onReinstall,
+}: {
+  client: ClientIntegrationStatus;
+  action: string | null;
+  onInstall(): void;
+  onReinstall(): void;
+}) {
+  const installKey = `${client.client}:install`;
+  const reinstallKey = `${client.client}:reinstall`;
+  const busy = action === installKey || action === reinstallKey;
+  const disabled = action !== null || !client.available;
+  const primaryLabel = client.installed ? "Update" : "Install";
+  const versionLabel = formatClientIntegrationVersion(client);
+
+  return (
+    <div
+      className="rounded-[10px] px-3 py-2.5"
+      style={{
+        background: "var(--subtle-fill-2)",
+        boxShadow: "inset 0 0 0 0.5px var(--hairline)",
+      }}
+      data-testid={`client-integration-${client.client}`}
+    >
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[12.5px] font-semibold text-ink">
+              {client.label}
+            </span>
+            <span
+              className="rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold uppercase"
+              style={{
+                background: client.installed
+                  ? "var(--success-fill)"
+                  : "var(--subtle-fill)",
+                color: client.installed ? "var(--success)" : "var(--ink-3)",
+              }}
+            >
+              {client.installed ? "Installed" : "Not installed"}
+            </span>
+            {versionLabel && (
+              <span className="text-[10.5px] text-ink-3">{versionLabel}</span>
+            )}
+          </div>
+          <div className="mt-1 text-[11.5px] leading-relaxed text-ink-3">
+            {client.summary}
+          </div>
+          {client.details.length > 0 && (
+            <div className="mt-1 line-clamp-2 text-[10.8px] leading-relaxed text-ink-3">
+              {client.details.join(" ")}
+            </div>
+          )}
+          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10.5px] text-ink-3">
+            {client.paths.slice(0, 3).map((path) => (
+              <span
+                key={path.label}
+                className="max-w-full truncate"
+                title={path.path}
+                style={{ color: path.exists ? "var(--ink-3)" : "var(--danger)" }}
+              >
+                {path.label}: {path.exists ? "ok" : "missing"}
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="flex flex-none items-center gap-1.5">
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={onInstall}
+            className="focus-ring rounded-[8px] px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-45"
+            style={{
+              color: "var(--accent-ink)",
+              background: "var(--accent-fill)",
+              boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)",
+            }}
+            data-testid={`install-client-integration-${client.client}`}
+          >
+            {action === installKey ? "Working..." : primaryLabel}
+          </button>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={onReinstall}
+            className="focus-ring rounded-[8px] px-2.5 py-1.5 text-[11.5px] font-semibold text-ink-2 transition-colors duration-150 ease-out hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
+            style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
+            data-testid={`reinstall-client-integration-${client.client}`}
+          >
+            {action === reinstallKey ? "Working..." : "Reinstall"}
+          </button>
+        </div>
+      </div>
+      {busy && (
+        <div
+          className="mt-2 h-1 overflow-hidden rounded-full"
+          style={{ background: "var(--subtle-fill)" }}
+        >
+          <div
+            className="h-full w-1/3 rounded-full"
+            style={{ background: "var(--accent)" }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatClientIntegrationVersion(client: ClientIntegrationStatus): string | null {
+  if (client.version && client.bundledVersion) {
+    return `v${client.version} / bundled v${client.bundledVersion}`;
+  }
+  if (client.version) return `v${client.version}`;
+  if (client.bundledVersion) return `bundled v${client.bundledVersion}`;
+  return null;
 }
 
 function UpdateProgressBar({ progress }: { progress: InstallProgress }) {

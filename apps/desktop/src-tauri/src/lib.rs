@@ -1,9 +1,9 @@
 //! aka desktop shell with an embedded Rust backend.
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Once,
@@ -16,16 +16,18 @@ use aka_core::{
     DEFAULT_OSS_ANALYZER_ENRICHMENT_MAX_SECS,
 };
 use aka_mcp::{clamp_render_nodes, ops, Backend, RepoSettingsUpdate, MAX_RENDER_NODES};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::{Manager, State};
+use tauri::{path::BaseDirectory, Manager, State};
 
 type BackendState = Arc<AkaBackend>;
 
 const AKA_HOME_DIR_NAME: &str = "aka-home";
 const APP_DATA_DIR_NAME: &str = "com.aka.desktop";
 const DESKTOP_MCP_ADDR: &str = "127.0.0.1:4112";
+const DESKTOP_MCP_URL: &str = "http://127.0.0.1:4112/mcp";
 const DESKTOP_LOG_FILE_NAME: &str = "aka-desktop.log";
+const CLIENT_INTEGRATIONS_RESOURCE: &str = "client-integrations/clients";
 
 #[cfg(all(target_os = "windows", feature = "embedded-engine"))]
 const EMBEDDED_AKA_ENGINE_DLL: &[u8] = include_bytes!(concat!(
@@ -41,6 +43,46 @@ const EMBEDDED_AKA_ENGINE_SHA: &[u8] = include_bytes!(concat!(
 
 struct DesktopMcpRuntime {
     _rt: tokio::runtime::Runtime,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientIntegrationInstallRequest {
+    client: String,
+    #[serde(default)]
+    reinstall: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientIntegrationsOut {
+    mcp_url: String,
+    resource_dir: Option<String>,
+    clients: Vec<ClientIntegrationStatus>,
+    last_action: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientIntegrationStatus {
+    client: String,
+    label: String,
+    installed: bool,
+    available: bool,
+    health: String,
+    summary: String,
+    details: Vec<String>,
+    version: Option<String>,
+    bundled_version: Option<String>,
+    paths: Vec<ClientIntegrationPathStatus>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientIntegrationPathStatus {
+    label: String,
+    path: String,
+    exists: bool,
 }
 
 fn fallback_app_data_dir() -> PathBuf {
@@ -250,6 +292,496 @@ fn copy_zip_to_temp(path: &str) -> anyhow::Result<std::path::PathBuf> {
         )
     })?;
     Ok(tmp)
+}
+
+fn home_dir() -> anyhow::Result<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home));
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return Ok(PathBuf::from(profile));
+    }
+    anyhow::bail!("home directory is unavailable")
+}
+
+fn client_integrations_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    if let Ok(path) = app
+        .path()
+        .resolve(CLIENT_INTEGRATIONS_RESOURCE, BaseDirectory::Resource)
+    {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    let repo_clients_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("clients");
+    if repo_clients_path.exists() {
+        return Some(repo_clients_path);
+    }
+
+    let generated_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("client-integrations")
+        .join("clients");
+    generated_path.exists().then_some(generated_path)
+}
+
+fn read_json_file(path: &Path) -> anyhow::Result<serde_json::Value> {
+    let text = fs::read_to_string(path)?;
+    serde_json::from_str(&text).map_err(Into::into)
+}
+
+fn read_plugin_version(path: &Path) -> Option<String> {
+    read_json_file(&path.join(".claude-plugin").join("plugin.json"))
+        .ok()
+        .and_then(|value| {
+            value
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+}
+
+fn path_status(label: &str, path: impl Into<PathBuf>) -> ClientIntegrationPathStatus {
+    let path = path.into();
+    ClientIntegrationPathStatus {
+        label: label.to_string(),
+        exists: path.exists(),
+        path: path.display().to_string(),
+    }
+}
+
+fn copy_file_checked(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    let Some(parent) = dst.parent() else {
+        anyhow::bail!("destination has no parent: {}", dst.display());
+    };
+    fs::create_dir_all(parent)?;
+    fs::copy(src, dst).map(|_| ()).map_err(Into::into)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    if !src.is_dir() {
+        anyhow::bail!("source directory does not exist: {}", src.display());
+    }
+    if dst.exists() {
+        fs::remove_dir_all(dst)?;
+    }
+    fs::create_dir_all(dst)?;
+    copy_dir_contents(src, dst)
+}
+
+fn copy_dir_contents(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            fs::create_dir_all(&dst_path)?;
+            copy_dir_contents(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            copy_file_checked(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn require_safe_claude_plugin_target(target: &Path) -> anyhow::Result<()> {
+    if !target.exists() {
+        return Ok(());
+    }
+    let manifest = target.join(".claude-plugin").join("plugin.json");
+    let value = read_json_file(&manifest).map_err(|e| {
+        anyhow::anyhow!(
+            "目标目录已存在但不像 AKA Claude Code 插件: {} ({e:#})",
+            target.display()
+        )
+    })?;
+    let is_aka = value.get("name").and_then(|v| v.as_str()) == Some("aka")
+        && value
+            .get("repository")
+            .and_then(|v| v.as_str())
+            .is_some_and(|repo| repo.contains("caork/aka"));
+    if !is_aka {
+        anyhow::bail!(
+            "目标目录已存在但不是 AKA Claude Code 插件: {}",
+            target.display()
+        );
+    }
+    Ok(())
+}
+
+fn require_safe_aka_skill_target(target: &Path) -> anyhow::Result<()> {
+    if !target.exists() {
+        return Ok(());
+    }
+    let skill = target.join("SKILL.md");
+    let text = fs::read_to_string(&skill).map_err(|e| {
+        anyhow::anyhow!(
+            "目标 skill 目录已存在但无法确认来源: {} ({e:#})",
+            target.display()
+        )
+    })?;
+    if !text.contains("name: aka-code-graph") || !text.contains("aka 代码知识图谱") {
+        anyhow::bail!(
+            "目标 skill 目录已存在但不是 AKA aka-code-graph: {}",
+            target.display()
+        );
+    }
+    Ok(())
+}
+
+fn require_safe_opencode_plugin_target(target: &Path) -> anyhow::Result<()> {
+    if !target.exists() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(target).map_err(|e| {
+        anyhow::anyhow!(
+            "目标 OpenCode plugin 已存在但无法确认来源: {} ({e:#})",
+            target.display()
+        )
+    })?;
+    if !text.contains("aka OpenCode plugin") {
+        anyhow::bail!(
+            "目标 OpenCode plugin 已存在但不是 AKA plugin: {}",
+            target.display()
+        );
+    }
+    Ok(())
+}
+
+fn claude_code_target_dir(home: &Path) -> PathBuf {
+    home.join(".claude").join("skills").join("aka")
+}
+
+fn opencode_config_path(home: &Path) -> PathBuf {
+    home.join(".config").join("opencode").join("opencode.json")
+}
+
+fn opencode_plugin_path(home: &Path) -> PathBuf {
+    home.join(".config")
+        .join("opencode")
+        .join("plugins")
+        .join("aka.js")
+}
+
+fn opencode_skill_dir(home: &Path) -> PathBuf {
+    home.join(".config")
+        .join("opencode")
+        .join("skills")
+        .join("aka-code-graph")
+}
+
+fn opencode_mcp_configured(path: &Path) -> (bool, Option<String>) {
+    if !path.exists() {
+        return (false, None);
+    }
+    let value = match read_json_file(path) {
+        Ok(value) => value,
+        Err(e) => return (false, Some(format!("OpenCode config JSON 解析失败: {e:#}"))),
+    };
+    let Some(aka) = value.get("mcp").and_then(|mcp| mcp.get("aka")) else {
+        return (false, None);
+    };
+    let url_matches = aka
+        .get("url")
+        .and_then(|v| v.as_str())
+        .is_some_and(|url| url == DESKTOP_MCP_URL);
+    let enabled = aka
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let remote = aka
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map_or(true, |kind| kind == "remote");
+    (url_matches && enabled && remote, None)
+}
+
+fn ensure_opencode_mcp_target_is_safe(root: &serde_json::Value, path: &Path) -> anyhow::Result<()> {
+    let Some(existing) = root.get("mcp").and_then(|mcp| mcp.get("aka")) else {
+        return Ok(());
+    };
+    let url = existing.get("url").and_then(|v| v.as_str());
+    let kind = existing.get("type").and_then(|v| v.as_str());
+    if url == Some(DESKTOP_MCP_URL) && kind.map_or(true, |kind| kind == "remote") {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "OpenCode config 已有非 AKA mcp.aka，请先手动处理: {}",
+        path.display()
+    )
+}
+
+fn merge_opencode_config(path: &Path) -> anyhow::Result<()> {
+    let mut root = if path.exists() {
+        read_json_file(path).map_err(|e| {
+            anyhow::anyhow!("无法读取 OpenCode config {}: {e:#}", path.display())
+        })?
+    } else {
+        json!({ "$schema": "https://opencode.ai/config.json" })
+    };
+
+    if !root.is_object() {
+        anyhow::bail!(
+            "OpenCode config 必须是 JSON object，当前文件: {}",
+            path.display()
+        );
+    };
+    ensure_opencode_mcp_target_is_safe(&root, path)?;
+    let Some(root_obj) = root.as_object_mut() else {
+        anyhow::bail!("无法创建 OpenCode config object");
+    };
+    let mcp = root_obj
+        .entry("mcp".to_string())
+        .or_insert_with(|| json!({}));
+    if !mcp.is_object() {
+        *mcp = json!({});
+    }
+    let Some(mcp_obj) = mcp.as_object_mut() else {
+        anyhow::bail!("无法创建 OpenCode mcp 配置");
+    };
+    mcp_obj.insert(
+        "aka".to_string(),
+        json!({ "type": "remote", "url": DESKTOP_MCP_URL, "enabled": true }),
+    );
+
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("OpenCode config path has no parent: {}", path.display());
+    };
+    fs::create_dir_all(parent)?;
+    fs::write(path, serde_json::to_string_pretty(&root)? + "\n")?;
+    Ok(())
+}
+
+fn build_client_integrations_status(
+    app: &tauri::AppHandle,
+    last_action: Option<String>,
+) -> ClientIntegrationsOut {
+    let resource_dir = client_integrations_dir(app);
+    let resource_dir_display = resource_dir.as_ref().map(|path| path.display().to_string());
+    let clients = match home_dir() {
+        Ok(home) => vec![
+            claude_code_status(resource_dir.as_deref(), &home),
+            opencode_status(resource_dir.as_deref(), &home),
+        ],
+        Err(e) => vec![
+            unavailable_client_status(
+                "claude-code",
+                "Claude Code",
+                format!("无法定位用户目录: {e:#}"),
+            ),
+            unavailable_client_status(
+                "opencode",
+                "OpenCode",
+                format!("无法定位用户目录: {e:#}"),
+            ),
+        ],
+    };
+
+    ClientIntegrationsOut {
+        mcp_url: DESKTOP_MCP_URL.to_string(),
+        resource_dir: resource_dir_display,
+        clients,
+        last_action,
+    }
+}
+
+fn unavailable_client_status(
+    client: &str,
+    label: &str,
+    summary: String,
+) -> ClientIntegrationStatus {
+    ClientIntegrationStatus {
+        client: client.to_string(),
+        label: label.to_string(),
+        installed: false,
+        available: false,
+        health: "unavailable".to_string(),
+        summary,
+        details: vec![],
+        version: None,
+        bundled_version: None,
+        paths: vec![],
+    }
+}
+
+fn claude_code_status(resource_dir: Option<&Path>, home: &Path) -> ClientIntegrationStatus {
+    let source = resource_dir.map(|dir| dir.join("claude-code"));
+    let target = claude_code_target_dir(home);
+    let manifest = target.join(".claude-plugin").join("plugin.json");
+    let mcp = target.join(".mcp.json");
+    let skill = target
+        .join("skills")
+        .join("aka-code-graph")
+        .join("SKILL.md");
+    let installed = manifest.exists() && mcp.exists() && skill.exists();
+    let available = source.as_ref().is_some_and(|path| path.exists());
+    let bundled_version = source.as_deref().and_then(read_plugin_version);
+    let version = read_plugin_version(&target);
+    let mut details = vec![
+        "加载名: aka@skills-dir".to_string(),
+        format!("MCP endpoint: {DESKTOP_MCP_URL}"),
+    ];
+    if installed {
+        details.push("重启 Claude Code 或运行 /reload-plugins 后生效。".to_string());
+    } else {
+        details.push("安装到 ~/.claude/skills/aka，作为 Claude Code skills-directory plugin 加载。".to_string());
+    }
+    if !available {
+        details.push("桌面端内置 Claude Code 插件资源缺失。".to_string());
+    }
+
+    ClientIntegrationStatus {
+        client: "claude-code".to_string(),
+        label: "Claude Code".to_string(),
+        installed,
+        available,
+        health: if installed { "ready" } else { "not_installed" }.to_string(),
+        summary: if installed {
+            "Claude Code 插件已在 personal skills directory 中就绪。".to_string()
+        } else {
+            "尚未安装 AKA Claude Code 插件。".to_string()
+        },
+        details,
+        version,
+        bundled_version,
+        paths: vec![
+            path_status("Plugin root", target),
+            path_status("Manifest", manifest),
+            path_status("HTTP MCP config", mcp),
+            path_status("Skill", skill),
+        ],
+    }
+}
+
+fn opencode_status(resource_dir: Option<&Path>, home: &Path) -> ClientIntegrationStatus {
+    let source = resource_dir.map(|dir| dir.join("opencode"));
+    let config = opencode_config_path(home);
+    let plugin = opencode_plugin_path(home);
+    let skill_dir = opencode_skill_dir(home);
+    let skill = skill_dir.join("SKILL.md");
+    let (mcp_configured, config_error) = opencode_mcp_configured(&config);
+    let plugin_installed = plugin.exists();
+    let skill_installed = skill.exists();
+    let installed = mcp_configured && plugin_installed && skill_installed;
+    let available = source.as_ref().is_some_and(|path| path.exists());
+    let mut details = vec![format!("MCP endpoint: {DESKTOP_MCP_URL}")];
+    if let Some(config_error) = config_error {
+        details.push(config_error);
+    }
+    if installed {
+        details.push("重启 OpenCode 后会加载最新 plugin/skill。".to_string());
+    } else {
+        details.push("会合并 mcp.aka，并安装 OpenCode plugin 与 aka-code-graph skill。".to_string());
+    }
+    if !available {
+        details.push("桌面端内置 OpenCode 集成资源缺失。".to_string());
+    }
+
+    ClientIntegrationStatus {
+        client: "opencode".to_string(),
+        label: "OpenCode".to_string(),
+        installed,
+        available,
+        health: if installed { "ready" } else { "not_installed" }.to_string(),
+        summary: if installed {
+            "OpenCode MCP 配置、plugin 与 skill 已就绪。".to_string()
+        } else {
+            "尚未完整安装 AKA OpenCode 集成。".to_string()
+        },
+        details,
+        version: None,
+        bundled_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        paths: vec![
+            path_status("Config", config),
+            path_status("Plugin", plugin),
+            path_status("Skill", skill),
+        ],
+    }
+}
+
+fn install_client_integration_inner(
+    app: &tauri::AppHandle,
+    request: ClientIntegrationInstallRequest,
+) -> anyhow::Result<ClientIntegrationsOut> {
+    let resource_dir = client_integrations_dir(app).ok_or_else(|| {
+        anyhow::anyhow!("桌面端内置客户端集成资源缺失: {CLIENT_INTEGRATIONS_RESOURCE}")
+    })?;
+    let home = home_dir()?;
+    let client = request.client.trim().to_string();
+    let action = match client {
+        ref client if client == "claude-code" => {
+            install_claude_code_plugin(&resource_dir, &home)?;
+            if request.reinstall {
+                "已重装 Claude Code 插件"
+            } else {
+                "已安装/更新 Claude Code 插件"
+            }
+        }
+        ref client if client == "opencode" => {
+            install_opencode_integration(&resource_dir, &home)?;
+            if request.reinstall {
+                "已重装 OpenCode 集成"
+            } else {
+                "已安装/更新 OpenCode 集成"
+            }
+        }
+        other => anyhow::bail!("unsupported client integration: {other}"),
+    };
+
+    Ok(build_client_integrations_status(app, Some(action.to_string())))
+}
+
+fn install_claude_code_plugin(resource_dir: &Path, home: &Path) -> anyhow::Result<()> {
+    let source = resource_dir.join("claude-code");
+    let target = claude_code_target_dir(home);
+    require_safe_claude_plugin_target(&target)?;
+    copy_dir_recursive(&source, &target)?;
+    Ok(())
+}
+
+fn install_opencode_integration(resource_dir: &Path, home: &Path) -> anyhow::Result<()> {
+    let source = resource_dir.join("opencode");
+    require_safe_opencode_plugin_target(&opencode_plugin_path(home))?;
+    require_safe_aka_skill_target(&opencode_skill_dir(home))?;
+    merge_opencode_config(&opencode_config_path(home))?;
+    copy_file_checked(&source.join("plugins").join("aka.js"), &opencode_plugin_path(home))?;
+    copy_dir_recursive(
+        &source.join("skills").join("aka-code-graph"),
+        &opencode_skill_dir(home),
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn client_integrations_status(
+    app: tauri::AppHandle,
+) -> Result<ClientIntegrationsOut, String> {
+    Ok(build_client_integrations_status(&app, None))
+}
+
+#[tauri::command]
+async fn install_client_integration(
+    app: tauri::AppHandle,
+    request: ClientIntegrationInstallRequest,
+) -> Result<ClientIntegrationsOut, String> {
+    tauri::async_runtime::spawn_blocking(move || install_client_integration_inner(&app, request))
+        .await
+        .map_err(|e| {
+            let detail = format!("client integration task failed: {e}");
+            log_desktop_event(format!("client integration error: {detail}"));
+            detail
+        })?
+        .map_err(|e| {
+            let detail = format!("{e:#}");
+            log_desktop_event(format!("client integration error: {detail}"));
+            detail
+        })
 }
 
 fn configure_desktop_runtime(app: &tauri::App) -> anyhow::Result<AkaBackend> {
@@ -687,6 +1219,145 @@ fn spawn_url_opener(url: &str) -> std::io::Result<()> {
     ))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aka-desktop-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn merge_opencode_config_preserves_existing_keys() {
+        let dir = temp_test_dir("opencode-merge");
+        let path = dir.join("opencode.json");
+        fs::write(
+            &path,
+            r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "theme": "system",
+  "mcp": {
+    "other": { "type": "remote", "url": "https://example.test/mcp" }
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        merge_opencode_config(&path).unwrap();
+        merge_opencode_config(&path).unwrap();
+
+        let value = read_json_file(&path).unwrap();
+        assert_eq!(value["theme"], "system");
+        assert!(value["mcp"]["other"].is_object());
+        assert_eq!(value["mcp"]["aka"]["type"], "remote");
+        assert_eq!(value["mcp"]["aka"]["url"], DESKTOP_MCP_URL);
+        assert_eq!(value["mcp"]["aka"]["enabled"], true);
+        assert_eq!(opencode_mcp_configured(&path), (true, None));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn merge_opencode_config_rejects_non_object_root() {
+        let dir = temp_test_dir("opencode-invalid");
+        let path = dir.join("opencode.json");
+        fs::write(&path, "[]").unwrap();
+
+        let err = merge_opencode_config(&path).unwrap_err().to_string();
+        assert!(err.contains("JSON object"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn merge_opencode_config_rejects_non_aka_existing_target() {
+        let dir = temp_test_dir("opencode-conflict");
+        let path = dir.join("opencode.json");
+        fs::write(
+            &path,
+            r#"{
+  "mcp": {
+    "aka": { "type": "remote", "url": "https://example.test/mcp" }
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let err = merge_opencode_config(&path).unwrap_err().to_string();
+        assert!(err.contains("已有非 AKA mcp.aka"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn safe_target_checks_reject_unknown_existing_dirs() {
+        let dir = temp_test_dir("client-target-safety");
+        let claude = dir.join("claude");
+        fs::create_dir_all(claude.join(".claude-plugin")).unwrap();
+        fs::write(
+            claude.join(".claude-plugin").join("plugin.json"),
+            r#"{ "name": "aka", "repository": "https://example.test/not-aka" }"#,
+        )
+        .unwrap();
+        let err = require_safe_claude_plugin_target(&claude)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不是 AKA Claude Code 插件"));
+
+        let skill = dir.join("skill");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "---\nname: other\n---\n").unwrap();
+        let err = require_safe_aka_skill_target(&skill)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不是 AKA aka-code-graph"));
+
+        let plugin = dir.join("aka.js");
+        fs::write(&plugin, "export default {};\n").unwrap();
+        let err = require_safe_opencode_plugin_target(&plugin)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不是 AKA plugin"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn safe_target_checks_accept_existing_aka_installations() {
+        let dir = temp_test_dir("client-target-aka");
+        let claude = dir.join("claude");
+        fs::create_dir_all(claude.join(".claude-plugin")).unwrap();
+        fs::write(
+            claude.join(".claude-plugin").join("plugin.json"),
+            r#"{ "name": "aka", "repository": "https://github.com/caork/aka" }"#,
+        )
+        .unwrap();
+        require_safe_claude_plugin_target(&claude).unwrap();
+
+        let skill = dir.join("skill");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: aka-code-graph\n---\naka 代码知识图谱\n",
+        )
+        .unwrap();
+        require_safe_aka_skill_target(&skill).unwrap();
+
+        let plugin = dir.join("aka.js");
+        fs::write(&plugin, "console.log('aka OpenCode plugin loaded');\n").unwrap();
+        require_safe_opencode_plugin_target(&plugin).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_desktop_diagnostics();
@@ -747,6 +1418,8 @@ pub fn run() {
             set_app_settings,
             delete_repo,
             clear_app_data,
+            client_integrations_status,
+            install_client_integration,
             app_version,
             open_url,
             open_editor_url,
