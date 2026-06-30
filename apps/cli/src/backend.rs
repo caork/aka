@@ -1415,6 +1415,20 @@ fn read_source_slice(
     }))
 }
 
+fn repo_relative_regular_file_exists(repo_root: &Path, rel: &str) -> bool {
+    let rel_path = Path::new(rel);
+    if rel.trim().is_empty() || rel_path.is_absolute() {
+        return false;
+    }
+    let Ok(root) = repo_root.canonicalize() else {
+        return false;
+    };
+    let Ok(abs) = root.join(rel_path).canonicalize() else {
+        return false;
+    };
+    abs.starts_with(&root) && abs.is_file()
+}
+
 fn should_disambiguate_for_backend(selector: &SymbolSelector, defs: &[SearchHit]) -> bool {
     defs.len() > 1 && !selector.is_narrowed()
 }
@@ -3588,6 +3602,7 @@ impl Backend for AkaBackend {
         };
         Ok(rows
             .into_iter()
+            .filter(|(path, _)| repo_relative_regular_file_exists(&handle.entry.repo_path, path))
             .map(|(path, symbols)| aka_mcp::ops::FileEntry { path, symbols })
             .collect())
     }
@@ -4446,5 +4461,19 @@ mod tests {
         assert_eq!(v["end"], 0);
         assert!(v["lines"].as_array().unwrap().is_empty());
         assert_eq!(v["truncated"], false);
+    }
+
+    #[test]
+    fn repo_file_list_filter_accepts_only_existing_regular_files() {
+        let repo = temp_repo("file-list-filter");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/main.ts"), "export const x = 1;\n").unwrap();
+
+        assert!(repo_relative_regular_file_exists(&repo, "src/main.ts"));
+        assert!(!repo_relative_regular_file_exists(&repo, "src"));
+        assert!(!repo_relative_regular_file_exists(&repo, "{}"));
+        assert!(!repo_relative_regular_file_exists(&repo, "missing.ts"));
+        assert!(!repo_relative_regular_file_exists(&repo, "../outside.ts"));
+        assert!(!repo_relative_regular_file_exists(&repo, "/tmp/outside.ts"));
     }
 }
