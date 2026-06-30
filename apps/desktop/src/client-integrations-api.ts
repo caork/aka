@@ -3,8 +3,9 @@ import {
   invokeDesktop,
   isDesktopRuntime,
 } from "./desktop-api";
+import { apiUrl, localServeUnavailable } from "./api-base";
 
-export type ClientIntegrationId = "claude-code" | "opencode";
+export type ClientIntegrationId = "claude-code" | "codex" | "opencode";
 
 export interface ClientIntegrationPathStatus {
   label: string;
@@ -38,27 +39,66 @@ export interface InstallClientIntegrationRequest {
 }
 
 export async function getClientIntegrationsStatus(): Promise<ClientIntegrationsStatus> {
-  if (!isDesktopRuntime()) {
-    throw new Error("客户端插件安装管理仅在 AKA 桌面端可用");
+  if (isDesktopRuntime()) {
+    try {
+      return await invokeDesktop<ClientIntegrationsStatus>("client_integrations_status");
+    } catch (e) {
+      throw asDesktopError(e, "读取客户端插件状态失败");
+    }
   }
+  let r: Response;
   try {
-    return await invokeDesktop<ClientIntegrationsStatus>("client_integrations_status");
-  } catch (e) {
-    throw asDesktopError(e, "读取客户端插件状态失败");
+    r = await fetch(apiUrl("/api/client-integrations"), {
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch {
+    throw localServeUnavailable();
   }
+  if (!r.ok) throw new Error(await responseMessage(r, "读取客户端插件状态失败"));
+  return (await r.json()) as ClientIntegrationsStatus;
 }
 
 export async function installClientIntegration(
   request: InstallClientIntegrationRequest,
 ): Promise<ClientIntegrationsStatus> {
-  if (!isDesktopRuntime()) {
-    throw new Error("客户端插件安装管理仅在 AKA 桌面端可用");
+  if (isDesktopRuntime()) {
+    try {
+      return await invokeDesktop<ClientIntegrationsStatus>("install_client_integration", {
+        request,
+      });
+    } catch (e) {
+      throw asDesktopError(e, "安装客户端插件失败");
+    }
   }
+  let r: Response;
   try {
-    return await invokeDesktop<ClientIntegrationsStatus>("install_client_integration", {
-      request,
+    r = await fetch(apiUrl("/api/client-integrations/install"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+      signal: AbortSignal.timeout(30_000),
     });
-  } catch (e) {
-    throw asDesktopError(e, "安装客户端插件失败");
+  } catch {
+    throw localServeUnavailable();
+  }
+  if (!r.ok) throw new Error(await responseMessage(r, "安装客户端插件失败"));
+  return (await r.json()) as ClientIntegrationsStatus;
+}
+
+async function responseMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await response.text()).trim();
+    if (!body) return `${fallback}（HTTP ${response.status}）`;
+    try {
+      const json = JSON.parse(body) as { error?: unknown };
+      if (typeof json.error === "string" && json.error.trim()) {
+        return json.error.trim();
+      }
+    } catch {
+      /* plain text */
+    }
+    return body.slice(0, 300);
+  } catch {
+    return `${fallback}（HTTP ${response.status}）`;
   }
 }

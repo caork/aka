@@ -64,65 +64,6 @@ const SETTINGS_NAV = [
 
 type SettingsSectionId = (typeof SETTINGS_NAV)[number]["id"];
 
-const CLIENT_SCRIPT_SECTIONS = [
-  {
-    id: "shell",
-    label: "macOS / Linux",
-    commands: [
-      {
-        id: "shell-check",
-        label: "Detect",
-        command: "bash clients/install.sh --check",
-      },
-      {
-        id: "shell-claude",
-        label: "Claude Code",
-        command: "bash clients/install.sh --client claude-code --plugin --reinstall",
-      },
-      {
-        id: "shell-codex",
-        label: "Codex",
-        command: "bash clients/install.sh --client codex --reinstall",
-      },
-      {
-        id: "shell-opencode",
-        label: "OpenCode",
-        command: "bash clients/install.sh --client opencode --reinstall",
-      },
-    ],
-  },
-  {
-    id: "powershell",
-    label: "Windows PowerShell",
-    commands: [
-      {
-        id: "ps-check",
-        label: "Detect",
-        command:
-          "powershell -NoProfile -ExecutionPolicy Bypass -File .\\clients\\install.ps1 -Check",
-      },
-      {
-        id: "ps-claude",
-        label: "Claude Code",
-        command:
-          "powershell -NoProfile -ExecutionPolicy Bypass -File .\\clients\\install.ps1 -Client claude-code -Plugin -Reinstall",
-      },
-      {
-        id: "ps-codex",
-        label: "Codex",
-        command:
-          "powershell -NoProfile -ExecutionPolicy Bypass -File .\\clients\\install.ps1 -Client codex -Reinstall",
-      },
-      {
-        id: "ps-opencode",
-        label: "OpenCode",
-        command:
-          "powershell -NoProfile -ExecutionPolicy Bypass -File .\\clients\\install.ps1 -Client opencode -Reinstall",
-      },
-    ],
-  },
-] as const;
-
 function clampIndexMaxSecs(value: number): number {
   if (!Number.isFinite(value)) return INDEX_MAX_DEFAULT;
   return Math.min(INDEX_MAX_LIMIT, Math.max(INDEX_MAX_MIN, Math.round(value)));
@@ -199,9 +140,6 @@ export default function AppSettingsModal({
     useState<SettingsSectionId>("appearance");
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [copiedClientCommand, setCopiedClientCommand] = useState<string | null>(
-    null,
-  );
   const repoSettingsRepo =
     repos.find((repo) => repo.id === selectedRepoId) ?? repos[0] ?? null;
 
@@ -241,7 +179,7 @@ export default function AppSettingsModal({
   }, [open]);
 
   useEffect(() => {
-    if (!open || !isDesktopRuntime()) return;
+    if (!open) return;
     let cancelled = false;
     setClientIntegrationsBusy(true);
     void getClientIntegrationsStatus()
@@ -357,25 +295,6 @@ export default function AppSettingsModal({
     } finally {
       setClientIntegrationAction(null);
     }
-  };
-
-  const copyClientCommand = (id: string, command: string) => {
-    setError(null);
-    const write = navigator.clipboard?.writeText(command);
-    if (!write) {
-      setError("当前浏览器不支持复制命令");
-      return;
-    }
-    void write
-      .then(() => {
-        setCopiedClientCommand(id);
-        window.setTimeout(() => {
-          setCopiedClientCommand((current) => (current === id ? null : current));
-        }, 1400);
-      })
-      .catch((e) => {
-        setError(e instanceof Error ? e.message : String(e));
-      });
   };
 
   const clearData = async () => {
@@ -1275,70 +1194,59 @@ export default function AppSettingsModal({
                         </div>
                         <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
                           一键安装或重装 Claude Code / Codex / OpenCode
-                          插件包，默认连接桌面端本地 MCP。
+                          插件/配置包，默认连接桌面端本地 MCP。
                         </div>
                       </div>
-                      {isDesktopRuntime() && (
-                        <button
-                          type="button"
-                          disabled={clientIntegrationsBusy}
-                          onClick={() => {
-                            setClientIntegrationsBusy(true);
-                            setError(null);
-                            void getClientIntegrationsStatus()
-                              .then(setClientIntegrations)
-                              .catch((e) =>
-                                setError(
-                                  e instanceof Error ? e.message : String(e),
-                                ),
-                              )
-                              .finally(() => setClientIntegrationsBusy(false));
-                          }}
-                          className="focus-ring rounded-[9px] px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-45"
-                          style={{
-                            boxShadow: "inset 0 0 0 0.5px var(--hairline)",
-                          }}
-                          data-testid="refresh-client-integrations"
-                        >
-                          {clientIntegrationsBusy ? "Refreshing..." : "Refresh"}
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        disabled={clientIntegrationsBusy}
+                        onClick={() => {
+                          setClientIntegrationsBusy(true);
+                          setError(null);
+                          void getClientIntegrationsStatus()
+                            .then(setClientIntegrations)
+                            .catch((e) =>
+                              setError(e instanceof Error ? e.message : String(e)),
+                            )
+                            .finally(() => setClientIntegrationsBusy(false));
+                        }}
+                        className="focus-ring rounded-[9px] px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-45"
+                        style={{
+                          boxShadow: "inset 0 0 0 0.5px var(--hairline)",
+                        }}
+                        data-testid="refresh-client-integrations"
+                      >
+                        {clientIntegrationsBusy ? "Refreshing..." : "Refresh"}
+                      </button>
                     </div>
 
-                    {isDesktopRuntime() ? (
-                      <div className="space-y-2">
-                        {(clientIntegrations?.clients ?? []).map((client) => (
-                          <ClientIntegrationRow
-                            key={client.client}
-                            client={client}
-                            action={clientIntegrationAction}
-                            onInstall={() =>
-                              void runClientIntegration(client.client, false)
-                            }
-                            onReinstall={() =>
-                              void runClientIntegration(client.client, true)
-                            }
-                          />
-                        ))}
-                        {!clientIntegrations && (
-                          <div className="text-[11.5px] text-ink-3">
-                            {clientIntegrationsBusy
-                              ? "Reading plugin status..."
-                              : "Click Refresh to read plugin status."}
-                          </div>
-                        )}
-                        {clientIntegrations?.mcpUrl && (
-                          <div className="truncate text-[11px] text-ink-3">
-                            MCP endpoint: {clientIntegrations.mcpUrl}
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <ClientScriptGuidance
-                        copiedCommand={copiedClientCommand}
-                        onCopy={copyClientCommand}
-                      />
-                    )}
+                    <div className="space-y-2">
+                      {(clientIntegrations?.clients ?? []).map((client) => (
+                        <ClientIntegrationRow
+                          key={client.client}
+                          client={client}
+                          action={clientIntegrationAction}
+                          onInstall={() =>
+                            void runClientIntegration(client.client, false)
+                          }
+                          onReinstall={() =>
+                            void runClientIntegration(client.client, true)
+                          }
+                        />
+                      ))}
+                      {!clientIntegrations && (
+                        <div className="text-[11.5px] text-ink-3">
+                          {clientIntegrationsBusy
+                            ? "Reading plugin status..."
+                            : "Click Refresh to read plugin status."}
+                        </div>
+                      )}
+                      {clientIntegrations?.mcpUrl && (
+                        <div className="truncate text-[11px] text-ink-3">
+                          MCP endpoint: {clientIntegrations.mcpUrl}
+                        </div>
+                      )}
+                    </div>
                   </section>
 
                   <section
@@ -1575,107 +1483,16 @@ function ClientIntegrationRow({
   );
 }
 
-function ClientScriptGuidance({
-  copiedCommand,
-  onCopy,
-}: {
-  copiedCommand: string | null;
-  onCopy(id: string, command: string): void;
-}) {
-  return (
-    <div className="space-y-3" data-testid="client-script-guidance">
-      <div
-        className="rounded-[10px] px-3 py-2 text-[11.5px] leading-relaxed text-ink-3"
-        style={{
-          background: "var(--subtle-fill)",
-          boxShadow: "inset 0 0 0 0.5px var(--hairline)",
-        }}
-      >
-        浏览器预览不能写入本机 agent 配置。使用发布包里的
-        <span className="font-medium text-ink"> clients </span>
-        目录运行脚本；先检测，再按需更新对应客户端。
-      </div>
-      <div className="grid gap-3 lg:grid-cols-2">
-        {CLIENT_SCRIPT_SECTIONS.map((section) => (
-          <div
-            key={section.id}
-            className="rounded-[10px] p-3"
-            style={{
-              background: "var(--subtle-fill-2)",
-              boxShadow: "inset 0 0 0 0.5px var(--hairline)",
-            }}
-          >
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <div className="text-[12px] font-semibold text-ink">
-                {section.label}
-              </div>
-              <div className="text-[10.5px] text-ink-3">
-                {section.id === "shell" ? "install.sh" : "install.ps1"}
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              {section.commands.map((item) => (
-                <ClientCommandRow
-                  key={item.id}
-                  id={item.id}
-                  label={item.label}
-                  command={item.command}
-                  copied={copiedCommand === item.id}
-                  onCopy={onCopy}
-                />
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ClientCommandRow({
-  id,
-  label,
-  command,
-  copied,
-  onCopy,
-}: {
-  id: string;
-  label: string;
-  command: string;
-  copied: boolean;
-  onCopy(id: string, command: string): void;
-}) {
-  return (
-    <div className="flex min-w-0 items-center gap-2 rounded-[8px] px-2 py-1.5">
-      <div className="w-[72px] flex-none text-[10.8px] font-medium text-ink-3">
-        {label}
-      </div>
-      <code
-        className="min-w-0 flex-1 truncate text-[10.5px] text-ink-2"
-        title={command}
-      >
-        {command}
-      </code>
-      <button
-        type="button"
-        onClick={() => onCopy(id, command)}
-        className="focus-ring w-[54px] flex-none rounded-[7px] px-2 py-1 text-[10.5px] font-semibold text-ink-2 transition-colors duration-150 ease-out hover:text-ink"
-        style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
-        data-testid={`copy-client-command-${id}`}
-      >
-        {copied ? "Copied" : "Copy"}
-      </button>
-    </div>
-  );
-}
-
 function formatClientIntegrationVersion(
   client: ClientIntegrationStatus,
 ): string | null {
   if (client.version && client.bundledVersion) {
-    return `v${client.version} / bundled v${client.bundledVersion}`;
+    return `installed v${client.version} / bundled v${client.bundledVersion}`;
   }
-  if (client.version) return `v${client.version}`;
+  if (client.version) return `installed v${client.version}`;
+  if (client.installed && client.bundledVersion) {
+    return `installed version unknown / bundled v${client.bundledVersion}`;
+  }
   if (client.bundledVersion) return `bundled v${client.bundledVersion}`;
   return null;
 }

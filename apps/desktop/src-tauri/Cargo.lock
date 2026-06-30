@@ -55,6 +55,7 @@ dependencies = [
  "aka-cli",
  "aka-core",
  "aka-mcp",
+ "aka-server",
  "anyhow",
  "serde",
  "serde_json",

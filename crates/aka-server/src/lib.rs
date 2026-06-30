@@ -19,6 +19,8 @@
 //! - `POST   /api/repos/{name}/settings` — `{embeddings_enabled?, description?, render_max_nodes?}` → 200
 //! - `GET    /api/settings`          — 全局设置（indexing 时间预算等）
 //! - `POST   /api/settings`          — 更新全局设置
+//! - `GET    /api/client-integrations` — agent 客户端插件/配置安装状态
+//! - `POST   /api/client-integrations/install` — 一键安装/重装客户端插件/配置
 //! - `DELETE /api/repos/{name}`        — 移除注册 + 数据目录 → 200
 //! - `GET    /api/node`                — 节点详情 `?repo=&id=`
 //! - `GET    /api/graph/ego`           — ego 子图 `?repo=&id=&depth=&max_nodes=`
@@ -44,6 +46,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Deserializer};
 use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+
+pub mod client_integrations;
 
 use aka_core::{
     clamp_index_max_secs, clamp_oss_analyzer_enrichment_max_secs, AkaSettings,
@@ -78,6 +82,11 @@ pub fn router(backend: Arc<dyn Backend>) -> Router {
         .route("/api/repos/{name}/update-zip", post(repo_update_zip))
         .route("/api/repos/{name}/settings", post(repo_settings))
         .route("/api/settings", get(app_settings).post(update_app_settings))
+        .route("/api/client-integrations", get(client_integrations_status))
+        .route(
+            "/api/client-integrations/install",
+            post(install_client_integration),
+        )
         .route("/api/repos/{name}", delete(repo_delete))
         .route("/api/query", post(query))
         .route("/api/detect-changes", post(detect_changes))
@@ -722,6 +731,30 @@ async fn update_app_settings(Json(req): Json<AppSettingsRequest>) -> Response {
     match settings.save() {
         Ok(settings) => Json(settings).into_response(),
         Err(e) => server_error(e),
+    }
+}
+
+async fn client_integrations_status() -> Response {
+    let resource_dir = client_integrations::source_clients_dir();
+    Json(client_integrations::build_client_integrations_status(
+        resource_dir,
+        None,
+    ))
+    .into_response()
+}
+
+async fn install_client_integration(
+    Json(req): Json<client_integrations::ClientIntegrationInstallRequest>,
+) -> Response {
+    let resource_dir = client_integrations::source_clients_dir();
+    match tokio::task::spawn_blocking(move || {
+        client_integrations::install_client_integration(resource_dir, req)
+    })
+    .await
+    {
+        Ok(Ok(status)) => Json(status).into_response(),
+        Ok(Err(e)) => server_error(e),
+        Err(e) => server_error(anyhow::anyhow!("client integration task failed: {e}")),
     }
 }
 

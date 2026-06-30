@@ -26,6 +26,7 @@ tauri-build = { version = "2", features = [] }
 aka-cli = { path = "../../cli" }
 aka-core = { path = "../../../crates/aka-core" }
 aka-mcp = { path = "../../../crates/aka-mcp" }
+aka-server = { path = "../../../crates/aka-server" }
 anyhow = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"

@@ -146,6 +146,30 @@ async fn app_settings_default_and_update() {
 }
 
 #[tokio::test]
+async fn client_integrations_status_lists_supported_clients() {
+    let res = app()
+        .oneshot(
+            Request::get("/api/client-integrations")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["mcpUrl"], "http://127.0.0.1:4112/mcp");
+    let clients = v["clients"].as_array().unwrap();
+    let ids: Vec<_> = clients
+        .iter()
+        .map(|client| client["client"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["claude-code", "codex", "opencode"]);
+    assert!(clients
+        .iter()
+        .all(|client| client["available"].as_bool().is_some()));
+}
+
+#[tokio::test]
 async fn repos_lists_fixture_data() {
     let res = app()
         .oneshot(Request::get("/api/repos").body(Body::empty()).unwrap())
