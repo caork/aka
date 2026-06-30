@@ -505,8 +505,9 @@ export default function AppSettingsModal({
   }, [open]);
 
   const sectionPanelStyle = {
-    background: "var(--subtle-fill-2)",
-    boxShadow: "inset 0 0 0 0.5px var(--hairline)",
+    background: "var(--popover-bg)",
+    boxShadow:
+      "inset 0 0 0 0.5px var(--hairline), 0 1px 2px rgba(16, 24, 40, 0.035)",
   };
 
   const navigation = (
@@ -560,25 +561,24 @@ export default function AppSettingsModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.15, ease: "easeOut" }}
-          className="fixed inset-0 z-50 p-3 sm:p-5"
+          className="fixed inset-0 z-50"
           style={{
-            background: "var(--modal-overlay)",
-            backdropFilter: "blur(8px)",
-            WebkitBackdropFilter: "blur(8px)",
+            background: "var(--popover-bg)",
           }}
           data-testid="app-settings-fullscreen"
         >
           <motion.div
-            initial={{ opacity: 0, y: 18, scale: 0.985 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 12, scale: 0.99 }}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
-            className="glass-panel flex h-full min-h-0 overflow-hidden"
+            className="flex h-full min-h-0 overflow-hidden"
+            style={{ background: "var(--popover-bg)" }}
             role="dialog"
             aria-modal="true"
             aria-label="Settings"
           >
-            <aside className="hidden w-[244px] flex-none flex-col border-r border-[var(--main-divider)] px-4 py-4 lg:flex">
+            <aside className="hidden w-[244px] flex-none flex-col border-r border-[var(--main-divider)] bg-[var(--popover-bg)] px-4 py-4 lg:flex">
               <button
                 type="button"
                 onClick={onClose}
@@ -599,7 +599,7 @@ export default function AppSettingsModal({
               <div className="mt-5">{navigation}</div>
             </aside>
 
-            <div className="flex min-w-0 flex-1 flex-col">
+            <div className="flex min-w-0 flex-1 flex-col bg-[var(--popover-bg)]">
               <header className="flex flex-none items-center gap-3 border-b border-[var(--main-divider)] px-4 py-3 lg:hidden">
                 <button
                   type="button"
@@ -645,7 +645,7 @@ export default function AppSettingsModal({
 
               <div
                 ref={contentRef}
-                className="scroll-area min-h-0 flex-1 px-4 pb-[calc(100vh-140px)] pt-5 sm:px-8 lg:px-10 lg:pt-8"
+                className="scroll-area min-h-0 flex-1 bg-[var(--popover-bg)] px-4 pb-[calc(100vh-140px)] pt-5 sm:px-8 lg:px-10 lg:pt-8"
                 data-testid="app-settings-content"
               >
                 <div className="mx-auto w-full max-w-[780px] space-y-4">
