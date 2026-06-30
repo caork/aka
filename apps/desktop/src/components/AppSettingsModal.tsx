@@ -1226,11 +1226,8 @@ export default function AppSettingsModal({
                           key={client.client}
                           client={client}
                           action={clientIntegrationAction}
-                          onInstall={() =>
-                            void runClientIntegration(client.client, false)
-                          }
-                          onReinstall={() =>
-                            void runClientIntegration(client.client, true)
+                          onRun={(reinstall) =>
+                            void runClientIntegration(client.client, reinstall)
                           }
                         />
                       ))}
@@ -1239,11 +1236,6 @@ export default function AppSettingsModal({
                           {clientIntegrationsBusy
                             ? "Reading plugin status..."
                             : "Click Refresh to read plugin status."}
-                        </div>
-                      )}
-                      {clientIntegrations?.mcpUrl && (
-                        <div className="truncate text-[11px] text-ink-3">
-                          MCP endpoint: {clientIntegrations.mcpUrl}
                         </div>
                       )}
                     </div>
@@ -1373,31 +1365,29 @@ function ReleaseAssetRow({
 function ClientIntegrationRow({
   client,
   action,
-  onInstall,
-  onReinstall,
+  onRun,
 }: {
   client: ClientIntegrationStatus;
   action: string | null;
-  onInstall(): void;
-  onReinstall(): void;
+  onRun(reinstall: boolean): void;
 }) {
   const installKey = `${client.client}:install`;
   const reinstallKey = `${client.client}:reinstall`;
   const busy = action === installKey || action === reinstallKey;
   const disabled = action !== null || !client.available;
-  const primaryLabel = client.installed ? "Update" : "Install";
-  const versionLabel = formatClientIntegrationVersion(client);
+  const reinstall = client.installed;
+  const buttonLabel = reinstall ? "Reinstall" : "Install";
 
   return (
     <div
-      className="rounded-[10px] px-3 py-2.5"
+      className="rounded-[10px] px-3 py-2"
       style={{
         background: "var(--subtle-fill-2)",
         boxShadow: "inset 0 0 0 0.5px var(--hairline)",
       }}
       data-testid={`client-integration-${client.client}`}
     >
-      <div className="flex items-start gap-3">
+      <div className="flex items-center gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-[12.5px] font-semibold text-ink">
@@ -1414,59 +1404,22 @@ function ClientIntegrationRow({
             >
               {client.installed ? "Installed" : "Not installed"}
             </span>
-            {versionLabel && (
-              <span className="text-[10.5px] text-ink-3">{versionLabel}</span>
-            )}
-          </div>
-          <div className="mt-1 text-[11.5px] leading-relaxed text-ink-3">
-            {client.summary}
-          </div>
-          {client.details.length > 0 && (
-            <div className="mt-1 line-clamp-2 text-[10.8px] leading-relaxed text-ink-3">
-              {client.details.join(" ")}
-            </div>
-          )}
-          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10.5px] text-ink-3">
-            {client.paths.slice(0, 3).map((path) => (
-              <span
-                key={path.label}
-                className="max-w-full truncate"
-                title={path.path}
-                style={{
-                  color: path.exists ? "var(--ink-3)" : "var(--danger)",
-                }}
-              >
-                {path.label}: {path.exists ? "ok" : "missing"}
-              </span>
-            ))}
           </div>
         </div>
-        <div className="flex flex-none items-center gap-1.5">
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={onInstall}
-            className="focus-ring rounded-[8px] px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-45"
-            style={{
-              color: "var(--accent-ink)",
-              background: "var(--accent-fill)",
-              boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)",
-            }}
-            data-testid={`install-client-integration-${client.client}`}
-          >
-            {action === installKey ? "Working..." : primaryLabel}
-          </button>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={onReinstall}
-            className="focus-ring rounded-[8px] px-2.5 py-1.5 text-[11.5px] font-semibold text-ink-2 transition-colors duration-150 ease-out hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
-            style={{ boxShadow: "inset 0 0 0 0.5px var(--hairline)" }}
-            data-testid={`reinstall-client-integration-${client.client}`}
-          >
-            {action === reinstallKey ? "Working..." : "Reinstall"}
-          </button>
-        </div>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onRun(reinstall)}
+          className="focus-ring flex-none rounded-[8px] px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-45"
+          style={{
+            color: "var(--accent-ink)",
+            background: "var(--accent-fill)",
+            boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)",
+          }}
+          data-testid={`install-client-integration-${client.client}`}
+        >
+          {busy ? "Working..." : buttonLabel}
+        </button>
       </div>
       {busy && (
         <div
@@ -1481,20 +1434,6 @@ function ClientIntegrationRow({
       )}
     </div>
   );
-}
-
-function formatClientIntegrationVersion(
-  client: ClientIntegrationStatus,
-): string | null {
-  if (client.version && client.bundledVersion) {
-    return `installed v${client.version} / bundled v${client.bundledVersion}`;
-  }
-  if (client.version) return `installed v${client.version}`;
-  if (client.installed && client.bundledVersion) {
-    return `installed version unknown / bundled v${client.bundledVersion}`;
-  }
-  if (client.bundledVersion) return `bundled v${client.bundledVersion}`;
-  return null;
 }
 
 function UpdateProgressBar({ progress }: { progress: InstallProgress }) {
