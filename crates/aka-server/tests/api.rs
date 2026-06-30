@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use aka_server::{router, Backend, RepoInfo, RepoSettingsUpdate, SearchHit, SymbolRef};
+use aka_server::{router, Backend, RepoInfo, RepoSettingsPatch, SearchHit, SymbolRef};
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
@@ -156,6 +156,10 @@ async fn repos_lists_fixture_data() {
     let repos = v["repos"].as_array().unwrap();
     assert_eq!(repos.len(), 2);
     assert_eq!(repos[0]["name"], "fixture");
+    assert_eq!(
+        repos[0]["description"],
+        "Fixture service for order search and graph tests"
+    );
     assert_eq!(repos[0]["nodes"], 5);
     // 合同字段：status / source{kind,url} / detail / render_max_nodes。
     assert_eq!(repos[0]["status"], "ready");
@@ -599,15 +603,18 @@ impl Backend for ManagedBackend {
     fn remove_repo(&self, _: &str) -> anyhow::Result<()> {
         Ok(())
     }
-    fn set_repo_settings(&self, name: &str, settings: RepoSettingsUpdate) -> anyhow::Result<()> {
+    fn patch_repo_settings(&self, name: &str, settings: RepoSettingsPatch) -> anyhow::Result<()> {
         assert_eq!(name, "fixture");
-        assert!(settings.embeddings_enabled);
+        assert_eq!(settings.embeddings_enabled, Some(true));
         // server 必须先 clamp 再传给 backend（1_000..=500_000）。
-        if let Some(v) = settings.render_max_nodes {
+        if let Some(Some(v)) = settings.render_max_nodes {
             assert!(
                 (1_000..=500_000).contains(&v),
                 "render_max_nodes 应已被 server clamp，收到 {v}"
             );
+        }
+        if let Some(description) = settings.description {
+            assert_eq!(description.as_deref(), Some("Use for fixture validation"));
         }
         Ok(())
     }
@@ -796,7 +803,7 @@ async fn settings_delete_node_ego_shapes() {
     let res = managed()
         .oneshot(post_json(
             "/api/repos/fixture/settings",
-            json!({ "embeddings_enabled": true }),
+            json!({ "embeddings_enabled": true, "description": "  Use for fixture validation  " }),
         ))
         .await
         .unwrap();

@@ -40,6 +40,10 @@ async fn list_repos_shape() {
     let repos = v["repos"].as_array().unwrap();
     assert_eq!(repos.len(), 2);
     assert_eq!(repos[0]["name"], "fixture");
+    assert_eq!(
+        repos[0]["description"],
+        "Fixture service for order search and graph tests"
+    );
     assert_eq!(repos[0]["nodes"], 5);
     assert_eq!(repos[0]["embeddings"], false);
     // beta 未索引：indexed_at 直接省略（token 友好）。

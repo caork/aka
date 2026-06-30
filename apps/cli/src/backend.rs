@@ -35,8 +35,8 @@ use aka_mcp::{
     backend::dedup_symbol_refs, Backend, ChangeDetection, ChangedRange, ChangedSymbol,
     CodeLineMatch, CodeSearchHit, CodeSearchResult, DirectoryCount, GraphqlMapEntry,
     ImpactDirection, ProcessHit, QueryEnrichment, RenamePlan, RepoInfo, RepoProgress,
-    RepoSettingsUpdate, RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector,
-    ToolMapEntry, TopicEndpoint, TopicMapEntry,
+    RepoSettingsPatch, RepoSettingsUpdate, RouteConsumer, RouteMapEntry, SearchHit, SymbolRef,
+    SymbolSelector, ToolMapEntry, TopicEndpoint, TopicMapEntry,
 };
 use aka_search::SearchIndex;
 use git2::{
@@ -2267,6 +2267,7 @@ impl Backend for AkaBackend {
                     .unwrap_or_else(|| ("ready".into(), None));
                 RepoInfo {
                     name: r.name.clone(),
+                    description: r.description.clone(),
                     path: r.repo_path.to_string_lossy().to_string(),
                     nodes: r.stats.nodes,
                     edges: r.stats.edges,
@@ -2293,6 +2294,7 @@ impl Backend for AkaBackend {
         for (name, job) in pending {
             out.push(RepoInfo {
                 name: name.clone(),
+                description: None,
                 path: job.path.to_string_lossy().to_string(),
                 nodes: 0,
                 edges: 0,
@@ -3419,6 +3421,28 @@ impl Backend for AkaBackend {
         Ok(())
     }
 
+    fn patch_repo_settings(&self, name: &str, patch: RepoSettingsPatch) -> Result<()> {
+        let mut registry = Registry::load()?;
+        let Some(entry) = registry.find_by_name_mut(name) else {
+            bail!("repo not registered: {name}");
+        };
+        if let Some(embeddings_enabled) = patch.embeddings_enabled {
+            entry.embeddings_enabled = embeddings_enabled;
+        }
+        if let Some(description) = patch.description {
+            entry.description = description.and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            });
+        }
+        // Inner None = 恢复默认；Some 一律 clamp 到硬上限（HTTP 面已 clamp，这里兜底）。
+        if let Some(render_max_nodes) = patch.render_max_nodes {
+            entry.render_max_nodes = render_max_nodes.map(clamp_render_nodes);
+        }
+        registry.save()?;
+        Ok(())
+    }
+
     fn read_source(
         &self,
         repo: &str,
@@ -3879,6 +3903,7 @@ mod tests {
         let mut registry = Registry::default();
         registry.upsert(RepoEntry {
             name: existing_name.clone(),
+            description: None,
             repo_path: other,
             data_dir: "/tmp/data".into(),
             indexed_at: None,
@@ -4044,6 +4069,7 @@ mod tests {
         let mut registry = Registry::load().unwrap();
         registry.upsert(RepoEntry {
             name: name.clone(),
+            description: Some("Existing workspace description".into()),
             repo_path: path.clone(),
             data_dir: aka_home().join("repos").join("workspace-update-path"),
             indexed_at: Some(1),
@@ -4065,7 +4091,86 @@ mod tests {
         let repos = backend.list_repos().unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name, name);
+        assert_eq!(
+            repos[0].description.as_deref(),
+            Some("Existing workspace description")
+        );
         assert_job_visible_status(&repos[0].status);
+    }
+
+    #[test]
+    fn repo_settings_patch_preserves_and_clears_description() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let repo = temp_repo("settings-description");
+        let home = temp_repo("settings-description-home");
+        std::env::set_var("AKA_HOME", &home);
+        let path = repo.canonicalize().unwrap();
+        let mut registry = Registry::load().unwrap();
+        registry.upsert(RepoEntry {
+            name: "svc".into(),
+            description: Some("Initial agent guidance".into()),
+            repo_path: path,
+            data_dir: aka_home().join("repos").join("settings-description"),
+            indexed_at: Some(1),
+            engine_sha: None,
+            stats: FactStats {
+                files: 1,
+                nodes: 2,
+                edges: 3,
+                chunks: 4,
+            },
+            embeddings_enabled: true,
+            source_kind: "local".into(),
+            source_url: None,
+            render_max_nodes: Some(120_000),
+        });
+        registry.save().unwrap();
+
+        let backend = AkaBackend::new();
+        backend
+            .patch_repo_settings(
+                "svc",
+                RepoSettingsPatch {
+                    description: Some(Some("  Search for billing API handlers  ".into())),
+                    ..RepoSettingsPatch::default()
+                },
+            )
+            .unwrap();
+        let entry = Registry::load()
+            .unwrap()
+            .find_by_name("svc")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            entry.description.as_deref(),
+            Some("Search for billing API handlers")
+        );
+        assert!(entry.embeddings_enabled);
+        assert_eq!(entry.render_max_nodes, Some(120_000));
+        assert_eq!(
+            backend.list_repos().unwrap()[0].description.as_deref(),
+            Some("Search for billing API handlers")
+        );
+
+        backend
+            .patch_repo_settings(
+                "svc",
+                RepoSettingsPatch {
+                    description: Some(None),
+                    render_max_nodes: Some(None),
+                    ..RepoSettingsPatch::default()
+                },
+            )
+            .unwrap();
+        let entry = Registry::load()
+            .unwrap()
+            .find_by_name("svc")
+            .cloned()
+            .unwrap();
+        assert_eq!(entry.description, None);
+        assert!(entry.embeddings_enabled);
+        assert_eq!(entry.render_max_nodes, None);
     }
 
     #[test]

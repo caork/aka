@@ -401,6 +401,7 @@ fn register(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "repo".into())
         }),
+        description: prev.as_ref().and_then(|e| e.description.clone()),
         repo_path: repo.to_path_buf(),
         data_dir: paths.root.clone(),
         indexed_at: Some(now_unix()),
@@ -422,6 +423,37 @@ fn register(
 mod tests {
     use super::*;
     use aka_core::{save_index_state, ParseCacheManifest};
+    use std::ffi::OsString;
+    use std::sync::{Mutex as TestMutex, OnceLock};
+
+    struct EnvRestore {
+        aka_home: Option<OsString>,
+    }
+
+    impl EnvRestore {
+        fn capture() -> Self {
+            Self {
+                aka_home: std::env::var_os("AKA_HOME"),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(value) = &self.aka_home {
+                std::env::set_var("AKA_HOME", value);
+            } else {
+                std::env::remove_var("AKA_HOME");
+            }
+        }
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<TestMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| TestMutex::new(()))
+            .lock()
+            .expect("test env lock")
+    }
 
     #[test]
     fn reusable_index_reads_parse_cache_stats_from_parse_manifest() {
@@ -462,5 +494,61 @@ mod tests {
             reusable_existing_index_stats(&repo, &paths, previous.as_ref(), &current).unwrap();
 
         assert_eq!(stats, Some(expected));
+    }
+
+    #[test]
+    fn register_preserves_existing_repo_description() {
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("aka-home");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::env::set_var("AKA_HOME", &home);
+        let paths = RepoPaths {
+            root: home.join("repos").join("repo"),
+        };
+        let mut registry = Registry::load().unwrap();
+        registry.upsert(RepoEntry {
+            name: "repo".into(),
+            description: Some("Search when working on checkout metadata".into()),
+            repo_path: repo.clone(),
+            data_dir: paths.root.clone(),
+            indexed_at: Some(1),
+            engine_sha: Some("old".into()),
+            stats: FactStats::default(),
+            embeddings_enabled: true,
+            source_kind: "git".into(),
+            source_url: Some("https://example.com/repo.git".into()),
+            render_max_nodes: Some(42_000),
+        });
+        registry.save().unwrap();
+
+        register(
+            &repo,
+            &paths,
+            &FactStats {
+                files: 2,
+                nodes: 3,
+                edges: 4,
+                chunks: 5,
+            },
+            Some("new".into()),
+        )
+        .unwrap();
+
+        let entry = Registry::load()
+            .unwrap()
+            .find(&repo)
+            .cloned()
+            .expect("registered repo");
+        assert_eq!(
+            entry.description.as_deref(),
+            Some("Search when working on checkout metadata")
+        );
+        assert!(entry.embeddings_enabled);
+        assert_eq!(entry.source_kind, "git");
+        assert_eq!(entry.render_max_nodes, Some(42_000));
+        assert_eq!(entry.stats.nodes, 3);
     }
 }

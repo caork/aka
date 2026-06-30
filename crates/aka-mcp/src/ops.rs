@@ -118,6 +118,9 @@ impl From<RepoProgress> for RepoProgressOut {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RepoOut {
     pub name: String,
+    /// Agent-visible guidance for when this repository is worth searching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub path: String,
     pub nodes: u64,
     pub edges: u64,
@@ -139,6 +142,7 @@ impl From<RepoInfo> for RepoOut {
     fn from(r: RepoInfo) -> Self {
         Self {
             name: r.name,
+            description: r.description,
             path: r.path,
             nodes: r.nodes,
             edges: r.edges,

@@ -372,6 +372,8 @@ pub struct RepoProgress {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoInfo {
     pub name: String,
+    /// Agent-visible guidance for when this repository is worth searching.
+    pub description: Option<String>,
     pub path: String,
     pub nodes: u64,
     pub edges: u64,
@@ -392,7 +394,7 @@ pub struct RepoInfo {
     pub progress: Option<RepoProgress>,
 }
 
-/// per-repo 设置更新（settings 端点与 Backend 接缝共用一个形状）。
+/// per-repo 设置更新（保留完整更新形状，供桌面命令等现有调用方使用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoSettingsUpdate {
     pub embeddings_enabled: bool,
@@ -400,6 +402,18 @@ pub struct RepoSettingsUpdate {
     /// `aka_core::MIN_RENDER_NODES..=aka_core::MAX_RENDER_NODES`。
     #[serde(default)]
     pub render_max_nodes: Option<u32>,
+}
+
+/// per-repo 设置的 PATCH 形状。外层 None = 保持不变；内层 None =
+/// 清除 description / 恢复默认 render_max_nodes。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RepoSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embeddings_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_max_nodes: Option<Option<u32>>,
 }
 
 /// 数据层抽象。所有工具（MCP 九工具 + HTTP API）只依赖这个 trait。
@@ -711,6 +725,24 @@ pub trait Backend: Send + Sync + 'static {
     fn set_repo_settings(&self, name: &str, settings: RepoSettingsUpdate) -> anyhow::Result<()> {
         let _ = (name, settings);
         anyhow::bail!("set_repo_settings not supported by this backend")
+    }
+
+    /// 每仓库设置的部分更新（agent-visible description + 既有开关/预算）。
+    fn patch_repo_settings(&self, name: &str, patch: RepoSettingsPatch) -> anyhow::Result<()> {
+        if patch.description.is_some() {
+            anyhow::bail!("patch_repo_settings not supported by this backend");
+        }
+        match (patch.embeddings_enabled, patch.render_max_nodes) {
+            (Some(embeddings_enabled), Some(render_max_nodes)) => self.set_repo_settings(
+                name,
+                RepoSettingsUpdate {
+                    embeddings_enabled,
+                    render_max_nodes,
+                },
+            ),
+            (None, None) => Ok(()),
+            _ => anyhow::bail!("patch_repo_settings not supported by this backend"),
+        }
     }
 
     /// 节点详情（完整 properties + 度数概要），给前端弹窗用。

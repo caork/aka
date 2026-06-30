@@ -24,9 +24,9 @@ pub use aka_core::{
 pub use backend::{
     Backend, ChangeDetection, ChangedRange, ChangedSymbol, CodeLineMatch, CodeSearchHit,
     CodeSearchResult, DirectoryCount, GraphqlMapEntry, ImpactDirection, ProcessHit,
-    QueryEnrichment, RenameEdit, RenamePlan, RepoInfo, RepoProgress, RepoSettingsUpdate,
-    RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector, ToolMapEntry,
-    TopicEndpoint, TopicMapEntry,
+    QueryEnrichment, RenameEdit, RenamePlan, RepoInfo, RepoProgress, RepoSettingsPatch,
+    RepoSettingsUpdate, RouteConsumer, RouteMapEntry, SearchHit, SymbolRef, SymbolSelector,
+    ToolMapEntry, TopicEndpoint, TopicMapEntry,
 };
 pub use service::AkaMcpServer;
 

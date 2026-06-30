@@ -362,6 +362,7 @@ impl Backend for FixtureBackend {
         Ok(vec![
             RepoInfo {
                 name: "fixture".into(),
+                description: Some("Fixture service for order search and graph tests".into()),
                 path: "/tmp/fixture".into(),
                 nodes: 5,
                 edges: 4,
@@ -376,6 +377,7 @@ impl Backend for FixtureBackend {
             },
             RepoInfo {
                 name: "beta".into(),
+                description: None,
                 path: "/tmp/beta".into(),
                 nodes: 1,
                 edges: 0,

@@ -16,7 +16,7 @@
 //! - `POST   /api/repos/import-zip`    — multipart（name + file）→ 202
 //! - `POST   /api/repos/{name}/update` — git pull+analyze / local 重 analyze → 202（zip 来源 400）
 //! - `POST   /api/repos/{name}/update-zip` — multipart（file）→ 202
-//! - `POST   /api/repos/{name}/settings` — `{embeddings_enabled, render_max_nodes}` → 200
+//! - `POST   /api/repos/{name}/settings` — `{embeddings_enabled?, description?, render_max_nodes?}` → 200
 //! - `GET    /api/settings`          — 全局设置（indexing 时间预算等）
 //! - `POST   /api/settings`          — 更新全局设置
 //! - `DELETE /api/repos/{name}`        — 移除注册 + 数据目录 → 200
@@ -41,7 +41,7 @@ use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -51,8 +51,8 @@ use aka_core::{
 };
 pub use aka_mcp::ops;
 pub use aka_mcp::{
-    clamp_render_nodes, Backend, RepoInfo, RepoProgress, RepoSettingsUpdate, SearchHit, SymbolRef,
-    SymbolSelector, MAX_RENDER_NODES, MIN_RENDER_NODES,
+    clamp_render_nodes, Backend, RepoInfo, RepoProgress, RepoSettingsPatch, RepoSettingsUpdate,
+    SearchHit, SymbolRef, SymbolSelector, MAX_RENDER_NODES, MIN_RENDER_NODES,
 };
 
 type AppState = Arc<dyn Backend>;
@@ -661,10 +661,22 @@ async fn repo_update(State(b): State<AppState>, AxumPath(name): AxumPath<String>
 
 #[derive(Debug, Deserialize)]
 pub struct SettingsRequest {
-    pub embeddings_enabled: bool,
-    /// 缺省 / null = 恢复默认渲染预算（50_000）。
     #[serde(default)]
-    pub render_max_nodes: Option<u32>,
+    pub embeddings_enabled: Option<bool>,
+    /// Agent-visible guidance. 缺省 = 保持不变；null/空白 = 清除。
+    #[serde(default, deserialize_with = "deserialize_optional_patch")]
+    pub description: Option<Option<String>>,
+    /// 缺省 = 保持不变；null = 恢复默认渲染预算（50_000）。
+    #[serde(default, deserialize_with = "deserialize_optional_patch")]
+    pub render_max_nodes: Option<Option<u32>>,
+}
+
+fn deserialize_optional_patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -720,12 +732,20 @@ async fn repo_settings(
     AxumPath(name): AxumPath<String>,
     Json(req): Json<SettingsRequest>,
 ) -> Response {
-    let settings = RepoSettingsUpdate {
+    let settings = RepoSettingsPatch {
         embeddings_enabled: req.embeddings_enabled,
-        render_max_nodes: req.render_max_nodes.map(clamp_render_nodes),
+        description: req.description.map(|description| {
+            description.and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+        }),
+        render_max_nodes: req
+            .render_max_nodes
+            .map(|value| value.map(clamp_render_nodes)),
     };
     run_managed(b, StatusCode::OK, move |b| {
-        b.set_repo_settings(&name, settings)?;
+        b.patch_repo_settings(&name, settings)?;
         Ok(json!({ "ok": true }))
     })
     .await

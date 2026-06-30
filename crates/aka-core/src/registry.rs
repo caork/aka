@@ -29,6 +29,9 @@ pub fn clamp_render_nodes(n: u32) -> u32 {
 #[serde(rename_all = "camelCase")]
 pub struct RepoEntry {
     pub name: String,
+    /// Agent-visible guidance for when this repository is worth searching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub repo_path: PathBuf,
     pub data_dir: PathBuf,
     /// 索引完成时间（unix 秒）；None = 注册过但尚未成功索引。
@@ -180,6 +183,7 @@ mod tests {
 
         reg.upsert(RepoEntry {
             name: "fixture".into(),
+            description: Some("Rust API server for billing workflows".into()),
             repo_path: "/tmp/fixture".into(),
             data_dir: "/tmp/data".into(),
             indexed_at: Some(now_unix()),
@@ -195,11 +199,16 @@ mod tests {
         let mut reg2 = Registry::load_from(&path).unwrap();
         assert_eq!(reg2.repos.len(), 1);
         assert!(!reg2.repos[0].embeddings_enabled, "embedding 默认必须是关");
+        assert_eq!(
+            reg2.repos[0].description.as_deref(),
+            Some("Rust API server for billing workflows")
+        );
         assert_eq!(reg2.repos[0].source_kind, "git");
         assert_eq!(reg2.repos[0].render_max_nodes, Some(120_000));
 
         reg2.upsert(RepoEntry {
             name: "fixture2".into(),
+            description: None,
             repo_path: "/tmp/fixture".into(),
             data_dir: "/tmp/data".into(),
             indexed_at: None,
@@ -228,6 +237,7 @@ mod tests {
         assert_eq!(reg.repos.len(), 1);
         assert_eq!(reg.repos[0].source_kind, "local");
         assert_eq!(reg.repos[0].source_url, None);
+        assert_eq!(reg.repos[0].description, None);
         assert_eq!(
             reg.repos[0].render_max_nodes, None,
             "旧 registry.json 无 renderMaxNodes 字段必须回落 None"
