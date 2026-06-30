@@ -46,11 +46,23 @@ OpenCode 的 MCP 配置写在 `opencode.json` 的 `mcp` 键下：全局 macOS/Li
 - 这个 URL 只绑定 `127.0.0.1`，不会暴露到局域网或公网。
 - 临时停用设 `"enabled": false`，不必删配置。
 
-macOS/Linux 也可直接跑仓库脚本：`clients/install.sh --client opencode`（幂等合并，需要 `jq`；会顺带安装下面的 plugin 与 skill）。Windows 用下面的 PowerShell 步骤。
+macOS/Linux 也可直接跑安装脚本（幂等合并，需要 `jq`；会顺带安装下面的 plugin 与 skill）：
+
+```bash
+clients/install.sh --check
+clients/install.sh --client opencode --reinstall
+```
+
+Windows PowerShell：
+
+```powershell
+.\clients\install.ps1 -Check
+.\clients\install.ps1 -Client opencode -Reinstall
+```
 
 ### Windows 安装
 
-先安装并启动 Windows 版 AKA 桌面端，确认它在本机监听 `http://127.0.0.1:4112/mcp`。然后把发布包 `aka-opencode-plugin-<ver>.zip` 解压到任意目录，例如 `C:\Users\<you>\Downloads\aka-opencode-plugin-<ver>`。
+先安装并启动 Windows 版 AKA 桌面端，确认它在本机监听 `http://127.0.0.1:4112/mcp`。推荐使用 `aka-clients-<ver>.tar.gz` 里的 `clients\install.ps1`；如果只下载了 `aka-opencode-plugin-<ver>.zip`，可按下面手动步骤安装。
 
 在 PowerShell 里进入解压目录，安装全局 OpenCode 配置、plugin 和 skill：
 

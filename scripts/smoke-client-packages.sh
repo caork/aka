@@ -26,7 +26,7 @@ require_text() {
   local path="$1"
   local pattern="$2"
   local label="$3"
-  if ! grep -Eq "${pattern}" "${path}"; then
+  if ! grep -Eq -- "${pattern}" "${path}"; then
     echo "error: ${label} missing in ${path}" >&2
     echo "       pattern: ${pattern}" >&2
     exit 1
@@ -37,7 +37,7 @@ reject_text() {
   local path="$1"
   local pattern="$2"
   local label="$3"
-  if grep -Eq "${pattern}" "${path}"; then
+  if grep -Eq -- "${pattern}" "${path}"; then
     echo "error: ${label} found in ${path}" >&2
     echo "       pattern: ${pattern}" >&2
     exit 1
@@ -92,6 +92,8 @@ require_file "${TMP_DIR}/opencode/AGENTS-aka.md"
 require_file "${TMP_DIR}/clients/clients/codex/AGENTS-aka.md"
 require_file "${TMP_DIR}/clients/clients/codex/README.md"
 require_file "${TMP_DIR}/clients/clients/install.sh"
+require_file "${TMP_DIR}/clients/clients/install.ps1"
+require_file "${TMP_DIR}/clients/clients/.claude-plugin/marketplace.json"
 
 CLAUDE_TMP_DIR="${TMP_DIR}/claude" WORKSPACE_VERSION="${WORKSPACE_VERSION}" node <<'NODE'
 const fs = require("fs");
@@ -117,14 +119,35 @@ if (mcp.mcpServers.aka.type !== "http" || mcp.mcpServers.aka.url !== "http://127
 }
 NODE
 
+CLIENTS_TMP_DIR="${TMP_DIR}/clients/clients" node <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const root = process.env.CLIENTS_TMP_DIR;
+const marketplace = JSON.parse(fs.readFileSync(path.join(root, ".claude-plugin/marketplace.json"), "utf8"));
+const plugin = marketplace.plugins && marketplace.plugins.find((item) => item.name === "aka");
+if (!plugin) {
+  throw new Error("clients marketplace must list the aka plugin");
+}
+if (plugin.source !== "./claude-code") {
+  throw new Error(`clients marketplace source must be ./claude-code, got ${plugin.source}`);
+}
+NODE
+
 check_strategy_doc "${TMP_DIR}/claude/skills/aka-code-graph/SKILL.md"
 check_strategy_doc "${TMP_DIR}/opencode/skills/aka-code-graph/SKILL.md"
 check_strategy_doc "${TMP_DIR}/opencode/AGENTS-aka.md"
 check_strategy_doc "${TMP_DIR}/clients/clients/codex/AGENTS-aka.md"
 
 require_text "${TMP_DIR}/clients/clients/README.md" 'AKA 桌面端' "desktop-first client wording"
+require_text "${TMP_DIR}/clients/clients/README.md" 'install\.ps1' "Windows installer guidance"
+require_text "${TMP_DIR}/clients/clients/README.md" '--check|-Check' "script check guidance"
+require_text "${TMP_DIR}/clients/clients/README.md" '--reinstall|-Reinstall' "script reinstall guidance"
 require_text "${TMP_DIR}/clients/clients/README.md" 'list_repos' "client package list_repos guidance"
 require_text "${TMP_DIR}/clients/clients/README.md" '自动排队索引' "client package auto-index guidance"
+require_text "${TMP_DIR}/clients/clients/install.sh" '--check' "shell installer check mode"
+require_text "${TMP_DIR}/clients/clients/install.sh" '--reinstall' "shell installer reinstall mode"
+require_text "${TMP_DIR}/clients/clients/install.ps1" '-Check' "PowerShell installer check mode"
+require_text "${TMP_DIR}/clients/clients/install.ps1" '-Reinstall' "PowerShell installer reinstall mode"
 require_text "${TMP_DIR}/clients/clients/codex/README.md" 'workspace roots 自动索引' "Codex roots auto-index guidance"
 require_text "${TMP_DIR}/clients/clients/opencode/README.md" 'MCP roots .*自动排队索引' "OpenCode roots auto-index guidance"
 require_text "${TMP_DIR}/clients/clients/codex/config.toml.snippet" 'default_tools_approval_mode = "prompt"' "safe Codex approval guidance"

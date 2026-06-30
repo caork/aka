@@ -11,7 +11,7 @@ clients/claude-code/            # 插件根
 └── skills/aka-code-graph/SKILL.md
 ```
 
-仓库根另有 `.claude-plugin/marketplace.json`，把本仓库变成一个可 `marketplace add` 的 marketplace，插件源指向 `./clients/claude-code`。
+仓库根另有 `.claude-plugin/marketplace.json`，把本仓库变成一个可 `marketplace add` 的 marketplace，插件源指向 `./clients/claude-code`。发布包 `aka-clients-<ver>.tar.gz` 里的 `clients/.claude-plugin/marketplace.json` 也可直接注册。
 
 ## 前置条件：启动 AKA 桌面端
 
@@ -44,7 +44,19 @@ claude --plugin-dir /absolute/path/to/aka/clients/claude-code
 claude mcp add --transport http aka http://127.0.0.1:4112/mcp
 ```
 
-或直接跑仓库里的安装脚本：`clients/install.sh --client claude-code`。
+或直接跑安装脚本：
+
+```bash
+clients/install.sh --check
+clients/install.sh --client claude-code --plugin --reinstall
+```
+
+Windows PowerShell：
+
+```powershell
+.\clients\install.ps1 -Check
+.\clients\install.ps1 -Client claude-code -Plugin -Reinstall
+```
 
 桌面不常开或当前 Claude Code 版本不支持 HTTP MCP 时，可用 stdio fallback：
 

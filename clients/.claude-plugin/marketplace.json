@@ -1,0 +1,17 @@
+{
+  "name": "aka",
+  "metadata": {
+    "description": "aka client package marketplace for Claude Code"
+  },
+  "owner": {
+    "name": "caork",
+    "url": "https://github.com/caork"
+  },
+  "plugins": [
+    {
+      "name": "aka",
+      "source": "./claude-code",
+      "description": "aka code knowledge engine plugin for AKA desktop local HTTP MCP and code graph skill"
+    }
+  ]
+}

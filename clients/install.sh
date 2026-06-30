@@ -2,9 +2,10 @@
 # aka 客户端接入安装脚本
 #
 # 用法:
-#   clients/install.sh --client claude-code [--plugin] [--stdio --bin /path/to/AKA] [--mcp-url http://127.0.0.1:4112/mcp] [--dry-run]
-#   clients/install.sh --client codex       [--stdio --bin /path/to/AKA] [--mcp-url http://127.0.0.1:4112/mcp] [--dry-run]
-#   clients/install.sh --client opencode    [--dry-run]
+#   clients/install.sh --check
+#   clients/install.sh --client claude-code [--plugin] [--stdio --bin /path/to/AKA] [--mcp-url http://127.0.0.1:4112/mcp] [--dry-run] [--reinstall]
+#   clients/install.sh --client codex       [--stdio --bin /path/to/AKA] [--mcp-url http://127.0.0.1:4112/mcp] [--dry-run] [--reinstall]
+#   clients/install.sh --client opencode    [--dry-run] [--reinstall]
 #
 # 行为:
 #   - 默认所有客户端连接已运行的 AKA 桌面端本地 MCP endpoint: http://127.0.0.1:4112/mcp
@@ -12,6 +13,8 @@
 #   - stdio 模式自动探测 MCP 命令: --bin 参数 > PATH 上的 aka/AKA > 仓库 target/release > target/debug
 #   - 幂等: 目标配置里已有 aka 条目时跳过并提示, 不会重复写入
 #   - --dry-run: 只打印将要执行的动作, 不写任何文件
+#   - --check: 检测 AKA MCP endpoint 与三客户端安装状态, 不写任何文件
+#   - --reinstall: 已存在 aka 配置时也重新写入/覆盖可管理文件
 #
 # 各客户端写入目标:
 #   claude-code : 默认 `claude mcp add --transport http aka ...`(user scope); 加 --plugin 则走插件方式
@@ -30,6 +33,8 @@ MCP_URL="${AKA_MCP_URL:-http://127.0.0.1:4112/mcp}"
 DRY_RUN=0
 USE_PLUGIN=0
 USE_STDIO=0
+CHECK_ONLY=0
+REINSTALL=0
 
 info()  { printf '\033[1;34m[aka]\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m[aka]\033[0m %s\n' "$*" >&2; }
@@ -43,22 +48,37 @@ usage() {
 # ---------- 参数解析 ----------
 while [ $# -gt 0 ]; do
   case "$1" in
-    --client)  CLIENT="${2:-}"; shift 2 ;;
-    --bin)     BIN="${2:-}"; shift 2 ;;
-    --mcp-url) MCP_URL="${2:-}"; shift 2 ;;
+    --client)
+      [ $# -ge 2 ] || die "--client 需要参数"
+      CLIENT="$2"; shift 2 ;;
+    --bin)
+      [ $# -ge 2 ] || die "--bin 需要参数"
+      BIN="$2"; shift 2 ;;
+    --mcp-url)
+      [ $# -ge 2 ] || die "--mcp-url 需要参数"
+      MCP_URL="$2"; shift 2 ;;
     --plugin)  USE_PLUGIN=1; shift ;;
     --stdio)   USE_STDIO=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --check)   CHECK_ONLY=1; shift ;;
+    --reinstall) REINSTALL=1; shift ;;
     -h|--help) usage 0 ;;
     *) die "未知参数: $1（--help 查看用法）" ;;
   esac
 done
 
-case "$CLIENT" in
-  claude-code|codex|opencode) ;;
-  "") usage 1 ;;
-  *) die "不支持的 --client: ${CLIENT}（可选 claude-code|codex|opencode）" ;;
-esac
+if [ "$CHECK_ONLY" -eq 0 ]; then
+  case "$CLIENT" in
+    claude-code|codex|opencode) ;;
+    "") usage 1 ;;
+    *) die "不支持的 --client: ${CLIENT}（可选 claude-code|codex|opencode）" ;;
+  esac
+elif [ -n "$CLIENT" ]; then
+  case "$CLIENT" in
+    claude-code|codex|opencode) ;;
+    *) die "不支持的 --client: ${CLIENT}（可选 claude-code|codex|opencode）" ;;
+  esac
+fi
 
 # ---------- 探测 aka 二进制 ----------
 detect_bin() {
@@ -86,7 +106,7 @@ detect_bin() {
   die "找不到可执行的 aka/AKA。请用 --bin 指向桌面包里的 AKA 可执行文件；源码开发时可先 cargo build -p aka-cli 做内部 runtime crate 编译验证。"
 }
 
-if [ "$USE_STDIO" -eq 1 ] && [ "$CLIENT" != "opencode" ]; then
+if [ "$USE_STDIO" -eq 1 ] && [ "$CLIENT" != "opencode" ] && [ "$CHECK_ONLY" -eq 0 ]; then
   detect_bin
   info "aka MCP stdio 命令: ${BIN}"
 elif [ "$CLIENT" != "opencode" ] && [ -n "$BIN" ]; then
@@ -103,6 +123,57 @@ run() {
   fi
 }
 
+status_line() {
+  local label="$1" status="$2" detail="$3"
+  printf '%-18s %-8s %s\n' "$label" "$status" "$detail"
+}
+
+has_aka_mcp_endpoint() {
+  if command -v curl >/dev/null 2>&1; then
+    local body code
+    body="$(mktemp)"
+    code="$(curl -sS -m 2 -o "$body" -w '%{http_code}' \
+      -H 'content-type: application/json' \
+      -H 'accept: application/json, text/event-stream' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"aka-installer","version":"0"}}}' \
+      "$MCP_URL" 2>/dev/null || true)"
+    if [ "$code" = "200" ] && grep -q '"name":"aka-mcp"' "$body"; then
+      rm -f "$body"
+      return 0
+    fi
+    rm -f "$body"
+    return 1
+  else
+    return 1
+  fi
+}
+
+check_status() {
+  local codex_cfg="${HOME}/.codex/config.toml"
+  local opencode_cfg="${HOME}/.config/opencode/opencode.json"
+  local opencode_plugin="${HOME}/.config/opencode/plugins/aka.js"
+  local opencode_skill="${HOME}/.config/opencode/skills/aka-code-graph/SKILL.md"
+
+  if has_aka_mcp_endpoint; then status_line "AKA MCP" "ok" "$MCP_URL"; else status_line "AKA MCP" "missing" "$MCP_URL"; fi
+  if [ -z "$CLIENT" ] || [ "$CLIENT" = "claude-code" ]; then
+    if command -v claude >/dev/null 2>&1; then status_line "Claude CLI" "ok" "$(command -v claude)"; else status_line "Claude CLI" "missing" "claude"; fi
+  fi
+  if [ -z "$CLIENT" ] || [ "$CLIENT" = "codex" ]; then
+    if command -v codex >/dev/null 2>&1; then status_line "Codex CLI" "ok" "$(command -v codex)"; else status_line "Codex CLI" "missing" "codex"; fi
+    if [ -f "$codex_cfg" ] && grep -q '^\[mcp_servers\.aka\]' "$codex_cfg"; then status_line "Codex config" "ok" "$codex_cfg"; else status_line "Codex config" "missing" "$codex_cfg"; fi
+  fi
+  if [ -z "$CLIENT" ] || [ "$CLIENT" = "opencode" ]; then
+    if [ -f "$opencode_cfg" ] && grep -q '"aka"' "$opencode_cfg"; then status_line "OpenCode config" "ok" "$opencode_cfg"; else status_line "OpenCode config" "missing" "$opencode_cfg"; fi
+    if [ -f "$opencode_plugin" ]; then status_line "OpenCode plugin" "ok" "$opencode_plugin"; else status_line "OpenCode plugin" "missing" "$opencode_plugin"; fi
+    if [ -f "$opencode_skill" ]; then status_line "OpenCode skill" "ok" "$opencode_skill"; else status_line "OpenCode skill" "missing" "$opencode_skill"; fi
+  fi
+}
+
+if [ "$CHECK_ONLY" -eq 1 ]; then
+  check_status
+  exit 0
+fi
+
 # ---------- claude-code ----------
 install_claude_code() {
   command -v claude >/dev/null 2>&1 || die "未找到 claude CLI，请先安装 Claude Code。"
@@ -110,23 +181,41 @@ install_claude_code() {
   if [ "$USE_PLUGIN" -eq 1 ]; then
     # 插件方式: marketplace add 本仓库 + 安装插件(捆绑 HTTP MCP 配置 + skill)。
     # 注意: 插件内 .mcp.json 固定指向桌面端本地 HTTP MCP endpoint。
-    if claude plugin list 2>/dev/null | grep -q '^aka@aka\|aka@aka'; then
+    if [ "$REINSTALL" -eq 0 ] && claude plugin list 2>/dev/null | grep -q '^aka@aka\|aka@aka'; then
       info "插件 aka@aka 已安装，跳过。(更新: claude plugin update aka@aka)"
       return
     fi
-    run claude plugin marketplace add "${REPO_ROOT}"
+    if [ "$REINSTALL" -eq 1 ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] claude plugin uninstall aka@aka"
+      else
+        claude plugin uninstall aka@aka >/dev/null 2>&1 || true
+      fi
+    fi
+    if [ -f "${SCRIPT_DIR}/.claude-plugin/marketplace.json" ]; then
+      run claude plugin marketplace add "${SCRIPT_DIR}"
+    else
+      run claude plugin marketplace add "${REPO_ROOT}"
+    fi
     run claude plugin install aka@aka
     info "完成。先启动 AKA 桌面端，再验证: claude plugin list && claude mcp list"
   else
     # 直连 MCP 方式(无 skill, 最简单), user scope 全项目可用。默认走桌面 HTTP MCP。
-    if claude mcp list 2>/dev/null | grep -q '^aka[: ]\|^aka$'; then
+    if [ "$REINSTALL" -eq 0 ] && claude mcp list 2>/dev/null | grep -q '^aka[: ]\|^aka$'; then
       info "MCP server 'aka' 已存在，跳过。(查看: claude mcp list; 移除: claude mcp remove aka)"
       return
+    fi
+    if [ "$REINSTALL" -eq 1 ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] claude mcp remove aka"
+      else
+        claude mcp remove aka >/dev/null 2>&1 || true
+      fi
     fi
     if [ "$USE_STDIO" -eq 1 ]; then
       run claude mcp add --transport stdio --scope user aka -- "${BIN}" mcp
       info "完成。验证: claude mcp list（应显示 aka ✓ connected）"
-      info "提示: stdio fallback 会在桌面未运行时按需启动 `AKA mcp`，并复用同一份桌面数据。"
+      info "提示: stdio fallback 会在桌面未运行时按需启动 AKA mcp，并复用同一份桌面数据。"
     else
       run claude mcp add --transport http --scope user aka "${MCP_URL}"
       info "完成。先启动 AKA 桌面端，再验证: claude mcp list（应显示 aka ✓ connected）"
@@ -138,9 +227,22 @@ install_claude_code() {
 # ---------- codex ----------
 install_codex() {
   local cfg="${HOME}/.codex/config.toml"
-  if [ -f "$cfg" ] && grep -q '^\[mcp_servers\.aka\]' "$cfg"; then
+  if [ "$REINSTALL" -eq 0 ] && [ -f "$cfg" ] && grep -q '^\[mcp_servers\.aka\]' "$cfg"; then
     info "${cfg} 已有 [mcp_servers.aka]，跳过。"
     return
+  fi
+  if [ "$REINSTALL" -eq 1 ] && [ -f "$cfg" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "[dry-run] 将备份 ${cfg} 并移除已有 [mcp_servers.aka] 后重新写入"
+    else
+      cp "$cfg" "${cfg}.aka-backup-$(date +%Y%m%d%H%M%S)"
+      awk '
+        /^\[mcp_servers\.aka\]$/ { skip=1; next }
+        /^\[/ && skip { skip=0 }
+        !skip { print }
+      ' "$cfg" > "${cfg}.tmp"
+      mv "${cfg}.tmp" "$cfg"
+    fi
   fi
   if [ "$USE_STDIO" -eq 1 ] && command -v codex >/dev/null 2>&1; then
     run codex mcp add aka -- "${BIN}" mcp
@@ -180,7 +282,7 @@ install_opencode_plugin() {
   local src="${SCRIPT_DIR}/opencode/plugins/aka.js"
   local dst="${HOME}/.config/opencode/plugins/aka.js"
   [ -f "$src" ] || { warn "未找到 ${src}，跳过 OpenCode plugin 安装。"; return; }
-  if [ -f "$dst" ]; then
+  if [ "$REINSTALL" -eq 0 ] && [ -f "$dst" ]; then
     info "OpenCode plugin 已存在: ${dst}，跳过。"
     return
   fi
@@ -199,11 +301,11 @@ install_opencode_skill() {
   local src="${SCRIPT_DIR}/opencode/skills/aka-code-graph"
   local dst="${HOME}/.config/opencode/skills/aka-code-graph"
   [ -f "${src}/SKILL.md" ] || { warn "未找到 ${src}/SKILL.md，跳过 skill 安装。"; return; }
-  if [ -f "${dst}/SKILL.md" ]; then
+  if [ "$REINSTALL" -eq 0 ] && [ -f "${dst}/SKILL.md" ]; then
     info "skill 已存在: ${dst}，跳过。(也可改用 AGENTS-aka.md, 见 ${SCRIPT_DIR}/opencode/README.md)"
     return
   fi
-  if [ -f "${HOME}/.claude/skills/aka-code-graph/SKILL.md" ]; then
+  if [ "$REINSTALL" -eq 0 ] && [ -f "${HOME}/.claude/skills/aka-code-graph/SKILL.md" ]; then
     info "检测到 ~/.claude/skills/aka-code-graph(OpenCode 会自动识别), 跳过重复安装。"
     return
   fi
@@ -212,13 +314,16 @@ install_opencode_skill() {
     return
   fi
   mkdir -p "$(dirname "$dst")"
+  if [ "$REINSTALL" -eq 1 ] && [ -d "$dst" ]; then
+    rm -rf "$dst"
+  fi
   cp -R "$src" "$dst"
   info "已安装使用策略 skill: ${dst}"
 }
 
 install_opencode() {
   local cfg="${HOME}/.config/opencode/opencode.json"
-  if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1 && [ "$(jq -r '.mcp.aka // empty | type' "$cfg" 2>/dev/null)" = "object" ]; then
+  if [ "$REINSTALL" -eq 0 ] && [ -f "$cfg" ] && command -v jq >/dev/null 2>&1 && [ "$(jq -r '.mcp.aka // empty | type' "$cfg" 2>/dev/null)" = "object" ]; then
     info "${cfg} 已有 mcp.aka，跳过。"
     install_opencode_plugin
     install_opencode_skill

@@ -19,7 +19,19 @@ url = "http://127.0.0.1:4112/mcp"
 codex mcp add aka --url http://127.0.0.1:4112/mcp
 ```
 
-也可直接跑仓库脚本：`clients/install.sh --client codex`（幂等写入）。
+也可直接跑安装脚本（幂等写入，重装会先备份 `~/.codex/config.toml`）：
+
+```bash
+clients/install.sh --check
+clients/install.sh --client codex --reinstall
+```
+
+Windows PowerShell：
+
+```powershell
+.\clients\install.ps1 -Check
+.\clients\install.ps1 -Client codex -Reinstall
+```
 
 桌面不常开或当前 Codex 版本不支持 HTTP MCP 时，可改用 stdio fallback：
 

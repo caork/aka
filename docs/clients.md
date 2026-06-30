@@ -79,6 +79,7 @@ stdio fallback: agent ─spawn─▶ 桌面包 AKA mcp ──读写同一 app da
 - **插件版本**：`plugin.json` 的 `version` 跟随 workspace version；`scripts/smoke-client-packages.sh` 会校验二者一致（不 bump 用户就不会收到更新）。插件只含 HTTP MCP 配置和 markdown，与二进制弱耦合，硬依赖是「AKA 桌面端提供 `127.0.0.1:4112/mcp`」。
 - **客户端版本下限**：Claude Code 用到的特性（plugin.json + .mcp.json + skills + marketplace）为 2025 年底已稳定的核心集，刻意不用新版才有的字段（`displayName` 需 ≥2.1.143、`defaultEnabled` 需 ≥2.1.154、`userConfig` 等），保证老版本可装。Codex/OpenCode 片段同样只用各自文档标注的稳定字段。
 - **格式漂移的防线**：三家配置格式仍在演进，`clients/` 各 README 标注「2026-06 核实」与来源 URL；install.sh 优先走官方 CLI（`claude mcp add`、`codex mcp add`），格式变更由官方 CLI 吸收，手写文件仅作 fallback（OpenCode MCP 配置用 jq 合并而非整文件覆盖，本地 plugin 用发现目录安装）。
+- **脚本化安装/检测**：`clients/install.sh --check` 与 `clients/install.ps1 -Check` 会检测 AKA 桌面端 MCP endpoint、Codex 配置、OpenCode plugin/skill 等状态；`--reinstall` / `-Reinstall` 只更新 aka 管理的配置项，Codex 配置会先备份。浏览器预览无法直接写本机 agent 配置时，设置页展示这些预制命令；桌面端仍走原生一键安装/status。
 
 ## 6. 已知限制 / 待办
 
