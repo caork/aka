@@ -37,6 +37,7 @@ export interface RepoProgress {
 export interface Repo {
   id: string;
   name: string;
+  description: string | null;
   path: string;
   status: RepoStatus;
   symbols: number;
@@ -134,6 +135,7 @@ const INITIAL_RESOLVED_THEME = resolveThemeMode(INITIAL_THEME_MODE);
 
 interface RepoOut {
   name: string;
+  description?: string | null;
   path: string;
   nodes?: number;
   edges?: number;
@@ -157,6 +159,10 @@ function mapRepo(x: RepoOut): Repo {
   return {
     id: x.name,
     name: x.name,
+    description:
+      typeof x.description === "string" && x.description.trim().length > 0
+        ? x.description
+        : null,
     path: x.path,
     status,
     symbols: x.nodes ?? 0,

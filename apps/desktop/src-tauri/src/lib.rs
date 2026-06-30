@@ -15,8 +15,8 @@ use aka_core::{
     clamp_index_max_secs, clamp_oss_analyzer_enrichment_max_secs, AkaSettings,
     DEFAULT_OSS_ANALYZER_ENRICHMENT_MAX_SECS,
 };
-use aka_mcp::{clamp_render_nodes, ops, Backend, RepoSettingsUpdate, MAX_RENDER_NODES};
-use serde::{Deserialize, Serialize};
+use aka_mcp::{clamp_render_nodes, ops, Backend, RepoSettingsPatch, MAX_RENDER_NODES};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use tauri::{path::BaseDirectory, Manager, State};
 
@@ -233,9 +233,20 @@ struct ZipImportRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RepoSettingsRequest {
-    embeddings_enabled: bool,
     #[serde(default)]
-    render_max_nodes: Option<u32>,
+    embeddings_enabled: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_optional_patch")]
+    description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_patch")]
+    render_max_nodes: Option<Option<u32>>,
+}
+
+fn deserialize_optional_patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1086,12 +1097,20 @@ async fn set_repo_settings(
     name: String,
     settings: RepoSettingsRequest,
 ) -> Result<serde_json::Value, String> {
-    let settings = RepoSettingsUpdate {
+    let settings = RepoSettingsPatch {
         embeddings_enabled: settings.embeddings_enabled,
-        render_max_nodes: settings.render_max_nodes.map(clamp_render_nodes),
+        description: settings.description.map(|description| {
+            description.and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+        }),
+        render_max_nodes: settings
+            .render_max_nodes
+            .map(|value| value.map(clamp_render_nodes)),
     };
     run_backend(backend, move |b| {
-        b.set_repo_settings(&name, settings)?;
+        b.patch_repo_settings(&name, settings)?;
         Ok(json!({ "ok": true }))
     })
     .await

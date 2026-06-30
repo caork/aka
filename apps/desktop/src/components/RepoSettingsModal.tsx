@@ -33,12 +33,13 @@ export default function RepoSettingsModal({
   onClose(): void;
 }) {
   const [embeddings, setEmbeddings] = useState(false);
+  const [descriptionDraft, setDescriptionDraft] = useState("");
   const [renderDraft, setRenderDraft] = useState(RENDER_MAX_DEFAULT);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [logsCopied, setLogsCopied] = useState(false);
   const [busy, setBusy] = useState<
-    "" | "toggle" | "render" | "update" | "zip" | "delete"
+    "" | "toggle" | "description" | "render" | "update" | "zip" | "delete"
   >("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const zipRef = useRef<HTMLInputElement>(null);
@@ -46,13 +47,14 @@ export default function RepoSettingsModal({
   /* 弹窗目标变化时同步初始状态 */
   useEffect(() => {
     setEmbeddings(repo?.embeddings ?? false);
+    setDescriptionDraft(repo?.description ?? "");
     setRenderDraft(repo?.renderMaxNodes ?? RENDER_MAX_DEFAULT);
     setError(null);
     setNotice(null);
     setLogsCopied(false);
     setBusy("");
     setConfirmDelete(false);
-  }, [repo?.id, repo?.embeddings, repo?.renderMaxNodes]);
+  }, [repo?.id, repo?.embeddings, repo?.description, repo?.renderMaxNodes]);
 
   if (!repo) return <Modal open={false} onClose={onClose} title="" children={null} />;
 
@@ -68,10 +70,8 @@ export default function RepoSettingsModal({
     setError(null);
     setNotice(null);
     try {
-      /* 合同 body 同时带两个字段；这里带的是已保存的渲染上限（非草稿） */
       await setRepoSettings(repo.name, {
         embeddingsEnabled: next,
-        renderMaxNodes: repo.renderMaxNodes,
       });
       void refreshRepos();
     } catch (e) {
@@ -84,6 +84,32 @@ export default function RepoSettingsModal({
 
   const savedRender = repo.renderMaxNodes ?? RENDER_MAX_DEFAULT;
   const renderDirty = clampRender(renderDraft) !== savedRender;
+  const normalizeDescription = (value: string) => {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  };
+  const descriptionDirty =
+    normalizeDescription(descriptionDraft) !== (repo.description ?? null);
+
+  const saveDescription = async () => {
+    if (busy || !descriptionDirty) return;
+    setBusy("description");
+    setError(null);
+    setNotice(null);
+    try {
+      const description = normalizeDescription(descriptionDraft);
+      await setRepoSettings(repo.name, {
+        description,
+      });
+      if (description === null) setDescriptionDraft("");
+      setNotice("仓库说明已保存——agent 的 list_repos 结果会带上这段说明");
+      void refreshRepos();
+    } catch (e) {
+      fail(e, "设置失败");
+    } finally {
+      setBusy("");
+    }
+  };
 
   const saveRenderMax = async (value: number | null) => {
     if (busy) return;
@@ -92,7 +118,6 @@ export default function RepoSettingsModal({
     setNotice(null);
     try {
       await setRepoSettings(repo.name, {
-        embeddingsEnabled: embeddings,
         renderMaxNodes: value === null ? null : clampRender(value),
       });
       if (value === null) setRenderDraft(RENDER_MAX_DEFAULT);
@@ -241,6 +266,47 @@ export default function RepoSettingsModal({
         data-testid="settings-source"
       >
         {sourceText}
+      </div>
+
+      {/* agent guidance */}
+      <div className="themed-divider mb-4 border-t pt-4">
+        <label htmlFor="repo-description" className="text-[13px] font-medium text-ink">
+          仓库说明
+        </label>
+        <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
+          写给 agent 的搜索提示：这个仓库负责什么、遇到什么问题时应该查它。
+        </div>
+        <textarea
+          id="repo-description"
+          value={descriptionDraft}
+          onChange={(e) => setDescriptionDraft(e.target.value)}
+          disabled={busy === "description"}
+          rows={4}
+          maxLength={1200}
+          placeholder="例如：AKA 桌面端和插件包源码；需要代码图谱、MCP、Tauri、WebGL 渲染、仓库索引相关上下文时搜索。"
+          className="cmd-input mt-3 min-h-[92px] w-full resize-y px-3 py-2 text-[12.5px] leading-relaxed text-ink"
+          data-testid="repo-description-input"
+        />
+        <div className="mt-2 flex items-center justify-between gap-3">
+          <span className="text-[11px] text-ink-3">
+            {descriptionDraft.length.toLocaleString()} / 1,200
+          </span>
+          <button
+            onClick={() => void saveDescription()}
+            disabled={busy !== "" || !descriptionDirty}
+            className={`focus-ring rounded-[9px] px-3 py-1.5 text-[12px] font-semibold transition-all duration-150 ease-out ${
+              descriptionDirty ? "btn-primary" : "text-ink-3 opacity-60"
+            }`}
+            style={
+              descriptionDirty
+                ? undefined
+                : { boxShadow: "inset 0 0 0 0.5px var(--hairline-strong)" }
+            }
+            data-testid="repo-description-save"
+          >
+            {busy === "description" ? "保存中…" : "保存"}
+          </button>
+        </div>
       </div>
 
       {/* embeddings switch */}

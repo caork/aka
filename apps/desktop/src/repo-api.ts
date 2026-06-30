@@ -134,33 +134,54 @@ export async function updateZip(name: string, fileOrPath: File | string): Promis
 }
 
 export interface RepoSettingsInput {
-  embeddingsEnabled: boolean;
+  embeddingsEnabled?: boolean;
+  /** Agent-visible guidance for when this repo is worth searching. */
+  description?: string | null;
   /** 图渲染节点上限；null = 使用默认（50_000） */
-  renderMaxNodes: number | null;
+  renderMaxNodes?: number | null;
 }
 
 export async function setRepoSettings(
   name: string,
   settings: RepoSettingsInput,
 ): Promise<void> {
+  const desktopPatch: RepoSettingsInput = {};
+  if (settings.embeddingsEnabled !== undefined) {
+    desktopPatch.embeddingsEnabled = settings.embeddingsEnabled;
+  }
+  if (settings.description !== undefined) {
+    desktopPatch.description = settings.description;
+  }
+  if (settings.renderMaxNodes !== undefined) {
+    desktopPatch.renderMaxNodes = settings.renderMaxNodes;
+  }
+
   if (isDesktopRuntime()) {
     try {
       await invokeDesktop("set_repo_settings", {
         name,
-        settings: {
-          embeddingsEnabled: settings.embeddingsEnabled,
-          renderMaxNodes: settings.renderMaxNodes,
-        },
+        settings: desktopPatch,
       });
       return;
     } catch (e) {
       throw asDesktopError(e, "设置失败");
     }
   }
-  await postJson(`/api/repos/${encodeURIComponent(name)}/settings`, {
-    embeddings_enabled: settings.embeddingsEnabled,
-    render_max_nodes: settings.renderMaxNodes,
-  });
+  const httpPatch: {
+    embeddings_enabled?: boolean;
+    description?: string | null;
+    render_max_nodes?: number | null;
+  } = {};
+  if (settings.embeddingsEnabled !== undefined) {
+    httpPatch.embeddings_enabled = settings.embeddingsEnabled;
+  }
+  if (settings.description !== undefined) {
+    httpPatch.description = settings.description;
+  }
+  if (settings.renderMaxNodes !== undefined) {
+    httpPatch.render_max_nodes = settings.renderMaxNodes;
+  }
+  await postJson(`/api/repos/${encodeURIComponent(name)}/settings`, httpPatch);
 }
 
 export interface AppSettings {
