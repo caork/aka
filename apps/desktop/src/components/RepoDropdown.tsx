@@ -4,7 +4,6 @@ import { compactIndexStatus } from "../index-log";
 import { useAppStore } from "../store";
 import AppSettingsModal from "./AppSettingsModal";
 import ImportRepoModal from "./ImportRepoModal";
-import RepoSettingsModal from "./RepoSettingsModal";
 
 const spring = { type: "spring", stiffness: 320, damping: 30 } as const;
 
@@ -15,12 +14,7 @@ export default function RepoDropdown() {
   const [open, setOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
-  const [settingsRepoId, setSettingsRepoId] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const settingsRepo = settingsRepoId
-    ? (repos.find((r) => r.id === settingsRepoId) ?? null)
-    : null;
 
   const enter = () => {
     if (timer.current) clearTimeout(timer.current);
@@ -115,7 +109,7 @@ export default function RepoDropdown() {
                         setOpen(false);
                       }
                     }}
-                    className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-[10px] px-3 py-2 text-left transition-colors duration-100 hover:bg-[var(--hover-fill)]"
+                    className="relative flex w-full cursor-pointer items-center gap-2.5 rounded-[10px] px-3 py-2 text-left transition-colors duration-100 hover:bg-[var(--hover-fill)]"
                     style={{
                       background: active ? "var(--accent-fill)" : undefined,
                     }}
@@ -144,18 +138,6 @@ export default function RepoDropdown() {
                               : `${repo.symbols.toLocaleString()} symbols`}
                       </span>
                     </span>
-                    <button
-                      aria-label={`${repo.name} settings`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSettingsRepoId(repo.id);
-                        setOpen(false);
-                      }}
-                      className="focus-ring absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[7px] text-ink-3 opacity-0 transition-all duration-150 hover:bg-[var(--hover-fill-strong)] hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
-                      style={{ background: "var(--glass-bg-strong)" }}
-                    >
-                      <GearIcon size={13} />
-                    </button>
                   </motion.div>
                 );
               })}
@@ -182,7 +164,6 @@ export default function RepoDropdown() {
         open={appSettingsOpen}
         onClose={() => setAppSettingsOpen(false)}
       />
-      <RepoSettingsModal repo={settingsRepo} onClose={() => setSettingsRepoId(null)} />
     </div>
   );
 }
@@ -195,21 +176,6 @@ function PlusIcon() {
         stroke="currentColor"
         strokeWidth="2.2"
         strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function GearIcon({ size = 15 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" stroke="currentColor" strokeWidth="1.7" />
-      <path
-        d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-        strokeLinejoin="round"
       />
     </svg>
   );

@@ -28,6 +28,7 @@ import { clearAppData, getAppSettings, setAppSettings } from "../repo-api";
 import { useAppStore } from "../store";
 import type { ThemeMode } from "../theme";
 import { ErrorBar } from "./Modal";
+import { RepoSettingsPanel } from "./RepoSettingsModal";
 
 const THEME_OPTIONS: { id: ThemeMode; label: string }[] = [
   { id: "light", label: "Light" },
@@ -54,6 +55,7 @@ const OSS_ANALYZERS = [
 
 const SETTINGS_NAV = [
   { id: "appearance", label: "Appearance", detail: "Display" },
+  { id: "repos", label: "Repositories", detail: "Per repo" },
   { id: "indexing", label: "Indexing", detail: "Timeouts" },
   { id: "updates", label: "Updates", detail: "Release" },
   { id: "plugins", label: "Agent plugins", detail: "Clients" },
@@ -143,10 +145,14 @@ export default function AppSettingsModal({
 }) {
   const themeMode = useAppStore((s) => s.themeMode);
   const setThemeMode = useAppStore((s) => s.setThemeMode);
+  const repos = useAppStore((s) => s.repos);
+  const selectedRepoId = useAppStore((s) => s.selectedRepoId);
+  const selectRepo = useAppStore((s) => s.selectRepo);
   const resetRepos = useAppStore((s) => s.resetRepos);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const sectionRefs = useRef<Record<SettingsSectionId, HTMLElement | null>>({
     appearance: null,
+    repos: null,
     indexing: null,
     updates: null,
     plugins: null,
@@ -196,6 +202,8 @@ export default function AppSettingsModal({
   const [copiedClientCommand, setCopiedClientCommand] = useState<string | null>(
     null,
   );
+  const repoSettingsRepo =
+    repos.find((repo) => repo.id === selectedRepoId) ?? repos[0] ?? null;
 
   useEffect(() => {
     if (!open) return;
@@ -716,6 +724,120 @@ export default function AppSettingsModal({
                         })}
                       </div>
                     </div>
+                  </section>
+
+                  <section
+                    ref={setSectionRef("repos")}
+                    className="scroll-mt-4 rounded-[14px] p-4"
+                    style={sectionPanelStyle}
+                    data-testid="settings-repositories-section"
+                  >
+                    <div className="mb-3">
+                      <div className="text-[13px] font-medium text-ink">
+                        Repositories
+                      </div>
+                      <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-3">
+                        统一调整每个仓库的 agent 说明、索引更新和渲染预算。
+                      </div>
+                    </div>
+
+                    {repos.length === 0 ? (
+                      <div
+                        className="rounded-[12px] px-3 py-8 text-center text-[12.5px] text-ink-3"
+                        style={{
+                          background: "var(--subtle-fill-2)",
+                          boxShadow: "inset 0 0 0 0.5px var(--hairline)",
+                        }}
+                      >
+                        No repositories yet
+                      </div>
+                    ) : (
+                      <div className="grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)]">
+                        <div
+                          className="scroll-area max-h-[520px] rounded-[12px] p-1"
+                          style={{
+                            background: "var(--subtle-fill)",
+                            boxShadow: "inset 0 0 0 0.5px var(--hairline)",
+                          }}
+                          data-testid="settings-repo-list"
+                        >
+                          {repos.map((repo) => {
+                            const active = repo.id === repoSettingsRepo?.id;
+                            return (
+                              <button
+                                key={repo.id}
+                                type="button"
+                                onClick={() => selectRepo(repo.id)}
+                                className="focus-ring flex w-full min-w-0 items-center gap-2 rounded-[10px] px-2.5 py-2 text-left transition-colors duration-150 ease-out"
+                                style={{
+                                  background: active
+                                    ? "var(--popover-bg)"
+                                    : "transparent",
+                                  boxShadow: active
+                                    ? "var(--shadow-float)"
+                                    : "none",
+                                }}
+                                data-testid={`settings-repo-select-${repo.id}`}
+                              >
+                                <span className={`beacon ${repo.status}`} />
+                                <span className="min-w-0 flex-1">
+                                  <span
+                                    className="block truncate text-[12.5px] font-semibold"
+                                    style={{
+                                      color: active
+                                        ? "var(--accent)"
+                                        : "var(--ink)",
+                                    }}
+                                  >
+                                    {repo.name}
+                                  </span>
+                                  <span className="block truncate text-[10.5px] text-ink-3">
+                                    {repo.source.kind}
+                                    {repo.description ? " · described" : ""}
+                                  </span>
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="min-w-0">
+                          {repoSettingsRepo && (
+                            <div className="mb-3 flex items-center gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate text-[13px] font-semibold text-ink">
+                                  {repoSettingsRepo.name}
+                                </div>
+                                <div
+                                  className="mono mt-0.5 truncate text-[10.5px] text-ink-3"
+                                  title={
+                                    repoSettingsRepo.source.kind === "git"
+                                      ? (repoSettingsRepo.source.url ??
+                                        "git repository")
+                                      : repoSettingsRepo.source.kind === "zip"
+                                        ? "zip import"
+                                        : repoSettingsRepo.path
+                                  }
+                                >
+                                  {repoSettingsRepo.source.kind === "git"
+                                    ? (repoSettingsRepo.source.url ??
+                                      "git repository")
+                                    : repoSettingsRepo.source.kind === "zip"
+                                      ? "zip import"
+                                      : repoSettingsRepo.path}
+                                </div>
+                              </div>
+                              <span
+                                className="rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-2"
+                                style={{ background: "var(--subtle-fill)" }}
+                              >
+                                {repoSettingsRepo.source.kind}
+                              </span>
+                            </div>
+                          )}
+                          <RepoSettingsPanel repo={repoSettingsRepo} />
+                        </div>
+                      </div>
+                    )}
                   </section>
 
                   <section

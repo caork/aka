@@ -17,7 +17,7 @@ import {
   useAppStore,
   type Repo,
 } from "../store";
-import Modal, { ErrorBar } from "./Modal";
+import { ErrorBar } from "./Modal";
 
 function clampRender(n: number): number {
   if (!Number.isFinite(n)) return RENDER_MAX_DEFAULT;
@@ -25,12 +25,12 @@ function clampRender(n: number): number {
 }
 
 /** 每仓库设置：embeddings 开关 / 图渲染节点上限 / 更新重建 / 移除。 */
-export default function RepoSettingsModal({
+export function RepoSettingsPanel({
   repo,
-  onClose,
+  onDeleted,
 }: {
   repo: Repo | null;
-  onClose(): void;
+  onDeleted?(): void;
 }) {
   const [embeddings, setEmbeddings] = useState(false);
   const [descriptionDraft, setDescriptionDraft] = useState("");
@@ -56,7 +56,20 @@ export default function RepoSettingsModal({
     setConfirmDelete(false);
   }, [repo?.id, repo?.embeddings, repo?.description, repo?.renderMaxNodes]);
 
-  if (!repo) return <Modal open={false} onClose={onClose} title="" children={null} />;
+  if (!repo) {
+    return (
+      <div
+        className="rounded-[12px] px-3 py-8 text-center text-[12.5px] text-ink-3"
+        style={{
+          background: "var(--subtle-fill-2)",
+          boxShadow: "inset 0 0 0 0.5px var(--hairline)",
+        }}
+        data-testid="repo-settings-empty"
+      >
+        No repository selected
+      </div>
+    );
+  }
 
   const fail = (e: unknown, fallback: string) => {
     setError(e instanceof Error ? e.message : fallback);
@@ -201,7 +214,7 @@ export default function RepoSettingsModal({
     try {
       await deleteRepo(repo.name);
       /* 若删的是当前选中仓库，refreshRepos 会自动回落到首个仓库 */
-      onClose();
+      onDeleted?.();
       void refreshRepos();
     } catch (e) {
       setBusy("");
@@ -229,21 +242,7 @@ export default function RepoSettingsModal({
   };
 
   return (
-    <Modal
-      open
-      onClose={onClose}
-      title={
-        <span className="flex items-center gap-2">
-          <span className="truncate">{repo.name}</span>
-          <span
-            className="rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-2"
-            style={{ background: "var(--subtle-fill)" }}
-          >
-            {repo.source.kind}
-          </span>
-        </span>
-      }
-    >
+    <div data-testid="repo-settings-panel">
       {error && <ErrorBar message={error} />}
       {notice && (
         <div
@@ -486,7 +485,7 @@ export default function RepoSettingsModal({
           </button>
         )}
       </div>
-    </Modal>
+    </div>
   );
 }
 
