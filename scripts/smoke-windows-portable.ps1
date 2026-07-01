@@ -233,6 +233,29 @@ try {
     Wait-TcpPort -HostName "127.0.0.1" -Port 4112 -TimeoutSeconds 45
     Write-Host "aka smoke: MCP port ready"
 
+    Write-Host "aka smoke: client integration resources"
+    $clientIntegrationsRoot = Join-Path $env:APPDATA "com.aka.desktop\bundled-client-integrations"
+    $clientIntegrationsDir = Get-ChildItem -Directory $clientIntegrationsRoot -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if (!$clientIntegrationsDir) {
+        throw "desktop did not materialize bundled client integrations under $clientIntegrationsRoot`nDesktop log:`n$(Get-DesktopLogTail)"
+    }
+    foreach ($rel in @(
+        "claude-code\.claude-plugin\plugin.json",
+        "claude-code\.mcp.json",
+        "claude-code\skills\aka-code-graph\SKILL.md",
+        "codex\config.toml.snippet",
+        "opencode\opencode.json.snippet",
+        "opencode\plugins\aka.js",
+        "opencode\skills\aka-code-graph\SKILL.md"
+    )) {
+        $path = Join-Path $clientIntegrationsDir.FullName $rel
+        if (!(Test-Path $path)) {
+            throw "bundled client integration resource missing: $path"
+        }
+    }
+
     Write-Host "aka smoke: MCP initialize"
     $init = Invoke-McpRaw -Body @{
         jsonrpc = "2.0"
@@ -306,6 +329,9 @@ try {
     if ($logTail -notmatch "source=embedded-dll") {
         throw "desktop log did not show Windows direct-facts embedded DLL path"
     }
+    if ($logTail -notmatch "desktop client integrations dir=.*source=embedded-files") {
+        throw "desktop log did not show bundled client integrations materialization"
+    }
     if ($logTail -match "falling back to binary engine") {
         throw "desktop log shows binary engine fallback"
     }
@@ -314,6 +340,7 @@ try {
         ok = $true
         portableDir = $portable
         productShape = "single AKA.exe with materialized embedded engine DLL"
+        clientIntegrationsDir = $clientIntegrationsDir.FullName
         repo = $repoName
         repoPath = $repo
         akaHome = $akaHome

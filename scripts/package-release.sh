@@ -341,6 +341,24 @@ assert_windows_exe_embeds_engine() {
   echo "==> 校验 Windows AKA.exe 已内置 engine 资源: exe=${exe_size} embedded_engine=${embedded_size}"
 }
 
+assert_windows_exe_embeds_client_integrations() {
+  local exe_path marker
+  exe_path="$1"
+  assert_engine_file_nonempty "${exe_path}"
+  for marker in \
+    "aka OpenCode plugin loaded" \
+    "name: aka-code-graph" \
+    "[mcp_servers.aka]"
+  do
+    if ! grep -a -q -F "${marker}" "${exe_path}"; then
+      echo "error: Windows AKA.exe 未包含内置客户端集成资源: ${marker}" >&2
+      echo "       portable 用户形态是单文件 AKA.exe，Agent plugins 检测/安装不能依赖外置 clients/ 目录。" >&2
+      return 1
+    fi
+  done
+  echo "==> 校验 Windows AKA.exe 已内置客户端集成资源"
+}
+
 assert_no_legacy_engine_resource_binaries() {
   local platform dir legacy_name legacy_path
   platform="$1"
@@ -952,6 +970,7 @@ package_windows_desktop() {
     "${exe_path}" \
     "${TAURI_RESOURCES_DIR}/engine/ENGINE_SHA" \
     "${TAURI_RESOURCES_DIR}/engine/aka_engine.dll"
+  assert_windows_exe_embeds_client_integrations "${exe_path}"
 
   setup_src="$(find "${REPO_ROOT}/apps/desktop/src-tauri/target/${win_triple}/release/bundle/nsis" -maxdepth 1 -type f -name "*${VERSION}*setup.exe" | sort | tail -n 1 || true)"
   if [[ -z "${setup_src}" ]]; then

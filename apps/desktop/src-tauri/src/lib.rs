@@ -27,6 +27,9 @@ const APP_DATA_DIR_NAME: &str = "com.aka.desktop";
 const DESKTOP_MCP_ADDR: &str = "127.0.0.1:4112";
 const DESKTOP_LOG_FILE_NAME: &str = "aka-desktop.log";
 const CLIENT_INTEGRATIONS_RESOURCE: &str = "client-integrations/clients";
+static EMBEDDED_FILE_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+include!(concat!(env!("OUT_DIR"), "/embedded_client_integrations.rs"));
 
 #[cfg(all(target_os = "windows", feature = "embedded-engine"))]
 const EMBEDDED_AKA_ENGINE_DLL: &[u8] = include_bytes!(concat!(
@@ -172,6 +175,60 @@ fn materialize_embedded_resource(
     Ok(path)
 }
 
+fn materialize_embedded_client_integrations(
+    app_data_dir: &std::path::Path,
+) -> anyhow::Result<PathBuf> {
+    let clients_dir = app_data_dir
+        .join("bundled-client-integrations")
+        .join(env!("CARGO_PKG_VERSION"));
+    for (relative_path, bytes) in EMBEDDED_CLIENT_INTEGRATION_FILES {
+        materialize_embedded_file(&clients_dir, relative_path, bytes)?;
+    }
+    log_desktop_event(format!(
+        "desktop client integrations dir={} source=embedded-files files={}",
+        clients_dir.display(),
+        EMBEDDED_CLIENT_INTEGRATION_FILES.len()
+    ));
+    Ok(clients_dir)
+}
+
+fn materialize_embedded_file(
+    root: &std::path::Path,
+    relative_path: &str,
+    bytes: &[u8],
+) -> anyhow::Result<PathBuf> {
+    let rel = std::path::Path::new(relative_path);
+    if rel.is_absolute()
+        || rel
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        anyhow::bail!("invalid embedded client integration path: {relative_path}");
+    }
+    let path = root.join(rel);
+    let needs_write = match std::fs::read(&path) {
+        Ok(existing) => existing != bytes,
+        Err(_) => true,
+    };
+    if needs_write {
+        let Some(parent) = path.parent() else {
+            anyhow::bail!("embedded client integration path has no parent: {relative_path}");
+        };
+        std::fs::create_dir_all(parent)?;
+        let tmp = path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            EMBEDDED_FILE_WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path).or_else(|rename_err| {
+            let _ = std::fs::remove_file(&path);
+            std::fs::rename(&tmp, &path).map_err(|_| rename_err)
+        })?;
+    }
+    Ok(path)
+}
+
 #[derive(Debug, Deserialize)]
 struct ImportRequest {
     kind: String,
@@ -274,6 +331,15 @@ fn client_integrations_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
         }
     }
 
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| fallback_app_data_dir());
+    match materialize_embedded_client_integrations(&app_data_dir) {
+        Ok(path) => return Some(path),
+        Err(e) => log_desktop_event(format!("client integrations materialization failed: {e:#}")),
+    }
+
     let repo_clients_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -332,6 +398,9 @@ fn configure_desktop_runtime(app: &tauri::App) -> anyhow::Result<AkaBackend> {
     let aka_home = app_data_dir.join(AKA_HOME_DIR_NAME);
     std::fs::create_dir_all(&aka_home)?;
     std::env::set_var("AKA_HOME", &aka_home);
+    if let Err(e) = materialize_embedded_client_integrations(&app_data_dir) {
+        log_desktop_event(format!("client integrations materialization failed: {e:#}"));
+    }
 
     configure_backend(app, &app_data_dir)
 }
@@ -840,5 +909,38 @@ pub fn run() {
             "fatal: error while running tauri application: {e:#}"
         ));
         panic!("error while running tauri application: {e:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materializes_embedded_client_integrations() {
+        let root = std::env::temp_dir().join(format!(
+            "aka-desktop-client-integrations-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let clients = materialize_embedded_client_integrations(&root).unwrap();
+        for rel in [
+            "claude-code/.claude-plugin/plugin.json",
+            "claude-code/.mcp.json",
+            "claude-code/skills/aka-code-graph/SKILL.md",
+            "codex/config.toml.snippet",
+            "opencode/opencode.json.snippet",
+            "opencode/plugins/aka.js",
+            "opencode/skills/aka-code-graph/SKILL.md",
+        ] {
+            assert!(clients.join(rel).exists(), "missing {rel}");
+        }
+
+        let opencode_plugin = std::fs::read_to_string(clients.join("opencode/plugins/aka.js"))
+            .expect("opencode plugin is readable");
+        assert!(opencode_plugin.contains("aka OpenCode plugin loaded"));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
