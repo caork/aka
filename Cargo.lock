@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aka-cli"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "aka-core",
  "aka-graph",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "aka-core"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "aka-facts",
  "chrono",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "aka-facts"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "protobuf",
  "scip",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "aka-graph"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "aka-core",
  "rayon",
@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "aka-mcp"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "aka-core",
  "anyhow",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "aka-search"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "aka-core",
  "fastrand",
@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "aka-server"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "aka-core",
  "aka-mcp",
